@@ -1,0 +1,8 @@
+discord.py
+yt_dlp
+flask
+pyngrok==7.2.1
+python-dotenv
+google-generativeai
+aiohttp
+Pillow
