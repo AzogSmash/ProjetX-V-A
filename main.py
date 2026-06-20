@@ -594,7 +594,7 @@ bot.remove_command("help")
 # ── Usages des commandes (pour les messages d'erreur) ────────────────────
 COMMAND_USAGE = {
     'coins':         '`!coins` — Voir votre solde\n`!coins @membre` — Voir le solde d\'un autre',
-    'give':          '`!give @membre <montant>`\nEx : `!give @Ami 1000`',
+    'give':          '`!give @membre <montant|all>`\nEx : `!give @Ami 1000` · `!give @Ami all`',
     'roulette':      '`!roulette <mise|all> <choix>`\nChoix : `rouge` `noir` `pair` `impair` ou un numéro `0-36`\nEx : `!roulette 200 rouge` · `!roulette all 15`',
     'slots':         '`!slots <mise|all>`\nEx : `!slots 150` · `!slots all`',
     'bj':            '`!bj <mise|all>` — Démarrer une partie (jouez ensuite avec les boutons)\nEx : `!bj 100` · `!bj all`',
@@ -607,7 +607,7 @@ COMMAND_USAGE = {
     'graphique':     '`!graphique <SYM>`\nSymboles disponibles : `BTC` `ETH` `DOGE` `SOL` `XRP`\nEx : `!graphique BTC`',
     'chart':         '`!graphique <SYM>` — Ex : `!graphique ETH`',
     'courbe':        '`!graphique <SYM>` — Ex : `!graphique DOGE`',
-    'acheter_crypto':'`!acheter_crypto <SYM> <coins à dépenser>`\nEx : `!acheter_crypto BTC 1000`',
+    'acheter_crypto':'`!acheter_crypto <SYM> <coins|all>`\nEx : `!acheter_crypto BTC 1000` · `!acheter_crypto BTC all`',
     'vendre_crypto': '`!vendre_crypto <SYM> <quantité|all>`\nEx : `!vendre_crypto ETH 0.5` · `!vendre_crypto BTC all`',
     'choisir_metier':'`!choisir_metier <metier>`\nMétiers : `hacker` `mineur` `escroc` `gardien` `trader`',
     'hacker':        '`!hacker @membre` — Voler la crypto d\'un joueur\n*(Réservé au métier Hacker)*',
@@ -695,7 +695,7 @@ def _build_help_categories(ctx):
                  "`!daily` — 500 coins/jour\n"
                  "`!travail` — Travailler (cooldown 1h)\n"
                  "`!risque` — Coup risqué x2 ou rien *(cooldown 3h)*\n"
-                 "`!give @membre <montant>` — Donner des coins\n"
+                 "`!give @membre <montant|all>` — Donner des coins\n"
                  "`!coffre` — Coffre-fort (boutons Déposer/Retirer)\n"
                  "`!rob @membre` — Voler le cash (55% réussite · cooldown 12h)\n"
                  "`!classement` — Top 10 des plus riches"))
@@ -714,7 +714,7 @@ def _build_help_categories(ctx):
                  "Achat / vente / graphique",
                  "`!crypto` — Prix en temps réel\n"
                  "`!graphique <SYM>` — Sparkline\n"
-                 "`!acheter_crypto <SYM> <coins>` — Acheter\n"
+                 "`!acheter_crypto <SYM> <coins|all>` — Acheter\n"
                  "`!vendre_crypto <SYM> <quantité|all>` — Vendre"))
     cats.append(("metiers", "💼 Métiers & Actions",
                  "Hacker, mineur, escroc, gardien, trader",
@@ -2453,13 +2453,22 @@ async def cmd_risque(ctx):
 
 
 @bot.command(name="give")
-async def cmd_give(ctx, member: discord.Member, amount: int):
+async def cmd_give(ctx, member: discord.Member, amount: str):
+    bal = coins[ctx.author.id]
+    raw = str(amount).strip().lower()
+    if raw in ('all', 'tout'):
+        amount = bal
+    else:
+        try:
+            amount = int(raw)
+        except ValueError:
+            await ctx.send("❌ Montant invalide. Entrez un nombre ou `all`."); return
     if amount <= 0:
         await ctx.send("❌ Le montant doit être supérieur à 0."); return
     if member.id == ctx.author.id:
         await ctx.send("❌ Vous ne pouvez pas vous envoyer des coins à vous-même."); return
-    if coins[ctx.author.id] < amount:
-        await ctx.send(f"❌ Pas assez de coins. Solde : **{coins[ctx.author.id]:,} coins**"); return
+    if bal < amount:
+        await ctx.send(f"❌ Pas assez de coins. Solde : **{bal:,} coins**"); return
     coins[ctx.author.id] -= amount
     coins[member.id]      += amount
     save_data()
@@ -3681,14 +3690,23 @@ async def cmd_graphique(ctx, symbol: str = None):
     await ctx.send(embed=embed)
 
 @bot.command(name="acheter_crypto")
-async def cmd_acheter_crypto(ctx, symbol: str, montant: int):
+async def cmd_acheter_crypto(ctx, symbol: str, montant: str):
     symbol = symbol.upper()
     if symbol not in CRYPTO_SYMBOLS:
         return await ctx.send(f"❌ Symbole invalide. Disponibles : {', '.join(CRYPTO_SYMBOLS)}")
+    bal = coins[ctx.author.id]
+    raw = str(montant).strip().lower()
+    if raw in ('all', 'tout'):
+        montant = bal
+    else:
+        try:
+            montant = int(raw)
+        except ValueError:
+            return await ctx.send("❌ Montant invalide. Entrez un nombre ou `all`.")
     if montant <= 0:
         return await ctx.send("❌ Montant invalide.")
-    if coins[ctx.author.id] < montant:
-        return await ctx.send(f"❌ Pas assez de coins. Solde : **{coins[ctx.author.id]:,} coins**")
+    if bal < montant:
+        return await ctx.send(f"❌ Pas assez de coins. Solde : **{bal:,} coins**")
     price = crypto_prices[symbol]
     qty   = montant / price
     coins[ctx.author.id] -= montant
