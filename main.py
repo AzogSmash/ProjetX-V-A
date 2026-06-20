@@ -51,7 +51,7 @@ CRYPTO_DISPLAY = {
 }
 CRYPTO_SYMBOLS = list(CRYPTO_BASE.keys())
 # Salon où poster les news crypto (pumps/dumps). 0 = désactivé.
-NEWS_CRYPTO_CHANNEL_ID = 0
+NEWS_CRYPTO_CHANNEL_ID = 1517799380999078020
 CRYPTO_NEWS_UP = [
     "🚀 {name} s'envole ! Une grande institution vient d'investir massivement.",
     "📈 {name} en plein boom : l'adoption explose chez les commerçants.",
