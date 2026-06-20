@@ -3447,9 +3447,10 @@ async def update_crypto_prices():
         #    une hausse/baisse a tendance à se prolonger sur plusieurs ticks.
         trend = crypto_trends.get(s, 0.0) * 0.85 + random.gauss(0, vol * 0.5)
 
-        # 2) Évènement "news" rare et irrégulier (~1.2% par crypto par tick) :
+        # 2) Évènement "news" rare et irrégulier (~0.2% par crypto par tick,
+        #    soit en moyenne une news toutes les ~2-3h, à intervalles aléatoires) :
         #    choc marqué qui lance une vraie tendance haussière ou baissière.
-        if random.random() < 0.012:
+        if random.random() < 0.002:
             shock  = random.gauss(0, vol * 4)
             trend += shock
             news.append((s, 'up' if shock >= 0 else 'down', price))
