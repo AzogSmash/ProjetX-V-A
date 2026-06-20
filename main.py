@@ -6552,8 +6552,6 @@ async def cmd_profil(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 
-# ── Réputation ───────────────────────────────────────────────────────────
-
 # ── Anniversaires ────────────────────────────────────────────────────────
 @bot.command(name="anniversaire", aliases=["birthday", "anniv"])
 async def cmd_anniversaire(ctx, date: str = None):
