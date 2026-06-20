@@ -289,8 +289,8 @@ def _team_of(user_id):
     tid = _user_team_id(user_id)
     return teams.get(tid) if tid else None
 
-# Nom du fichier de données
-DATA_FILE = 'data.json'
+# Nom du fichier de données — sur Railway, monté via Volume sur /data
+DATA_FILE = os.environ.get('DATA_FILE', '/data/data.json' if os.path.isdir('/data') else 'data.json')
 
 # --- Fonctions de chargement et de sauvegarde des données ---
 def load_data():
