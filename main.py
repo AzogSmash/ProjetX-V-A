@@ -4856,7 +4856,7 @@ class ScratchView(discord.ui.View):
         return callback
 
 
-@bot.command(name="kabdlzhdl", aliases=["scratch"])
+@bot.command(name="kabdlzhdl", aliases=["scratch", "gratter"])
 async def cmd_gratter(ctx):
     uid = str(ctx.author.id)
     if owned_items.get(uid, {}).get('4', 0) <= 0:
