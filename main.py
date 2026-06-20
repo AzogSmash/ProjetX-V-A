@@ -84,6 +84,9 @@ SCRATCH_PRIZES = {
 
 crypto_prices    = dict(CRYPTO_BASE)
 price_history    = {}   # str(symbol) -> [float, ...]  (30 derniers points)
+crypto_trends    = {}   # str(symbol) -> float  (tendance/momentum courant)
+# Volatilité propre à chaque crypto (écart-type du bruit par tick)
+CRYPTO_VOL = {'BTC': 0.012, 'ETH': 0.018, 'SOL': 0.025, 'XRP': 0.030, 'DOGE': 0.045}
 crypto_holdings  = {}   # str(uid) -> {symbol: float}
 safes            = {}   # str(uid) -> int
 factories        = {}   # str(uid) -> {'workers': int, 'last': ISO, 'upgraded': bool}
@@ -178,7 +181,7 @@ DATA_FILE = 'data.json'
 # --- Fonctions de chargement et de sauvegarde des données ---
 def load_data():
     global warns, mutes, silenced_users, coins, giveaway_data, daily_cooldowns, work_cooldowns
-    global crypto_prices, price_history, crypto_holdings, safes, factories, jobs_data, owned_items
+    global crypto_prices, price_history, crypto_trends, crypto_holdings, safes, factories, jobs_data, owned_items
     global theft_cooldowns, miner_cooldowns, hacker_cooldowns, risque_cooldowns, rob_cooldowns
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms
@@ -230,6 +233,7 @@ def load_data():
                 work_cooldowns   = data.get('work_cooldowns', {})
                 crypto_prices    = data.get('crypto_prices', dict(CRYPTO_BASE))
                 price_history    = data.get('price_history', {})
+                crypto_trends    = data.get('crypto_trends', {})
                 crypto_holdings  = data.get('crypto_holdings', {})
                 safes            = data.get('safes', {})
                 factories        = data.get('factories', {})
@@ -312,6 +316,7 @@ def save_data():
     data_to_save['work_cooldowns']   = work_cooldowns
     data_to_save['crypto_prices']    = crypto_prices
     data_to_save['price_history']    = price_history
+    data_to_save['crypto_trends']    = crypto_trends
     data_to_save['crypto_holdings']  = crypto_holdings
     data_to_save['safes']            = safes
     data_to_save['factories']        = factories
@@ -3311,10 +3316,37 @@ def _race_odds(idx: int) -> float:
 
 @tasks.loop(seconds=90)
 async def update_crypto_prices():
+    """Modèle de marché simulé : momentum (tendances), retour à la moyenne,
+    volatilité propre à chaque crypto et 'news' occasionnelles (pumps/dumps)."""
     for s in CRYPTO_SYMBOLS:
-        change    = random.uniform(-0.06, 0.06)
-        new_price = max(1, round(crypto_prices[s] * (1 + change), 2))
+        price = crypto_prices[s]
+        base  = CRYPTO_BASE[s]
+        vol   = CRYPTO_VOL.get(s, 0.02)
+
+        # 1) Tendance persistante (momentum) — processus AR(1) :
+        #    une hausse/baisse a tendance à se prolonger sur plusieurs ticks.
+        trend = crypto_trends.get(s, 0.0) * 0.85 + random.gauss(0, vol * 0.5)
+
+        # 2) Évènement "news" rare (~3% par tick) : choc marqué qui lance
+        #    une vraie tendance haussière ou baissière.
+        if random.random() < 0.03:
+            trend += random.gauss(0, vol * 4)
+
+        # 3) Retour à la moyenne : le prix est doucement ramené vers sa base,
+        #    d'autant plus fort qu'il s'en est éloigné.
+        reversion = 0.02 * (base - price) / base
+
+        # 4) Bruit de marché aléatoire de faible amplitude.
+        noise = random.gauss(0, vol)
+
+        change    = trend + reversion + noise
+        new_price = price * (1 + change)
+
+        # Bornes : on évite 0 et les valeurs absurdes (entre 20% et 500% de la base).
+        new_price = round(max(base * 0.2, min(base * 5, new_price)), 2)
+
         crypto_prices[s] = new_price
+        crypto_trends[s] = trend
         hist = price_history.setdefault(s, [])
         hist.append(new_price)
         if len(hist) > 30:
