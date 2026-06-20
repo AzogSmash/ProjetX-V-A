@@ -624,10 +624,11 @@ def _build_help_categories(ctx):
                  "Créer ou rejoindre un club de joueurs",
                  "`!team` — Interface du club (créer / rejoindre / quitter / trésorerie)"))
     cats.append(("tournoi", "🏆 Tournois",
-                 "Tournois solo ou par équipes",
-                 "`!tournoi solo` ou `!tournoi <n>` *(Admin)*\n"
+                 "Tournois solo ou par équipes (2v2 / 4v4 / 5v5)",
+                 "`!tournoi solo` · `!tournoi 2v2` · `4v4` · `5v5` *(Admin)*\n"
                  "`!tournoi_status` — Voir le bracket\n"
-                 "*(Admin)* `!win <n°>` — Déclarer un vainqueur"))
+                 "Résultat : **les 2 capitaines** valident le même vainqueur\n"
+                 "*(Admin)* `!win <n°>` — Trancher un match"))
 
     if has_manage_messages or has_ban_members:
         lines = []
@@ -5345,21 +5346,43 @@ def _generate_round_matches(idxs: list, next_id: int):
 def _round_done(matches):
     return all(m['winner'] is not None for m in matches)
 
+def _team_size(t):
+    return t.get('team_size', 1)
+
+def _mode_label(t):
+    ts = _team_size(t)
+    return "Solo (1v1)" if ts == 1 else f"Équipes ({ts}v{ts})"
+
+def _p_members(p):
+    return p.get('members') or [p['captain']]
+
+def _team_full(t, p):
+    return len(_p_members(p)) >= _team_size(t)
+
 def _build_tournament_embed(t, gid):
-    mode_str   = "Solo" if t['mode'] == 'solo' else f"Équipes ({t.get('n_teams','?')})"
     status_map = {'registering': '📋 Inscriptions ouvertes', 'active': '⚔️ En cours', 'finished': '✅ Terminé'}
+    ts = _team_size(t)
     embed = discord.Embed(
-        title=f"🏆 Tournoi {mode_str}",
+        title=f"🏆 Tournoi {_mode_label(t)}",
         description=(
             f"**Statut :** {status_map.get(t['status'], t['status'])}\n"
             f"**Prix :** {t['prize']:,} coins\n"
-            f"**Participants :** {len(t['participants'])}"
+            f"**{'Équipes' if ts > 1 else 'Joueurs'} :** {len(t['participants'])}"
         ),
         color=0xf39c12
     )
     if t['participants']:
-        lines = [f"{p['idx']+1}. **{p['name']}**" for p in t['participants'][:20]]
-        embed.add_field(name="👥 Inscrits", value='\n'.join(lines), inline=False)
+        lines = []
+        for p in t['participants'][:20]:
+            if ts > 1:
+                members = _p_members(p)
+                full = "✅" if len(members) >= ts else f"⏳ {len(members)}/{ts}"
+                mem_str = ', '.join(f"<@{u}>" for u in members)
+                lines.append(f"{p['idx']+1}. **{p['name']}** [{full}] — {mem_str}")
+            else:
+                lines.append(f"{p['idx']+1}. **{p['name']}**")
+        title = "👥 Équipes inscrites" if ts > 1 else "👥 Inscrits"
+        embed.add_field(name=title, value='\n'.join(lines), inline=False)
     return embed
 
 async def _post_round(guild, t: dict, round_idx: int, gid: str):
@@ -5396,8 +5419,9 @@ async def _post_round(guild, t: dict, round_idx: int, gid: str):
                 description=(
                     f"**{p1['name']}** (<@{p1['captain']}>) **VS** "
                     f"**{p2['name']}** (<@{p2['captain']}>)\n\n"
-                    f"Un capitaine clique son bouton, ou admin : "
-                    f"`!win {m['p1']+1}` / `!win {m['p2']+1}`"
+                    f"⚠️ **Les deux capitaines** doivent cliquer le **même** "
+                    f"vainqueur pour valider le match.\n"
+                    f"*(Admin : `!win {m['p1']+1}` / `!win {m['p2']+1}` pour trancher.)*"
                 ),
                 color=0x9b59b6
             )
@@ -5410,18 +5434,28 @@ async def _advance_tournament(guild, t: dict, gid: str):
     channel = guild.get_channel(t['channel_id'])
     winners = [m['winner'] for m in current]
     if len(winners) == 1:
-        winner = _t_participant(t, winners[0])
-        prize  = t['prize']
-        if winner and prize > 0:
-            coins[winner['captain']] += prize
+        winner  = _t_participant(t, winners[0])
+        prize   = t['prize']
+        members = _p_members(winner) if winner else []
+        prize_line = ""
+        if winner and prize > 0 and members:
+            share = prize // len(members)
+            for m_uid in members:
+                coins[m_uid] += share
             save_data()
+            if len(members) > 1:
+                prize_line = (f"💰 **{prize:,} coins** répartis entre "
+                              f"**{len(members)}** membres (**{share:,}** chacun) !")
+            else:
+                prize_line = f"💰 **{prize:,} coins** versés au vainqueur !"
         t['status'] = 'finished'
+        members_str = ', '.join(f"<@{u}>" for u in members)
         embed = discord.Embed(
             title="🏆 Tournoi terminé — Vainqueur !",
             description=(
                 f"🥇 **{winner['name']}** remporte le tournoi !\n"
-                f"<@{winner['captain']}>\n\n"
-                + (f"💰 **{prize:,} coins** versés au vainqueur !" if prize > 0 else "")
+                f"{members_str}\n\n"
+                + prize_line
             ),
             color=0xf1c40f
         )
@@ -5448,38 +5482,165 @@ async def _advance_tournament(guild, t: dict, gid: str):
 
 # ── Views tournoi ─────────────────────────────────────────────────────────
 
-class TournamentJoinView(discord.ui.View):
-    def __init__(self, guild_id: str):
-        super().__init__(timeout=None)
-        self.guild_id = guild_id
+def _already_registered(t, uid):
+    """L'utilisateur fait-il déjà partie d'une équipe/inscription ?"""
+    for p in t['participants']:
+        if uid in _p_members(p):
+            return True
+    return False
 
-    @discord.ui.button(label="✋ Rejoindre le tournoi", style=discord.ButtonStyle.success,
-                       custom_id="t_join_btn")
-    async def join_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        gid = str(interaction.guild_id)
-        t   = tournaments.get(gid)
-        if not t or t['status'] != 'registering':
-            return await interaction.response.send_message(
-                "❌ Les inscriptions sont fermées.", ephemeral=True)
-        uid = interaction.user.id
-        if any(p['captain'] == uid for p in t['participants']):
-            return await interaction.response.send_message(
-                "❌ Vous êtes déjà inscrit !", ephemeral=True)
-        idx = len(t['participants'])
-        t['participants'].append({
-            'idx': idx, 'captain': uid,
-            'name': interaction.user.display_name,
-        })
+
+class TournamentJoinView(discord.ui.View):
+    def __init__(self, guild_id: str, team_size: int = 1):
+        super().__init__(timeout=None)
+        self.guild_id  = guild_id
+        self.team_size = team_size
+        if team_size == 1:
+            btn = discord.ui.Button(label="✋ Rejoindre le tournoi",
+                                    style=discord.ButtonStyle.success,
+                                    custom_id="t_join_btn")
+            btn.callback = self._solo_join
+            self.add_item(btn)
+        else:
+            create = discord.ui.Button(label="➕ Créer une équipe",
+                                       style=discord.ButtonStyle.success,
+                                       custom_id="t_create_team")
+            create.callback = self._create_team
+            self.add_item(create)
+            join = discord.ui.Button(label="🤝 Rejoindre une équipe",
+                                     style=discord.ButtonStyle.primary,
+                                     custom_id="t_join_team")
+            join.callback = self._join_team
+            self.add_item(join)
+
+    async def _refresh(self, interaction, t, gid):
         embed = _build_tournament_embed(t, gid)
         embed.add_field(
             name="⚙️ Admin",
             value="`!prix_tournoi <montant>` · `!ouverture_tournoi`",
             inline=False
         )
-        await interaction.response.edit_message(embed=embed, view=self)
-        await interaction.followup.send(
+        # Édite le message du tableau (et pas un éventuel message éphémère)
+        board_id = t.get('board_message_id')
+        if board_id and interaction.message and interaction.message.id == board_id:
+            await interaction.message.edit(embed=embed, view=self)
+            return
+        channel = interaction.guild.get_channel(t['channel_id'])
+        if channel and board_id:
+            try:
+                board = await channel.fetch_message(board_id)
+                await board.edit(embed=embed, view=self)
+            except discord.HTTPException:
+                pass
+
+    async def _solo_join(self, interaction: discord.Interaction):
+        gid = str(interaction.guild_id)
+        t   = tournaments.get(gid)
+        if not t or t['status'] != 'registering':
+            return await interaction.response.send_message(
+                "❌ Les inscriptions sont fermées.", ephemeral=True)
+        uid = interaction.user.id
+        if _already_registered(t, uid):
+            return await interaction.response.send_message(
+                "❌ Vous êtes déjà inscrit !", ephemeral=True)
+        idx = len(t['participants'])
+        t['participants'].append({
+            'idx': idx, 'captain': uid,
+            'name': interaction.user.display_name,
+            'members': [uid],
+        })
+        await self._refresh(interaction, t, gid)
+        await interaction.response.send_message(
             f"✅ **{interaction.user.display_name}** a rejoint le tournoi ! "
             f"({len(t['participants'])} inscrit(s))"
+        )
+
+    async def _create_team(self, interaction: discord.Interaction):
+        gid = str(interaction.guild_id)
+        t   = tournaments.get(gid)
+        if not t or t['status'] != 'registering':
+            return await interaction.response.send_message(
+                "❌ Les inscriptions sont fermées.", ephemeral=True)
+        uid = interaction.user.id
+        if _already_registered(t, uid):
+            return await interaction.response.send_message(
+                "❌ Vous faites déjà partie d'une équipe !", ephemeral=True)
+        idx = len(t['participants'])
+        t['participants'].append({
+            'idx': idx, 'captain': uid,
+            'name': f"Équipe {interaction.user.display_name}",
+            'members': [uid],
+        })
+        await self._refresh(interaction, t, gid)
+        await interaction.response.send_message(
+            f"✅ **{interaction.user.display_name}** a créé une équipe "
+            f"(capitaine). Il manque **{self.team_size - 1}** joueur(s)."
+        )
+
+    async def _join_team(self, interaction: discord.Interaction):
+        gid = str(interaction.guild_id)
+        t   = tournaments.get(gid)
+        if not t or t['status'] != 'registering':
+            return await interaction.response.send_message(
+                "❌ Les inscriptions sont fermées.", ephemeral=True)
+        uid = interaction.user.id
+        if _already_registered(t, uid):
+            return await interaction.response.send_message(
+                "❌ Vous faites déjà partie d'une équipe !", ephemeral=True)
+        open_teams = [p for p in t['participants'] if not _team_full(t, p)]
+        if not open_teams:
+            return await interaction.response.send_message(
+                "❌ Aucune équipe disponible. Créez-en une avec **➕ Créer une équipe**.",
+                ephemeral=True)
+        await interaction.response.send_message(
+            "🤝 Choisissez l'équipe à rejoindre :",
+            view=_JoinTeamSelectView(gid, self, open_teams),
+            ephemeral=True
+        )
+
+
+class _JoinTeamSelectView(discord.ui.View):
+    def __init__(self, guild_id, parent_view, open_teams):
+        super().__init__(timeout=120)
+        self.guild_id    = guild_id
+        self.parent_view = parent_view
+        t = tournaments.get(guild_id)
+        ts = _team_size(t) if t else 1
+        options = [
+            discord.SelectOption(
+                label=p['name'][:100],
+                value=str(p['idx']),
+                description=f"{len(_p_members(p))}/{ts} joueurs"
+            )
+            for p in open_teams[:25]
+        ]
+        self.select = discord.ui.Select(placeholder="Choisir une équipe…", options=options)
+        self.select.callback = self._on_pick
+        self.add_item(self.select)
+
+    async def _on_pick(self, interaction: discord.Interaction):
+        gid = str(interaction.guild_id)
+        t   = tournaments.get(gid)
+        if not t or t['status'] != 'registering':
+            return await interaction.response.send_message(
+                "❌ Les inscriptions sont fermées.", ephemeral=True)
+        uid = interaction.user.id
+        if _already_registered(t, uid):
+            return await interaction.response.send_message(
+                "❌ Vous faites déjà partie d'une équipe !", ephemeral=True)
+        idx = int(self.select.values[0])
+        p   = _t_participant(t, idx)
+        if not p or _team_full(t, p):
+            return await interaction.response.send_message(
+                "❌ Cette équipe est introuvable ou déjà complète.", ephemeral=True)
+        p.setdefault('members', [p['captain']]).append(uid)
+        ts        = _team_size(t)
+        remaining = ts - len(_p_members(p))
+        full_txt  = "✅ Équipe complète !" if remaining <= 0 else f"Il manque **{remaining}** joueur(s)."
+        await self.parent_view._refresh(interaction, t, gid)
+        await interaction.response.send_message(
+            f"✅ **{interaction.user.display_name}** a rejoint **{p['name']}** ! {full_txt}",
+            ephemeral=False
         )
 
 
@@ -5505,6 +5666,27 @@ class MatchView(discord.ui.View):
             btn.callback = self._make_cb(idx)
             self.add_item(btn)
 
+    async def _finalize(self, interaction, t, gid, match, winner_idx, by_admin):
+        match['winner'] = winner_idx
+        loser_idx   = self.p2_idx if winner_idx == self.p1_idx else self.p1_idx
+        winner_name = _t_name(t, winner_idx)
+        loser_name  = _t_name(t, loser_idx)
+        for item in self.children:
+            item.disabled = True
+        desc = (f"🏆 **{winner_name}** remporte le match !\n"
+                f"❌ **{loser_name}** est éliminé.")
+        if by_admin:
+            desc += "\n*(résultat tranché par un admin)*"
+        else:
+            desc += "\n*(confirmé par les deux capitaines ✅)*"
+        result_embed = discord.Embed(
+            title=f"✅ Match #{self.match_id} — Résultat",
+            description=desc,
+            color=0x2ecc71
+        )
+        await interaction.response.edit_message(embed=result_embed, view=self)
+        await _advance_tournament(interaction.guild, t, gid)
+
     def _make_cb(self, winner_idx: int):
         async def callback(interaction: discord.Interaction):
             gid = str(interaction.guild_id)
@@ -5517,25 +5699,53 @@ class MatchView(discord.ui.View):
             if not match or match['winner'] is not None:
                 return await interaction.response.send_message(
                     "❌ Ce match est déjà résolu.", ephemeral=True)
-            uid      = interaction.user.id
-            is_admin = interaction.user.guild_permissions.administrator
-            if uid not in (self.p1_cap, self.p2_cap) and not is_admin:
+            uid        = interaction.user.id
+            is_admin   = interaction.user.guild_permissions.administrator
+            is_captain = uid in (self.p1_cap, self.p2_cap)
+            if not is_captain and not is_admin:
                 return await interaction.response.send_message(
                     "❌ Seuls les deux capitaines ou un admin peuvent déclarer le résultat.",
                     ephemeral=True)
-            match['winner'] = winner_idx
-            loser_idx  = self.p2_idx if winner_idx == self.p1_idx else self.p1_idx
-            winner_name = _t_name(t, winner_idx)
-            loser_name  = _t_name(t, loser_idx)
-            for item in self.children:
-                item.disabled = True
-            result_embed = discord.Embed(
-                title=f"✅ Match #{self.match_id} — Résultat",
-                description=f"🏆 **{winner_name}** remporte le match !\n❌ **{loser_name}** est éliminé.",
-                color=0x2ecc71
+
+            # Un admin (non-capitaine) tranche directement
+            if is_admin and not is_captain:
+                return await self._finalize(interaction, t, gid, match, winner_idx, by_admin=True)
+
+            # Vote d'un capitaine
+            votes = match.setdefault('votes', {})
+            votes[uid] = winner_idx
+            c1, c2 = self.p1_cap, self.p2_cap
+
+            # Les deux capitaines se sont prononcés
+            if c1 in votes and c2 in votes:
+                if votes[c1] == votes[c2]:
+                    return await self._finalize(interaction, t, gid, match, votes[c1], by_admin=False)
+                # Désaccord : on réinitialise les votes
+                match['votes'] = {}
+                conflict = discord.Embed(
+                    title=f"⚠️ Match #{self.match_id} — Désaccord !",
+                    description=(
+                        "Les deux capitaines ont désigné des vainqueurs **différents**.\n"
+                        "Les votes ont été réinitialisés — mettez-vous d'accord et recliquez.\n"
+                        "*(Un admin peut trancher avec son bouton ou `!win <n°>`.)*"
+                    ),
+                    color=0xe74c3c
+                )
+                return await interaction.response.edit_message(embed=conflict, view=self)
+
+            # En attente du second capitaine
+            other_cap = c2 if uid == c1 else c1
+            waiting = discord.Embed(
+                title=f"⚔️ Match #{self.match_id} — Vote enregistré",
+                description=(
+                    f"<@{uid}> a voté pour **{_t_name(t, winner_idx)}**.\n"
+                    f"⏳ En attente de la confirmation de <@{other_cap}>…\n\n"
+                    "*Le match sera validé quand les **deux capitaines** auront "
+                    "désigné le **même** vainqueur.*"
+                ),
+                color=0xf39c12
             )
-            await interaction.response.edit_message(embed=result_embed, view=self)
-            await _advance_tournament(interaction.guild, t, gid)
+            await interaction.response.edit_message(embed=waiting, view=self)
         return callback
 
 # ── Commandes tournoi ─────────────────────────────────────────────────────
@@ -5550,22 +5760,27 @@ async def cmd_tournoi(ctx, mode: str = None):
     if mode is None:
         return await ctx.send(
             "❓ **Usage :**\n"
-            "`!tournoi solo` — Tournoi individuel (bouton pour rejoindre)\n"
-            "`!tournoi <nombre>` — Tournoi par équipes (ex : `!tournoi 8`)")
-    if mode.lower() in ('solo', 's'):
-        t_mode, n_teams = 'solo', None
+            "`!tournoi solo` — Tournoi individuel 1v1 (bouton pour rejoindre)\n"
+            "`!tournoi 2v2` — Tournoi par équipes de 2\n"
+            "`!tournoi 4v4` — Tournoi par équipes de 4\n"
+            "`!tournoi 5v5` — Tournoi par équipes de 5")
+    m = mode.lower().strip()
+    # Modes : solo / 2v2 / 4v4 / 5v5 (le 'v' ou 'vs' accepté)
+    if m in ('solo', 's', '1v1', '1vs1'):
+        t_mode, team_size = 'solo', 1
+    elif m in ('2v2', '2vs2'):
+        t_mode, team_size = 'team', 2
+    elif m in ('4v4', '4vs4'):
+        t_mode, team_size = 'team', 4
+    elif m in ('5v5', '5vs5'):
+        t_mode, team_size = 'team', 5
     else:
-        try:
-            n_teams = int(mode)
-            t_mode  = 'team'
-            if n_teams < 2:
-                return await ctx.send("❌ Il faut au moins 2 équipes.")
-        except ValueError:
-            return await ctx.send(
-                "❌ Mode invalide. `!tournoi solo` ou `!tournoi <nombre>`")
+        return await ctx.send(
+            "❌ Mode invalide.\n"
+            "Modes possibles : `solo`, `2v2`, `4v4`, `5v5`.")
 
     tournaments[gid] = {
-        'mode': t_mode, 'n_teams': n_teams, 'prize': 0,
+        'mode': t_mode, 'team_size': team_size, 'prize': 0,
         'status': 'registering', 'host_id': ctx.author.id,
         'channel_id': ctx.channel.id, 'participants': [],
         'rounds': [], 'current_round': 0, 'next_match_id': 1,
@@ -5580,12 +5795,17 @@ async def cmd_tournoi(ctx, mode: str = None):
         ),
         inline=False
     )
-    embed.add_field(
-        name="📋 Inscriptions",
-        value="Cliquez sur le bouton ci-dessous pour rejoindre !",
-        inline=False
-    )
-    await ctx.send(embed=embed, view=TournamentJoinView(gid))
+    if team_size > 1:
+        join_txt = (
+            f"Équipes de **{team_size}** joueurs.\n"
+            "➕ **Créer une équipe** (vous en devenez capitaine)\n"
+            "🤝 **Rejoindre une équipe** existante."
+        )
+    else:
+        join_txt = "Cliquez sur le bouton ci-dessous pour rejoindre !"
+    embed.add_field(name="📋 Inscriptions", value=join_txt, inline=False)
+    board = await ctx.send(embed=embed, view=TournamentJoinView(gid, team_size))
+    t['board_message_id'] = board.id
 
 
 @bot.command(name="prix_tournoi", aliases=["set_prize", "prize_tournoi"])
@@ -5616,9 +5836,25 @@ async def cmd_ouverture_tournoi(ctx):
         return await ctx.send("❌ Aucun tournoi en cours.")
     if t['status'] != 'registering':
         return await ctx.send("❌ Le tournoi est déjà lancé ou terminé.")
+
+    ts = _team_size(t)
+    dropped = []
+    if ts > 1:
+        # On écarte les équipes incomplètes
+        complete = [p for p in t['participants'] if _team_full(t, p)]
+        dropped  = [p for p in t['participants'] if not _team_full(t, p)]
+        if len(complete) < 2:
+            return await ctx.send(
+                f"❌ Il faut au moins **2 équipes complètes** ({ts} joueurs) "
+                f"pour lancer le tournoi.")
+        t['participants'] = complete
+
     if len(t['participants']) < 2:
         return await ctx.send(
             "❌ Il faut au moins **2 participants** pour ouvrir le tableau.")
+    if dropped:
+        names = ', '.join(p['name'] for p in dropped)
+        await ctx.send(f"⚠️ Équipe(s) incomplète(s) écartée(s) : **{names}**.")
     idxs = [p['idx'] for p in t['participants']]
     random.shuffle(idxs)
     round0, t['next_match_id'] = _generate_round_matches(idxs, t['next_match_id'])
