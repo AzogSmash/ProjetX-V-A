@@ -624,8 +624,8 @@ def _build_help_categories(ctx):
                  "Créer ou rejoindre un club de joueurs",
                  "`!team` — Interface du club (créer / rejoindre / quitter / trésorerie)"))
     cats.append(("tournoi", "🏆 Tournois",
-                 "Tournois solo ou par équipes (2v2 / 4v4 / 5v5)",
-                 "`!tournoi solo` · `!tournoi 2v2` · `4v4` · `5v5` *(Admin)*\n"
+                 "Tournois solo ou par équipes (2v2 / 3v3 / 4v4 / 5v5)",
+                 "`!tournois solo` · `2v2` · `3v3` · `4v4` · `5v5` *(Admin)*\n"
                  "`!tournoi_status` — Voir le bracket\n"
                  "Résultat : **les 2 capitaines** valident le même vainqueur\n"
                  "*(Admin)* `!win <n°>` — Trancher un match"))
@@ -5750,7 +5750,7 @@ class MatchView(discord.ui.View):
 
 # ── Commandes tournoi ─────────────────────────────────────────────────────
 
-@bot.command(name="tournoi", aliases=["tournament"])
+@bot.command(name="tournois", aliases=["tournoi", "tournament"])
 @commands.has_permissions(administrator=True)
 async def cmd_tournoi(ctx, mode: str = None):
     gid = str(ctx.guild.id)
@@ -5760,16 +5760,19 @@ async def cmd_tournoi(ctx, mode: str = None):
     if mode is None:
         return await ctx.send(
             "❓ **Usage :**\n"
-            "`!tournoi solo` — Tournoi individuel 1v1 (bouton pour rejoindre)\n"
-            "`!tournoi 2v2` — Tournoi par équipes de 2\n"
-            "`!tournoi 4v4` — Tournoi par équipes de 4\n"
-            "`!tournoi 5v5` — Tournoi par équipes de 5")
+            "`!tournois solo` — Tournoi individuel 1v1 (bouton pour rejoindre)\n"
+            "`!tournois 2v2` — Tournoi par équipes de 2\n"
+            "`!tournois 3v3` — Tournoi par équipes de 3\n"
+            "`!tournois 4v4` — Tournoi par équipes de 4\n"
+            "`!tournois 5v5` — Tournoi par équipes de 5")
     m = mode.lower().strip()
-    # Modes : solo / 2v2 / 4v4 / 5v5 (le 'v' ou 'vs' accepté)
+    # Modes : solo / 2v2 / 3v3 / 4v4 / 5v5 (le 'v' ou 'vs' accepté)
     if m in ('solo', 's', '1v1', '1vs1'):
         t_mode, team_size = 'solo', 1
     elif m in ('2v2', '2vs2'):
         t_mode, team_size = 'team', 2
+    elif m in ('3v3', '3vs3'):
+        t_mode, team_size = 'team', 3
     elif m in ('4v4', '4vs4'):
         t_mode, team_size = 'team', 4
     elif m in ('5v5', '5vs5'):
@@ -5777,7 +5780,7 @@ async def cmd_tournoi(ctx, mode: str = None):
     else:
         return await ctx.send(
             "❌ Mode invalide.\n"
-            "Modes possibles : `solo`, `2v2`, `4v4`, `5v5`.")
+            "Modes possibles : `solo`, `2v2`, `3v3`, `4v4`, `5v5`.")
 
     tournaments[gid] = {
         'mode': t_mode, 'team_size': team_size, 'prize': 0,
