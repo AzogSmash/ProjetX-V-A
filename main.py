@@ -2347,7 +2347,7 @@ class PokerGame:
 # ========================= COMMANDES CASINO ============================
 # =======================================================================
 
-@bot.command(name="coins")
+@bot.command(name="coins", aliases=["solde", "bal", "balance"])
 async def cmd_coins(ctx, member: discord.Member = None):
     target = member or ctx.author
     embed  = discord.Embed(
@@ -2358,7 +2358,7 @@ async def cmd_coins(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="daily")
+@bot.command(name="daily", aliases=["d"])
 async def cmd_daily(ctx):
     uid  = str(ctx.author.id)
     now  = datetime.now()
@@ -2422,7 +2422,7 @@ async def cmd_daily(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="travail")
+@bot.command(name="travail", aliases=["trav", "work"])
 async def cmd_travail(ctx):
     uid = str(ctx.author.id)
     now = datetime.now()
@@ -2462,7 +2462,7 @@ async def cmd_travail(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="risque")
+@bot.command(name="risque", aliases=["risk", "roulette_russe"])
 async def cmd_risque(ctx):
     uid = ctx.author.id
     uid_str = str(uid)
@@ -2543,7 +2543,7 @@ async def cmd_give(ctx, member: discord.Member, amount: str):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="roulette")
+@bot.command(name="roulette", aliases=["rou"])
 async def cmd_roulette(ctx, mise: str, *, choix: str):
     choix = choix.lower().strip()
     mise, err = _resolve_mise(mise, ctx.author.id, 'roulette')
@@ -2592,7 +2592,7 @@ async def cmd_roulette(ctx, mise: str, *, choix: str):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="slots")
+@bot.command(name="slots", aliases=["sl", "machine"])
 async def cmd_slots(ctx, mise: str):
     mise, err = _resolve_mise(mise, ctx.author.id, 'slots')
     if err: return await ctx.send(err)
@@ -2796,7 +2796,7 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="duel")
+@bot.command(name="duel", aliases=["pvp"])
 async def cmd_duel(ctx, member: discord.Member, mise: str):
     if member.id == ctx.author.id:
         await ctx.send("❌ Vous ne pouvez pas vous défier vous-même."); return
@@ -3122,7 +3122,7 @@ class PokerLobbyView(discord.ui.View):
         await interaction.followup.send("🚫 La table a été annulée. Buy-ins remboursés.")
 
 
-@bot.command(name="poker")
+@bot.command(name="poker", aliases=["pk"])
 async def cmd_poker(ctx, action: str = None, *, args: str = None):
     gid = ctx.guild.id
     uid = ctx.author.id
@@ -3673,7 +3673,7 @@ class MinesView(discord.ui.View):
 
 # ── !mines ───────────────────────────────────────────────────────────────
 
-@bot.command(name="mines")
+@bot.command(name="mines", aliases=["mn", "minesweeper"])
 async def cmd_mines(ctx, mise: str):
     mise, err = _resolve_mise(mise, ctx.author.id, 'mines')
     if err: return await ctx.send(err)
@@ -3693,7 +3693,7 @@ async def cmd_mines(ctx, mise: str):
 
 # ── Crypto ───────────────────────────────────────────────────────────────
 
-@bot.command(name="crypto")
+@bot.command(name="crypto", aliases=["cr", "marche_crypto"])
 async def cmd_crypto(ctx):
     embed = discord.Embed(title="📈 Marché Crypto (en coins)", color=0xf39c12)
     for s in CRYPTO_SYMBOLS:
@@ -3755,7 +3755,7 @@ async def cmd_graphique(ctx, symbol: str = None):
     embed.set_footer(text="Mise à jour toutes les 90s | Tapez !crypto pour voir tous les prix")
     await ctx.send(embed=embed)
 
-@bot.command(name="acheter_crypto")
+@bot.command(name="acheter_crypto", aliases=["buyc", "achat_crypto"])
 async def cmd_acheter_crypto(ctx, symbol: str, montant: str):
     symbol = symbol.upper()
     if symbol not in CRYPTO_SYMBOLS:
@@ -3787,7 +3787,7 @@ async def cmd_acheter_crypto(ctx, symbol: str, montant: str):
     ))
     await ctx.send(embed=embed)
 
-@bot.command(name="vendre_crypto")
+@bot.command(name="vendre_crypto", aliases=["vc", "sellc"])
 async def cmd_vendre_crypto(ctx, symbol: str, qty_str: str):
     symbol = symbol.upper()
     if symbol not in CRYPTO_SYMBOLS:
@@ -3839,7 +3839,7 @@ async def cmd_metier(ctx):
         )
     await ctx.send(embed=embed)
 
-@bot.command(name="choisir_metier")
+@bot.command(name="choisir_metier", aliases=["cm", "set_job", "job_set"])
 async def cmd_choisir_metier(ctx, metier: str):
     metier = metier.lower()
     if metier not in JOBS:
@@ -3867,7 +3867,7 @@ async def cmd_miner(ctx):
     embed.set_footer(text="Revenez dans 1 heure.")
     await ctx.send(embed=embed)
 
-@bot.command(name="hacker")
+@bot.command(name="hacker", aliases=["hack"])
 async def cmd_hacker(ctx, cible: discord.Member):
     if _get_job(ctx.author.id) != 'hacker':
         return await ctx.send("❌ Vous devez être **💻 Hacker**. Tapez `!choisir_metier hacker`.")
@@ -4517,7 +4517,7 @@ class GestionView(discord.ui.View):
         await interaction.followup.send(f"✅ `!{cmd}` a été **réactivée**.", ephemeral=True)
 
 
-@bot.command(name="gestion")
+@bot.command(name="gestion", aliases=["gest", "admin"])
 async def cmd_gestion(ctx):
     if not (ctx.author.guild_permissions.administrator or is_bot_owner(ctx.author)):
         return await ctx.send("❌ Réservé aux administrateurs ou au créateur du bot.")
@@ -5469,7 +5469,7 @@ async def cmd_parier(ctx, pilote: int, mise: str):
     odds        = _race_odds(pilote - 1)
     await ctx.send(f"🏎️ {ctx.author.mention} a misé **{mise:,} coins** sur **{driver_name}** (cote ×{odds}) !")
 
-@bot.command(name="ouvrir_course")
+@bot.command(name="ouvrir_course", aliases=["oc", "open_race"])
 @commands.has_permissions(administrator=True)
 async def cmd_ouvrir_course(ctx):
     global race_accepting, race_bets
@@ -5480,7 +5480,7 @@ async def cmd_ouvrir_course(ctx):
         description="Les paris sont maintenant ouverts !\n`!course` — Voir les pilotes\n`!parier <n°> <mise>` — Miser\n\nL'admin lancera la course avec `!lancer_course`.")
     await ctx.send(embed=embed)
 
-@bot.command(name="lancer_course")
+@bot.command(name="lancer_course", aliases=["lc", "start_race"])
 @commands.has_permissions(administrator=True)
 async def cmd_lancer_course(ctx):
     global race_accepting, race_bets
@@ -5539,7 +5539,7 @@ async def cmd_lancer_course(ctx):
 
 # ── Admin — gestion des coins ─────────────────────────────────────────────
 
-@bot.command(name="addcoins")
+@bot.command(name="addcoins", aliases=["addc", "add_coins"])
 @commands.has_permissions(administrator=True)
 async def cmd_addcoins(ctx, member: discord.Member, amount: int):
     coins[member.id] += amount
@@ -5551,7 +5551,7 @@ async def cmd_addcoins(ctx, member: discord.Member, amount: int):
     await _admin_log(ctx.guild, "addcoins",
         f"{member.mention} : **+{amount:,} coins** → solde {coins[member.id]:,}", author=ctx.author)
 
-@bot.command(name="removecoins")
+@bot.command(name="removecoins", aliases=["rmc", "remove_coins", "delcoins"])
 @commands.has_permissions(administrator=True)
 async def cmd_removecoins(ctx, member: discord.Member, amount: int):
     if amount <= 0:
@@ -6209,7 +6209,7 @@ async def cmd_annuler_tournoi(ctx):
     del tournaments[gid]
     await ctx.send("✅ Le tournoi a été annulé.")
 
-@bot.command(name="punition")
+@bot.command(name="punition", aliases=["pun", "punir"])
 @commands.has_permissions(administrator=True)
 async def cmd_punition(ctx, nombre: int, membre: discord.Member):
     if nombre <= 0:
@@ -6254,7 +6254,7 @@ async def cmd_punition(ctx, nombre: int, membre: discord.Member):
     await ctx.send(f"✅ {membre.mention} est en punition. Il doit compter jusqu'à {nombre}.")
 
 
-@bot.command(name="annuler_punition")
+@bot.command(name="annuler_punition", aliases=["apun", "unpunish"])
 @commands.has_permissions(administrator=True)
 async def cmd_annuler_punition(ctx, membre: discord.Member):
     uid = str(membre.id)
@@ -6470,7 +6470,7 @@ async def _liberer_membre_morse(guild, membre):
         pass
 
 
-@bot.command(name="annuler_morse")
+@bot.command(name="annuler_morse", aliases=["amorse", "unmorse"])
 @commands.has_permissions(administrator=True)
 async def cmd_annuler_morse(ctx, membre: discord.Member):
     if str(membre.id) not in morse_punitions:
@@ -6712,7 +6712,7 @@ async def cmd_top_crypto(ctx):
 
 
 # ── Stats serveur ─────────────────────────────────────────────────────────
-@bot.command(name="stats_serveur", aliases=["stats-serveur", "server_stats"])
+@bot.command(name="stats_serveur", aliases=["stats-serveur", "server_stats", "stats"])
 async def cmd_stats_serveur(ctx):
     guild_members = {m.id for m in ctx.guild.members if not m.bot}
     total_coins   = sum(coins[uid] + safes.get(str(uid), 0) for uid in guild_members)
@@ -6739,7 +6739,7 @@ async def cmd_stats_serveur(ctx):
 
 
 # ── Marché entre joueurs ──────────────────────────────────────────────────
-@bot.command(name="mettre_en_vente", aliases=["sell_item", "vendre_item"])
+@bot.command(name="mettre_en_vente", aliases=["sell_item", "vendre_item", "vente", "mev"])
 async def cmd_mettre_en_vente(ctx, item_id: int, prix: int):
     uid = str(ctx.author.id)
     items = owned_items.get(uid, {})
@@ -6814,7 +6814,7 @@ async def cmd_marche(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="retirer_offre", aliases=["cancel_listing"])
+@bot.command(name="retirer_offre", aliases=["cancel_listing", "ro", "annuler_offre"])
 async def cmd_retirer_offre(ctx, listing_id: str):
     listing = market_listings.get(listing_id)
     if not listing:
