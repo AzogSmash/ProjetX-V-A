@@ -214,7 +214,8 @@ disabled_cmds    = set()  # noms de commandes désactivées
 cmd_role_perms   = {}   # name -> [role_id, ...] (allowed roles, empty=all)
 
 # ── Nouvelles fonctionnalités ─────────────────────────────────────────────
-daily_streaks    = {}   # str(uid) -> {'streak': int, 'last_day': 'YYYY-MM-DD'}
+daily_streaks     = {}   # str(uid) -> {'streak': int, 'last_day': 'YYYY-MM-DD'}
+ticket_purchases  = {}   # str(uid) -> {'count': int, 'day': 'YYYY-MM-DD'}
 reputations      = {}   # str(uid) -> {'points': int, 'given': {str(uid): 'YYYY-MM-DD'}}
 birthdays        = {}   # str(uid) -> {'day': int, 'month': int, 'guild_id': int}
 crypto_alerts    = {}   # str(uid) -> [{'symbol': str, 'target': float, 'direction': str}]
@@ -299,7 +300,7 @@ def load_data():
     global theft_cooldowns, miner_cooldowns, hacker_cooldowns, risque_cooldowns, rob_cooldowns
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms
-    global daily_streaks, reputations, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID
+    global daily_streaks, ticket_purchases, reputations, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r') as f:
             try:
@@ -370,6 +371,7 @@ def load_data():
                 disabled_cmds    = set(data.get('disabled_cmds', []))
                 cmd_role_perms   = data.get('cmd_role_perms', {})
                 daily_streaks    = data.get('daily_streaks', {})
+                ticket_purchases = data.get('ticket_purchases', {})
                 reputations      = data.get('reputations', {})
                 birthdays        = data.get('birthdays', {})
                 crypto_alerts    = data.get('crypto_alerts', {})
@@ -458,6 +460,7 @@ def save_data():
     data_to_save['cmd_role_perms']   = cmd_role_perms
     data_to_save['casino_config']    = casino_config
     data_to_save['daily_streaks']    = daily_streaks
+    data_to_save['ticket_purchases'] = ticket_purchases
     data_to_save['reputations']      = reputations
     data_to_save['birthdays']        = birthdays
     data_to_save['crypto_alerts']    = crypto_alerts
@@ -4961,6 +4964,8 @@ def _shop_embed(author_id):
     return embed
 
 
+TICKET_DAILY_LIMIT = 10
+
 def _do_purchase(author_id, item_id):
     """Effectue un achat. Retourne (success: bool, message: str)."""
     if item_id not in SHOP_ITEMS:
@@ -4970,6 +4975,21 @@ def _do_purchase(author_id, item_id):
     uid = str(author_id)
     if info['unique'] and owned_items.get(uid, {}).get(str(item_id), 0) > 0:
         return False, f"❌ Vous possédez déjà **{info['name']}**."
+    # Limite journalière tickets (items 4 = 1 ticket, 5 = pack ×5)
+    if item_id in (4, 5):
+        qty_to_buy = 5 if item_id == 5 else 1
+        today = datetime.now().date().isoformat()
+        tp = ticket_purchases.get(uid, {'count': 0, 'day': None})
+        if tp.get('day') != today:
+            tp = {'count': 0, 'day': today}
+        if tp['count'] + qty_to_buy > TICKET_DAILY_LIMIT:
+            remaining = TICKET_DAILY_LIMIT - tp['count']
+            return False, (
+                f"❌ Limite journalière atteinte ! Vous ne pouvez acheter que **{TICKET_DAILY_LIMIT} tickets/jour**.\n"
+                f"Il vous reste **{remaining} ticket{'s' if remaining != 1 else ''}** achetable{'s' if remaining != 1 else ''} aujourd'hui."
+            )
+        tp['count'] += qty_to_buy
+        ticket_purchases[uid] = tp
     if coins[author_id] < price:
         return False, f"❌ Pas assez de coins. Prix : **{price:,}** | Solde : **{coins[author_id]:,}**"
     coins[author_id] -= price
