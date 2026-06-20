@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands, tasks
 import asyncio
 import os
+import logging
 import random
 import json
 import io
