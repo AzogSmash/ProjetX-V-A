@@ -608,7 +608,7 @@ COMMAND_USAGE = {
     'chart':         '`!graphique <SYM>` — Ex : `!graphique ETH`',
     'courbe':        '`!graphique <SYM>` — Ex : `!graphique DOGE`',
     'acheter_crypto':'`!acheter_crypto <SYM> <coins à dépenser>`\nEx : `!acheter_crypto BTC 1000`',
-    'vendre_crypto': '`!vendre_crypto <SYM> <quantité|tout>`\nEx : `!vendre_crypto ETH 0.5` · `!vendre_crypto BTC tout`',
+    'vendre_crypto': '`!vendre_crypto <SYM> <quantité|all>`\nEx : `!vendre_crypto ETH 0.5` · `!vendre_crypto BTC all`',
     'choisir_metier':'`!choisir_metier <metier>`\nMétiers : `hacker` `mineur` `escroc` `gardien` `trader`',
     'hacker':        '`!hacker @membre` — Voler la crypto d\'un joueur\n*(Réservé au métier Hacker)*',
     'voler':         '`!voler @membre` — Voler le coffre d\'un joueur (5-20% du coffre)\nEx : `!voler @Riche`',
@@ -715,7 +715,7 @@ def _build_help_categories(ctx):
                  "`!crypto` — Prix en temps réel\n"
                  "`!graphique <SYM>` — Sparkline\n"
                  "`!acheter_crypto <SYM> <coins>` — Acheter\n"
-                 "`!vendre_crypto <SYM> <quantité|tout>` — Vendre"))
+                 "`!vendre_crypto <SYM> <quantité|all>` — Vendre"))
     cats.append(("metiers", "💼 Métiers & Actions",
                  "Hacker, mineur, escroc, gardien, trader",
                  "`!metier` — Voir métier actuel\n"
@@ -3713,9 +3713,9 @@ async def cmd_vendre_crypto(ctx, symbol: str, qty_str: str):
     if held < 0.000001:
         return await ctx.send(f"❌ Vous ne possédez pas de {symbol}.")
     try:
-        qty = held if qty_str.lower() == 'tout' else float(qty_str)
+        qty = held if qty_str.lower() in ('all', 'tout') else float(qty_str)
     except ValueError:
-        return await ctx.send("❌ Quantité invalide. Ex : `!vendre_crypto BTC 0.5` ou `!vendre_crypto BTC tout`")
+        return await ctx.send("❌ Quantité invalide. Ex : `!vendre_crypto BTC 0.5` ou `!vendre_crypto BTC all`")
     qty = min(max(qty, 0), held)
     if qty < 0.000001:
         return await ctx.send("❌ Quantité invalide.")
