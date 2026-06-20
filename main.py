@@ -717,67 +717,89 @@ def _build_help_categories(ctx):
     cats.append(("home", "🏠 Accueil", "Page d'accueil de l'aide", None))
     cats.append(("info", "ℹ️ Aide & Infos",
                  "Commandes générales",
-                 "`!aide` — Ce menu"))
+                 "`!aide` — Ce menu\n"
+                 "`!profil` (`!profile`, `!stats`) — Voir sa fiche complète\n"
+                 "`!rep @membre [+/-]` (`!reputation`) — Voter la réputation\n"
+                 "`!anniversaire JJ/MM` (`!anniv`) — Enregistrer son anniversaire\n"
+                 "`!stats_serveur` (`!stats`) — Vue globale du serveur"))
     cats.append(("eco", "🪙 Économie de base",
                  "Solde, daily, travail, coffre, rob, etc.",
-                 "`!coins` — Voir votre solde · `!coins @membre`\n"
-                 "`!daily` — 500 coins/jour\n"
-                 "`!travail` — Travailler (cooldown 1h)\n"
-                 "`!risque` — Coup risqué x2 ou rien *(cooldown 3h)*\n"
+                 "`!coins` (`!bal`, `!solde`) — Voir votre solde\n"
+                 "`!daily` (`!d`) — 500 coins/jour + bonus streak\n"
+                 "`!travail` (`!trav`, `!work`) — Travailler (cooldown 1h)\n"
+                 "`!risque` (`!risk`) — Coup risqué x2 ou rien *(cooldown 3h)*\n"
                  "`!give @membre <montant|all>` — Donner des coins\n"
-                 "`!coffre` — Coffre-fort (boutons Déposer/Retirer)\n"
-                 "`!rob @membre` — Voler le cash (55% réussite · cooldown 12h)\n"
-                 "`!classement` — Top 10 des plus riches"))
+                 "`!coffre` (`!banque`, `!vault`) — Coffre-fort (Déposer/Retirer)\n"
+                 "`!rob @membre` — Voler le cash *(cooldown 12h)*\n"
+                 "`!classement` (`!top`, `!lb`) — Top 10 des plus riches"))
     cats.append(("casino", "🎰 Jeux de casino",
                  "Slots, blackjack, roulette, poker, course, gratter…",
-                 "`!slots <mise>` — Machine à sous\n"
-                 "`!coinflip <mise> <pile|face>` — Pile ou face\n"
-                 "`!roulette <mise> <rouge|noir|pair|impair|0-36>`\n"
-                 "`!bj <mise>` — Blackjack (boutons)\n"
-                 "`!duel @membre <mise>` — Duel\n"
-                 "`!mines <mise>` — Mines\n"
-                 "`!poker start <ante>` — Poker (boutons)\n"
-                 "`!course` — Course de voitures (boutons)\n"
-                 "`!gratter` — Gratter un ticket (5 cases 🍀)"))
+                 "`!slots <mise>` (`!sl`, `!machine`) — Machine à sous\n"
+                 "`!coinflip <mise> <pile|face>` (`!cf`) — Pile ou face\n"
+                 "`!roulette <mise> <rouge|noir|pair|impair|0-36>` (`!rou`)\n"
+                 "`!bj <mise>` (`!blackjack`) — Blackjack (boutons)\n"
+                 "`!duel @membre <mise>` (`!pvp`) — Duel\n"
+                 "`!mines <mise>` (`!mn`) — Mines\n"
+                 "`!poker start <ante>` (`!pk`) — Poker (boutons)\n"
+                 "`!course` (`!race`) — Course de voitures\n"
+                 "`!parier <pilote> <mise>` (`!bet`) — Parier sur une course\n"
+                 "`!gratter` (`!scratch`) — Gratter un ticket (5 cases 🍀)"))
     cats.append(("crypto", "📈 Crypto-monnaies",
-                 "Achat / vente / graphique",
-                 "`!crypto` — Prix en temps réel\n"
-                 "`!graphique <SYM>` — Sparkline\n"
-                 "`!acheter_crypto <SYM> <coins|all>` — Acheter\n"
-                 "`!vendre_crypto <SYM> <quantité|all>` — Vendre"))
+                 "Achat / vente / alertes / graphique",
+                 "`!crypto` (`!cr`) — Prix en temps réel + portefeuille\n"
+                 "`!graphique <SYM>` (`!chart`, `!graph`) — Courbe\n"
+                 "`!acheter_crypto <SYM> <coins|all>` (`!buyc`) — Acheter\n"
+                 "`!vendre_crypto <SYM> <quantité|all>` (`!vc`) — Vendre\n"
+                 "`!alerte_crypto <SYM> <prix>` (`!alerte`) — Alerte prix en DM\n"
+                 "`!suppr_alerte [SYM]` (`!del_alerte`) — Supprimer alertes\n"
+                 "`!top_crypto` (`!classement_crypto`) — Top portefeuilles"))
     cats.append(("metiers", "💼 Métiers & Actions",
                  "Hacker, mineur, escroc, gardien, trader",
-                 "`!metier` — Voir métier actuel\n"
-                 "`!choisir_metier <nom>` — Choisir\n"
-                 "`!miner` — Miner *(Mineur)*\n"
-                 "`!hacker @membre` — Voler crypto *(Hacker)*\n"
-                 "`!voler @membre` — Voler le **coffre** (5-20%)"))
+                 "`!metier` (`!job`, `!emploi`) — Voir métier actuel\n"
+                 "`!choisir_metier <nom>` (`!cm`, `!set_job`) — Choisir un métier\n"
+                 "`!miner` — Miner *(Mineur · cooldown 15min)*\n"
+                 "`!hacker @membre` (`!hack`) — Voler crypto *(Hacker · cooldown 1h)*\n"
+                 "`!voler @membre` (`!steal`) — Voler le **coffre** *(cooldown 30min)*"))
     cats.append(("usine", "🏭 Usine passive",
                  "Production automatique de coins",
-                 f"`!usine` — Voir votre usine (boutons : embaucher / collecter)\n"
-                 f"Max **{MAX_FACTORY_WORKERS} employés** · 1 embauche / **{FACTORY_HIRE_COOLDOWN_HOURS}h**"))
-    cats.append(("shop", "🛒 Magasin & Tickets",
-                 "Items et inventaire",
-                 "`!shop` — Magasin (boutons d'achat)\n"
-                 "`!inventaire` — Voir vos items"))
+                 f"`!usine` (`!factory`) — Voir votre usine\n"
+                 f"`!embaucher` (`!hire`) — Embaucher un employé *(cooldown {FACTORY_HIRE_COOLDOWN_HOURS}h)*\n"
+                 f"`!collecter` (`!collect`) — Collecter la production\n"
+                 f"Max **{MAX_FACTORY_WORKERS} employés**"))
+    cats.append(("shop", "🛒 Magasin & Marché",
+                 "Items, inventaire et marché entre joueurs",
+                 "`!shop` (`!boutique`) — Magasin (boutons d'achat)\n"
+                 "`!acheter <item_id>` (`!buy`) — Acheter un item\n"
+                 "`!inventaire` (`!inv`) — Voir vos items\n"
+                 "`!marche` (`!market`) — Voir les annonces du marché joueurs\n"
+                 "`!mettre_en_vente <item_id> <prix>` (`!vente`, `!mev`) — Vendre un item\n"
+                 "`!acheter_offre <ID>` (`!offre`) — Acheter une annonce\n"
+                 "`!retirer_offre <ID>` (`!ro`) — Retirer son annonce"))
     cats.append(("team", "👥 Clubs / Teams",
                  "Créer ou rejoindre un club de joueurs",
-                 "`!team` — Interface du club (créer / rejoindre / quitter / trésorerie)"))
+                 "`!team` (`!club`, `!guilde`) — Interface du club\n"
+                 "`!gdt` — Compétitions inter-clubs"))
     cats.append(("tournoi", "🏆 Tournois",
                  "Tournois solo ou par équipes (2v2 / 3v3 / 4v4 / 5v5)",
                  "`!tournois solo` · `2v2` · `3v3` · `4v4` · `5v5` *(Admin)*\n"
-                 "`!tournoi_status` — Voir le bracket\n"
+                 "`!tournoi_status` (`!t_status`) — Voir le bracket\n"
+                 "`!classement_tournoi` (`!elo`) — Classement ELO\n"
                  "Résultat : **les 2 capitaines** valident le même vainqueur\n"
-                 "*(Admin)* `!win <n°>` — Trancher un match"))
+                 "*(Admin)* `!win <n°>` (`!victoire`) — Trancher un match\n"
+                 "*(Admin)* `!prix_tournoi <montant>` — Définir la récompense"))
 
     if has_manage_messages or has_ban_members:
         lines = []
         if has_manage_messages:
             lines.append("`!warn` `!mute` `!unmute` `!clear` `!silence` `!unsilence` `!sanctions`")
+            lines.append("`!punition <nb> @membre` (`!pun`) — Punition morse")
+            lines.append("`!annuler_punition @membre` (`!apun`) — Annuler punition")
+            lines.append("`!morse @membre` — Punition morse avancée")
+            lines.append("`!annuler_morse @membre` (`!amorse`) — Annuler morse")
         if has_ban_members:
             lines.append("`!ban` `!unban`")
         cats.append(("mod", "⚖️ Modération",
-                     "Warns, mutes, bans, etc.",
+                     "Warns, mutes, bans, punitions…",
                      "\n".join(lines)))
 
     if has_manage_nicknames:
@@ -789,13 +811,15 @@ def _build_help_categories(ctx):
         cats.append(("admin", "⚙️ Administration",
                      "Outils admin du serveur",
                      "`!giveaway` `!cancelgiveaway`\n"
-                     "`!addcoins @membre <n>` — Ajouter des coins\n"
-                     "`!removecoins @membre <n>` — Retirer des coins\n"
-                     "`!prix_casino` — Modifier prix shop/usine + mises min/max\n"
-                     "`!gestion` — Activer/désactiver des commandes\n"
+                     "`!addcoins @membre <n>` (`!addc`) — Ajouter des coins\n"
+                     "`!removecoins @membre <n>` (`!rmc`) — Retirer des coins\n"
+                     "`!prix_casino` (`!prixcasino`) — Prix shop/usine + mises min/max\n"
+                     "`!gestion` (`!gest`, `!admin`) — Activer/désactiver des commandes\n"
                      "`!cooldown` (`!cd`) — Modifier les cooldowns\n"
-                     "`!ouvrir_course` / `!lancer_course` — Courses\n"
-                     "`!gdt` — Compétitions inter-clubs\n"
+                     "`!ouvrir_course` (`!oc`) / `!lancer_course` (`!lc`) — Courses\n"
+                     "`!ouverture_tournoi` (`!bracket`) — Lancer le tournoi\n"
+                     "`!annuler_tournoi` — Annuler le tournoi en cours\n"
+                     "`!set_admin_log #salon` (`!admin_log`) — Logs admin\n"
                      "`!lock` / `!unlock` — Verrouiller un salon"))
 
     if is_owner:
@@ -806,7 +830,7 @@ def _build_help_categories(ctx):
                      "`!dmall <msg>` — MP à tous\n"
                      "`!construction` — Reconstruire le serveur\n"
                      "`!nuke` — Effacer tous les salons\n"
-                     "`!permission` — Restreindre des commandes par rôle"))
+                     "`!permission` (`!perm`) — Restreindre des commandes par rôle"))
 
     return cats
 
