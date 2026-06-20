@@ -213,6 +213,16 @@ team_state       = {'competition_open': False, 'next_id': 1}
 disabled_cmds    = set()  # noms de commandes désactivées
 cmd_role_perms   = {}   # name -> [role_id, ...] (allowed roles, empty=all)
 
+# ── Nouvelles fonctionnalités ─────────────────────────────────────────────
+daily_streaks    = {}   # str(uid) -> {'streak': int, 'last_day': 'YYYY-MM-DD'}
+reputations      = {}   # str(uid) -> {'points': int, 'given': {str(uid): 'YYYY-MM-DD'}}
+birthdays        = {}   # str(uid) -> {'day': int, 'month': int, 'guild_id': int}
+crypto_alerts    = {}   # str(uid) -> [{'symbol': str, 'target': float, 'direction': str}]
+market_listings  = {}   # str(listing_id) -> {'seller': int, 'item_id': int, 'price': int, 'created': ISO}
+market_next_id   = 1
+tournament_elo   = {}   # str(uid) -> int (score ELO tournoi)
+ADMIN_LOG_CHANNEL_ID = 0  # à configurer via !set_admin_log <channel_id>
+
 # ── Configuration prix / mises (modifiable par !prix_casino) ─────────────
 BOT_OWNER_ID = 1056848438270115900   # happy_gt3 — créateur du bot
 MAX_FACTORY_WORKERS = 10
@@ -291,6 +301,7 @@ def load_data():
     global theft_cooldowns, miner_cooldowns, hacker_cooldowns, risque_cooldowns, rob_cooldowns
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms
+    global daily_streaks, reputations, birthdays, crypto_alerts, market_listings, market_next_id, tournament_elo, ADMIN_LOG_CHANNEL_ID
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r') as f:
             try:
@@ -360,6 +371,14 @@ def load_data():
                 team_state['next_id'] = ts.get('next_id', 1)
                 disabled_cmds    = set(data.get('disabled_cmds', []))
                 cmd_role_perms   = data.get('cmd_role_perms', {})
+                daily_streaks    = data.get('daily_streaks', {})
+                reputations      = data.get('reputations', {})
+                birthdays        = data.get('birthdays', {})
+                crypto_alerts    = data.get('crypto_alerts', {})
+                market_listings  = data.get('market_listings', {})
+                market_next_id   = data.get('market_next_id', 1)
+                tournament_elo   = data.get('tournament_elo', {})
+                ADMIN_LOG_CHANNEL_ID = data.get('admin_log_channel_id', 0)
                 loaded_cfg = data.get('casino_config', {})
                 if isinstance(loaded_cfg, dict):
                     casino_config['shop_prices']   = loaded_cfg.get('shop_prices', {}) or {}
@@ -442,6 +461,14 @@ def save_data():
     data_to_save['disabled_cmds']    = list(disabled_cmds)
     data_to_save['cmd_role_perms']   = cmd_role_perms
     data_to_save['casino_config']    = casino_config
+    data_to_save['daily_streaks']    = daily_streaks
+    data_to_save['reputations']      = reputations
+    data_to_save['birthdays']        = birthdays
+    data_to_save['crypto_alerts']    = crypto_alerts
+    data_to_save['market_listings']  = market_listings
+    data_to_save['market_next_id']   = market_next_id
+    data_to_save['tournament_elo']   = tournament_elo
+    data_to_save['admin_log_channel_id'] = ADMIN_LOG_CHANNEL_ID
 
     try:
         with open(DATA_FILE, 'w') as f:
@@ -546,6 +573,8 @@ async def on_ready():
         check_mutes.start()
     if not update_crypto_prices.is_running():
         update_crypto_prices.start()
+    if not check_birthdays.is_running():
+        check_birthdays.start()
     print("Bot prêt et fonctionnel !")
 
 
@@ -2333,10 +2362,10 @@ async def cmd_coins(ctx, member: discord.Member = None):
 async def cmd_daily(ctx):
     uid  = str(ctx.author.id)
     now  = datetime.now()
+    today = now.date().isoformat()
     BASE_AMOUNT = 500
     LUCKY_BONUS = 150
     has_lucky = _has_item(ctx.author.id, 1)
-    AMOUNT = BASE_AMOUNT + (LUCKY_BONUS if has_lucky else 0)
     cd_h = cooldown_h('daily')
     if uid in daily_cooldowns:
         last = datetime.fromisoformat(daily_cooldowns[uid])
@@ -2346,16 +2375,50 @@ async def cmd_daily(ctx):
             m = rem // 60
             await ctx.send(f"⏳ {ctx.author.mention}, patientez encore **{h}h {m}min** avant votre prochain daily.")
             return
+    # Gestion streak
+    streak_data = daily_streaks.get(uid, {'streak': 0, 'last_day': None})
+    last_day = streak_data.get('last_day')
+    yesterday = (now.date() - timedelta(days=1)).isoformat()
+    if last_day == yesterday:
+        streak_data['streak'] = streak_data.get('streak', 0) + 1
+    elif last_day == today:
+        streak_data['streak'] = streak_data.get('streak', 1)
+    else:
+        streak_data['streak'] = 1
+    streak_data['last_day'] = today
+    daily_streaks[uid] = streak_data
+    streak = streak_data['streak']
+
+    # Bonus streak : paliers 7j, 14j, 30j
+    streak_bonus = 0
+    streak_label = ""
+    if streak >= 30:
+        streak_bonus = 2500
+        streak_label = f"🔥×30 Streak légendaire : **+{streak_bonus:,} coins** !"
+    elif streak >= 14:
+        streak_bonus = 1000
+        streak_label = f"🔥×14 Streak incroyable : **+{streak_bonus:,} coins** !"
+    elif streak >= 7:
+        streak_bonus = 500
+        streak_label = f"🔥×7 Streak de feu : **+{streak_bonus:,} coins** !"
+
+    AMOUNT = BASE_AMOUNT + (LUCKY_BONUS if has_lucky else 0) + streak_bonus
     daily_cooldowns[uid] = now.isoformat()
     coins[ctx.author.id] += AMOUNT
     save_data()
     bonus_str = f"\n🍀 Bonus Porte-bonheur : **+{LUCKY_BONUS} coins** !" if has_lucky else ""
+    streak_str = f"\n{streak_label}" if streak_label else ""
+    fire = "🔥" if streak >= 3 else "📅"
     embed = discord.Embed(
         title="🎁 Daily Coins !",
-        description=f"{ctx.author.mention} a reçu **{AMOUNT:,} 🪙 coins** !{bonus_str}\n💰 Solde : **{coins[ctx.author.id]:,} coins**",
+        description=(
+            f"{ctx.author.mention} a reçu **{AMOUNT:,} 🪙 coins** !{bonus_str}{streak_str}\n"
+            f"{fire} Streak : **{streak} jour{'s' if streak > 1 else ''}**\n"
+            f"💰 Solde : **{coins[ctx.author.id]:,} coins**"
+        ),
         color=0xf1c40f
     )
-    embed.set_footer(text=f"Revenez dans {cd_h:g}h !")
+    embed.set_footer(text=f"Revenez dans {cd_h:g}h pour maintenir votre streak !")
     await ctx.send(embed=embed)
 
 
@@ -3484,6 +3547,9 @@ async def update_crypto_prices():
         if len(hist) > 30:
             price_history[s] = hist[-30:]
     save_data()
+
+    # Vérification des alertes crypto utilisateurs
+    await _check_crypto_alerts()
 
     # Annonce des news dans le salon dédié (si configuré)
     if news and NEWS_CRYPTO_CHANNEL_ID:
@@ -5482,6 +5548,8 @@ async def cmd_addcoins(ctx, member: discord.Member, amount: int):
     embed = discord.Embed(title="⚙️ Modification de coins", color=0x3498db,
         description=f"**{abs(amount):,} coins** {verb} {member.mention}.\n💰 Nouveau solde : **{coins[member.id]:,} coins**")
     await ctx.send(embed=embed)
+    await _admin_log(ctx.guild, "addcoins",
+        f"{member.mention} : **+{amount:,} coins** → solde {coins[member.id]:,}", author=ctx.author)
 
 @bot.command(name="removecoins")
 @commands.has_permissions(administrator=True)
@@ -5494,6 +5562,8 @@ async def cmd_removecoins(ctx, member: discord.Member, amount: int):
     embed = discord.Embed(title="⚙️ Modification de coins", color=0xe74c3c,
         description=f"**{taken:,} coins** retirés de {member.mention}.\n💰 Nouveau solde : **{coins[member.id]:,} coins**")
     await ctx.send(embed=embed)
+    await _admin_log(ctx.guild, "removecoins",
+        f"{member.mention} : **-{taken:,} coins** → solde {coins[member.id]:,}", author=ctx.author)
 
 
 # =======================================================================
@@ -5854,6 +5924,12 @@ class MatchView(discord.ui.View):
         loser_idx   = self.p2_idx if winner_idx == self.p1_idx else self.p1_idx
         winner_name = _t_name(t, winner_idx)
         loser_name  = _t_name(t, loser_idx)
+        # Mise à jour ELO
+        wp = _t_participant(t, winner_idx)
+        lp = _t_participant(t, loser_idx)
+        if wp and lp:
+            _update_elo(wp['members'][0] if 'members' in wp else wp.get('uid', 0),
+                        lp['members'][0] if 'members' in lp else lp.get('uid', 0))
         for item in self.children:
             item.disabled = True
         desc = (f"🏆 **{winner_name}** remporte le match !\n"
@@ -6402,6 +6478,411 @@ async def cmd_annuler_morse(ctx, membre: discord.Member):
     await _liberer_membre_morse(ctx.guild, membre)
     await ctx.send(f"✅ Punition morse de {membre.mention} annulée.")
     
+# =======================================================================
+# ======================== NOUVELLES FONCTIONNALITÉS ====================
+# =======================================================================
+
+# ── Profil complet ───────────────────────────────────────────────────────
+@bot.command(name="profil", aliases=["profile", "stats"])
+async def cmd_profil(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    uid = str(member.id)
+    uid_int = member.id
+
+    cash    = coins[uid_int]
+    coffre  = safes.get(uid, 0)
+    total   = cash + coffre
+    items   = owned_items.get(uid, {})
+    item_lines = [f"{SHOP_ITEMS[int(k)]['name']} ×{v}" for k, v in items.items() if int(k) in SHOP_ITEMS and v > 0]
+    h_crypto = {s: q for s, q in crypto_holdings.get(uid, {}).items() if q > 0.000001}
+    crypto_val = sum(q * crypto_prices.get(s, 0) for s, q in h_crypto.items())
+    streak = daily_streaks.get(uid, {}).get('streak', 0)
+    rep    = reputations.get(uid, {}).get('points', 0)
+    elo    = tournament_elo.get(uid, 1000)
+    job    = jobs_data.get(uid, {}).get('job', None)
+    job_str = JOBS[job]['name'] if job and job in JOBS else "Aucun"
+    factory = factories.get(uid, {})
+    workers = factory.get('workers', 0) if factory else 0
+
+    embed = discord.Embed(
+        title=f"👤 Profil de {member.display_name}",
+        color=0x9b59b6
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="💵 Cash", value=f"{cash:,} coins", inline=True)
+    embed.add_field(name="🔒 Coffre", value=f"{coffre:,} coins", inline=True)
+    embed.add_field(name="💎 Total", value=f"{total:,} coins", inline=True)
+    if crypto_val > 0:
+        embed.add_field(name="📈 Crypto", value=f"≈ {crypto_val:,.0f} coins", inline=True)
+    embed.add_field(name="🔥 Streak Daily", value=f"{streak} jour{'s' if streak != 1 else ''}", inline=True)
+    embed.add_field(name="⭐ Réputation", value=f"{rep:+d} pts", inline=True)
+    embed.add_field(name="🏆 ELO Tournoi", value=str(elo), inline=True)
+    embed.add_field(name="💼 Métier", value=job_str, inline=True)
+    embed.add_field(name="🏭 Usine", value=f"{workers} ouvrier{'s' if workers != 1 else ''}", inline=True)
+    if item_lines:
+        embed.add_field(name="🎒 Inventaire", value='\n'.join(item_lines), inline=False)
+    await ctx.send(embed=embed)
+
+
+# ── Réputation ───────────────────────────────────────────────────────────
+@bot.command(name="rep", aliases=["reputation"])
+async def cmd_rep(ctx, member: discord.Member = None, action: str = "+"):
+    if member is None:
+        return await ctx.send("❌ Mention un membre. Ex : `!rep @pseudo` ou `!rep @pseudo -`")
+    if member.id == ctx.author.id:
+        return await ctx.send("❌ Vous ne pouvez pas vous noter vous-même.")
+    if member.bot:
+        return await ctx.send("❌ Les bots n'ont pas de réputation.")
+
+    giver_uid = str(ctx.author.id)
+    target_uid = str(member.id)
+    today = datetime.now().date().isoformat()
+
+    rep_data = reputations.setdefault(giver_uid, {'points': 0, 'given': {}})
+    last_given_to = rep_data['given'].get(target_uid)
+    if last_given_to == today:
+        return await ctx.send(f"❌ Vous avez déjà noté {member.display_name} aujourd'hui.")
+
+    delta = +1 if action.strip() in ('+', '➕', 'plus') else -1
+    rep_data['given'][target_uid] = today
+
+    target_rep = reputations.setdefault(target_uid, {'points': 0, 'given': {}})
+    target_rep['points'] += delta
+    save_data()
+
+    sign = "+" if delta > 0 else ""
+    emoji = "⬆️" if delta > 0 else "⬇️"
+    await ctx.send(
+        f"{emoji} {ctx.author.mention} a {'augmenté' if delta > 0 else 'diminué'} la réputation de "
+        f"{member.mention} ! *(Score : **{sign}{target_rep['points']} pts**)*"
+    )
+
+
+# ── Anniversaires ────────────────────────────────────────────────────────
+@bot.command(name="anniversaire", aliases=["birthday", "anniv"])
+async def cmd_anniversaire(ctx, date: str = None):
+    uid = str(ctx.author.id)
+    if date is None:
+        bd = birthdays.get(uid)
+        if not bd:
+            return await ctx.send("❌ Aucun anniversaire enregistré. Ex : `!anniversaire 15/06`")
+        return await ctx.send(f"🎂 Votre anniversaire est le **{bd['day']:02d}/{bd['month']:02d}**.")
+    try:
+        parts = date.replace('-', '/').split('/')
+        day, month = int(parts[0]), int(parts[1])
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            raise ValueError
+    except (ValueError, IndexError):
+        return await ctx.send("❌ Format invalide. Ex : `!anniversaire 15/06`")
+    birthdays[uid] = {'day': day, 'month': month, 'guild_id': ctx.guild.id}
+    save_data()
+    await ctx.send(f"🎂 Anniversaire enregistré : **{day:02d}/{month:02d}** ! Je vous souhaiterai automatiquement bonne fête !")
+
+
+@tasks.loop(hours=1)
+async def check_birthdays():
+    now = datetime.now()
+    if now.hour != 9:
+        return
+    today_day, today_month = now.day, now.month
+    for uid, bd in birthdays.items():
+        if bd.get('day') == today_day and bd.get('month') == today_month:
+            guild = bot.get_guild(bd.get('guild_id', 0))
+            if not guild:
+                continue
+            member = guild.get_member(int(uid))
+            if not member:
+                continue
+            coins[int(uid)] += 1000
+            save_data()
+            sys_ch = guild.system_channel
+            if sys_ch:
+                try:
+                    await sys_ch.send(
+                        f"🎂🎉 Joyeux anniversaire {member.mention} ! "
+                        f"Le serveur t'offre **1 000 coins** pour ton jour spécial ! 🎁"
+                    )
+                except Exception:
+                    pass
+
+
+# ── Alertes prix crypto ───────────────────────────────────────────────────
+@bot.command(name="alerte_crypto", aliases=["alerte", "crypto_alert"])
+async def cmd_alerte_crypto(ctx, symbol: str = None, target: str = None):
+    uid = str(ctx.author.id)
+    if symbol is None:
+        alerts = crypto_alerts.get(uid, [])
+        if not alerts:
+            return await ctx.send("❌ Aucune alerte. Ex : `!alerte_crypto BTC 50000`")
+        lines = [f"• **{a['symbol']}** : alerte si {'≥' if a['direction']=='up' else '≤'} {a['target']:,.0f} coins" for a in alerts]
+        return await ctx.send(embed=discord.Embed(title="🔔 Vos alertes crypto", description='\n'.join(lines), color=0xf39c12))
+    symbol = symbol.upper()
+    if symbol not in CRYPTO_SYMBOLS:
+        return await ctx.send(f"❌ Symbole invalide. Disponibles : {', '.join(CRYPTO_SYMBOLS)}")
+    try:
+        target_price = float(target)
+    except (TypeError, ValueError):
+        return await ctx.send("❌ Prix cible invalide. Ex : `!alerte_crypto BTC 50000`")
+    current = crypto_prices[symbol]
+    direction = 'up' if target_price > current else 'down'
+    alerts = crypto_alerts.setdefault(uid, [])
+    if len(alerts) >= 5:
+        return await ctx.send("❌ Maximum 5 alertes actives à la fois.")
+    alerts.append({'symbol': symbol, 'target': target_price, 'direction': direction})
+    save_data()
+    sign = "≥" if direction == 'up' else "≤"
+    await ctx.send(
+        f"🔔 Alerte créée ! Je vous notifierai quand **{symbol}** atteindra **{sign} {target_price:,.0f} coins** "
+        f"*(prix actuel : {current:,.2f})*"
+    )
+
+
+@bot.command(name="suppr_alerte", aliases=["del_alerte", "remove_alert"])
+async def cmd_suppr_alerte(ctx, symbol: str = None):
+    uid = str(ctx.author.id)
+    alerts = crypto_alerts.get(uid, [])
+    if not alerts:
+        return await ctx.send("❌ Aucune alerte active.")
+    if symbol:
+        symbol = symbol.upper()
+        before = len(alerts)
+        crypto_alerts[uid] = [a for a in alerts if a['symbol'] != symbol]
+        removed = before - len(crypto_alerts[uid])
+        save_data()
+        return await ctx.send(f"✅ {removed} alerte(s) supprimée(s) pour **{symbol}**.")
+    crypto_alerts[uid] = []
+    save_data()
+    await ctx.send("✅ Toutes vos alertes crypto ont été supprimées.")
+
+
+async def _check_crypto_alerts():
+    for uid, alerts in list(crypto_alerts.items()):
+        remaining = []
+        triggered = []
+        for a in alerts:
+            s = a['symbol']
+            price = crypto_prices.get(s, 0)
+            hit = (a['direction'] == 'up' and price >= a['target']) or \
+                  (a['direction'] == 'down' and price <= a['target'])
+            if hit:
+                triggered.append((s, a['target'], price))
+            else:
+                remaining.append(a)
+        if triggered:
+            crypto_alerts[uid] = remaining
+            try:
+                user = await bot.fetch_user(int(uid))
+                for s, target, price in triggered:
+                    await user.send(
+                        f"🔔 **Alerte crypto déclenchée !**\n"
+                        f"**{s}** a atteint **{price:,.2f} coins** (cible : {target:,.0f})"
+                    )
+            except Exception:
+                pass
+    save_data()
+
+
+# ── Classement crypto (portfolio) ─────────────────────────────────────────
+@bot.command(name="top_crypto", aliases=["classement_crypto", "crypto_top"])
+async def cmd_top_crypto(ctx):
+    guild_members = {m.id for m in ctx.guild.members if not m.bot}
+    scores = []
+    for uid_str, holdings in crypto_holdings.items():
+        uid_int = int(uid_str)
+        if uid_int not in guild_members:
+            continue
+        val = sum(q * crypto_prices.get(s, 0) for s, q in holdings.items() if q > 0.000001)
+        if val > 0:
+            scores.append((uid_int, val))
+    scores.sort(key=lambda x: x[1], reverse=True)
+    top = scores[:10]
+    if not top:
+        return await ctx.send("Aucun investisseur crypto sur ce serveur pour l'instant.")
+    medals = ['🥇','🥈','🥉'] + ['🔹'] * 7
+    lines = []
+    for i, (uid_int, val) in enumerate(top):
+        m = ctx.guild.get_member(uid_int)
+        name = m.display_name if m else f"<@{uid_int}>"
+        lines.append(f"{medals[i]} **{name}** — ≈ {val:,.0f} coins")
+    embed = discord.Embed(title="📈 Top Investisseurs Crypto", description='\n'.join(lines), color=0xf39c12)
+    await ctx.send(embed=embed)
+
+
+# ── Stats serveur ─────────────────────────────────────────────────────────
+@bot.command(name="stats_serveur", aliases=["stats-serveur", "server_stats"])
+async def cmd_stats_serveur(ctx):
+    guild_members = {m.id for m in ctx.guild.members if not m.bot}
+    total_coins   = sum(coins[uid] + safes.get(str(uid), 0) for uid in guild_members)
+    total_players = sum(1 for uid in guild_members if coins[uid] > 0)
+    total_crypto  = sum(
+        sum(q * crypto_prices.get(s, 0) for s, q in crypto_holdings.get(str(uid), {}).items() if q > 0.000001)
+        for uid in guild_members
+    )
+    richest = max(guild_members, key=lambda uid: coins[uid] + safes.get(str(uid), 0), default=None)
+    richest_str = ""
+    if richest:
+        m = ctx.guild.get_member(richest)
+        richest_str = f"**{m.display_name if m else richest}** ({coins[richest] + safes.get(str(richest), 0):,} coins)"
+    active_factories = sum(1 for uid in guild_members if factories.get(str(uid), {}).get('workers', 0) > 0)
+    embed = discord.Embed(title="📊 Statistiques du Serveur", color=0x3498db)
+    embed.add_field(name="👥 Joueurs actifs", value=str(total_players), inline=True)
+    embed.add_field(name="💰 Coins en circulation", value=f"{total_coins:,}", inline=True)
+    embed.add_field(name="📈 Valeur crypto totale", value=f"≈ {total_crypto:,.0f} coins", inline=True)
+    embed.add_field(name="🏭 Usines actives", value=str(active_factories), inline=True)
+    if richest_str:
+        embed.add_field(name="👑 Joueur le plus riche", value=richest_str, inline=False)
+    embed.set_footer(text=f"Serveur : {ctx.guild.name} • {datetime.now().strftime('%d/%m/%Y')}")
+    await ctx.send(embed=embed)
+
+
+# ── Marché entre joueurs ──────────────────────────────────────────────────
+@bot.command(name="mettre_en_vente", aliases=["sell_item", "vendre_item"])
+async def cmd_mettre_en_vente(ctx, item_id: int, prix: int):
+    uid = str(ctx.author.id)
+    items = owned_items.get(uid, {})
+    qty = items.get(str(item_id), 0)
+    if item_id not in SHOP_ITEMS:
+        return await ctx.send("❌ Objet invalide.")
+    if qty < 1:
+        return await ctx.send(f"❌ Vous ne possédez pas cet objet.")
+    if prix < 1:
+        return await ctx.send("❌ Prix invalide.")
+    global market_next_id
+    listing_id = str(market_next_id)
+    market_next_id += 1
+    market_listings[listing_id] = {
+        'seller': ctx.author.id,
+        'item_id': item_id,
+        'price': prix,
+        'created': datetime.now().isoformat()
+    }
+    items[str(item_id)] = qty - 1
+    owned_items[uid] = items
+    save_data()
+    item_name = SHOP_ITEMS[item_id]['name']
+    await ctx.send(
+        f"🏪 **{item_name}** mis en vente pour **{prix:,} coins** ! (ID annonce : `#{listing_id}`)\n"
+        f"Les autres peuvent l'acheter avec `!acheter_offre {listing_id}`"
+    )
+
+
+@bot.command(name="acheter_offre", aliases=["buy_listing", "offre"])
+async def cmd_acheter_offre(ctx, listing_id: str):
+    listing = market_listings.get(listing_id)
+    if not listing:
+        return await ctx.send(f"❌ Annonce `#{listing_id}` introuvable.")
+    if listing['seller'] == ctx.author.id:
+        return await ctx.send("❌ Vous ne pouvez pas acheter votre propre annonce.")
+    price = listing['price']
+    if coins[ctx.author.id] < price:
+        return await ctx.send(f"❌ Pas assez de coins. Il vous faut **{price:,} coins**.")
+    item_id = listing['item_id']
+    item_name = SHOP_ITEMS.get(item_id, {}).get('name', f"Item #{item_id}")
+    coins[ctx.author.id] -= price
+    coins[listing['seller']] += price
+    uid = str(ctx.author.id)
+    owned_items.setdefault(uid, {})
+    owned_items[uid][str(item_id)] = owned_items[uid].get(str(item_id), 0) + 1
+    del market_listings[listing_id]
+    save_data()
+    seller = ctx.guild.get_member(listing['seller'])
+    seller_str = seller.mention if seller else f"<@{listing['seller']}>"
+    await ctx.send(
+        f"✅ Vous avez acheté **{item_name}** pour **{price:,} coins** auprès de {seller_str} !"
+    )
+
+
+@bot.command(name="marche", aliases=["market", "marché"])
+async def cmd_marche(ctx):
+    if not market_listings:
+        return await ctx.send("🏪 Le marché est vide pour l'instant.")
+    lines = []
+    for lid, lst in list(market_listings.items())[:15]:
+        item_name = SHOP_ITEMS.get(lst['item_id'], {}).get('name', f"Item #{lst['item_id']}")
+        seller = ctx.guild.get_member(lst['seller'])
+        seller_name = seller.display_name if seller else "Inconnu"
+        lines.append(f"`#{lid}` {item_name} — **{lst['price']:,} coins** *(par {seller_name})*")
+    embed = discord.Embed(
+        title="🏪 Marché entre joueurs",
+        description='\n'.join(lines),
+        color=0xe67e22
+    )
+    embed.set_footer(text="!acheter_offre <ID> | !mettre_en_vente <item_id> <prix>")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="retirer_offre", aliases=["cancel_listing"])
+async def cmd_retirer_offre(ctx, listing_id: str):
+    listing = market_listings.get(listing_id)
+    if not listing:
+        return await ctx.send(f"❌ Annonce `#{listing_id}` introuvable.")
+    if listing['seller'] != ctx.author.id and not ctx.author.guild_permissions.administrator:
+        return await ctx.send("❌ Vous ne pouvez retirer que vos propres annonces.")
+    item_id = listing['item_id']
+    uid = str(ctx.author.id if listing['seller'] == ctx.author.id else listing['seller'])
+    owned_items.setdefault(uid, {})
+    owned_items[uid][str(item_id)] = owned_items[uid].get(str(item_id), 0) + 1
+    del market_listings[listing_id]
+    save_data()
+    await ctx.send(f"✅ Annonce `#{listing_id}` retirée. L'objet a été rendu à son propriétaire.")
+
+
+# ── ELO tournoi ───────────────────────────────────────────────────────────
+def _update_elo(winner_id: int, loser_id: int):
+    K = 32
+    ew = tournament_elo.setdefault(str(winner_id), 1000)
+    el = tournament_elo.setdefault(str(loser_id), 1000)
+    exp_w = 1 / (1 + 10 ** ((el - ew) / 400))
+    exp_l = 1 - exp_w
+    tournament_elo[str(winner_id)] = round(ew + K * (1 - exp_w))
+    tournament_elo[str(loser_id)]  = round(el + K * (0 - exp_l))
+
+
+@bot.command(name="classement_tournoi", aliases=["elo", "top_elo"])
+async def cmd_classement_tournoi(ctx):
+    guild_members = {m.id for m in ctx.guild.members if not m.bot}
+    scores = [(uid_int, tournament_elo.get(str(uid_int), 1000)) for uid_int in guild_members if str(uid_int) in tournament_elo]
+    scores.sort(key=lambda x: x[1], reverse=True)
+    top = scores[:10]
+    if not top:
+        return await ctx.send("Aucun joueur avec un score ELO pour l'instant.")
+    medals = ['🥇','🥈','🥉'] + ['🔹'] * 7
+    lines = []
+    for i, (uid_int, elo) in enumerate(top):
+        m = ctx.guild.get_member(uid_int)
+        name = m.display_name if m else f"<@{uid_int}>"
+        lines.append(f"{medals[i]} **{name}** — {elo} pts ELO")
+    embed = discord.Embed(title="🏆 Classement ELO Tournois", description='\n'.join(lines), color=0xe74c3c)
+    await ctx.send(embed=embed)
+
+
+# ── Config salon logs admin ───────────────────────────────────────────────
+@bot.command(name="set_admin_log", aliases=["admin_log"])
+@commands.has_permissions(administrator=True)
+async def cmd_set_admin_log(ctx, channel: discord.TextChannel = None):
+    global ADMIN_LOG_CHANNEL_ID
+    if channel is None:
+        channel = ctx.channel
+    ADMIN_LOG_CHANNEL_ID = channel.id
+    save_data()
+    await ctx.send(f"✅ Logs admin configurés dans {channel.mention}.")
+
+
+async def _admin_log(guild, title: str, description: str, color=0xe74c3c, author: discord.Member = None):
+    if not ADMIN_LOG_CHANNEL_ID:
+        return
+    ch = guild.get_channel(ADMIN_LOG_CHANNEL_ID)
+    if not ch:
+        return
+    embed = discord.Embed(title=f"🔐 {title}", description=description, color=color, timestamp=discord.utils.utcnow())
+    if author:
+        embed.set_footer(text=f"Par {author.display_name} ({author.id})", icon_url=author.display_avatar.url)
+    try:
+        await ch.send(embed=embed)
+    except Exception:
+        pass
+
+
 # =======================================================================
 # ======================== FIN CASINO ===================================
 # =======================================================================
