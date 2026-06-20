@@ -293,8 +293,9 @@ def _team_of(user_id):
 # Nom du fichier de données — sur Railway, monté via Volume sur /data
 import shutil
 DATA_FILE = os.environ.get('DATA_FILE', '/data/data.json' if os.path.isdir('/data') else 'data.json')
-if os.path.isdir('/data') and not os.path.exists('/data/data.json') and os.path.exists('/app/data.json'):
-    shutil.copy('/app/data.json', '/data/data.json')
+if not os.path.exists(DATA_FILE) and os.path.exists('/app/data.json'):
+    os.makedirs(os.path.dirname(DATA_FILE) or '.', exist_ok=True)
+    shutil.copy('/app/data.json', DATA_FILE)
 
 # --- Fonctions de chargement et de sauvegarde des données ---
 def load_data():
