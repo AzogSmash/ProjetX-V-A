@@ -216,7 +216,6 @@ cmd_role_perms   = {}   # name -> [role_id, ...] (allowed roles, empty=all)
 # ── Nouvelles fonctionnalités ─────────────────────────────────────────────
 daily_streaks     = {}   # str(uid) -> {'streak': int, 'last_day': 'YYYY-MM-DD'}
 ticket_purchases  = {}   # str(uid) -> {'count': int, 'day': 'YYYY-MM-DD'}
-reputations      = {}   # str(uid) -> {'points': int, 'given': {str(uid): 'YYYY-MM-DD'}}
 birthdays        = {}   # str(uid) -> {'day': int, 'month': int, 'guild_id': int}
 crypto_alerts    = {}   # str(uid) -> [{'symbol': str, 'target': float, 'direction': str}]
 tournament_elo   = {}   # str(uid) -> int (score ELO tournoi)
@@ -300,7 +299,7 @@ def load_data():
     global theft_cooldowns, miner_cooldowns, hacker_cooldowns, risque_cooldowns, rob_cooldowns
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms
-    global daily_streaks, ticket_purchases, reputations, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID
+    global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r') as f:
             try:
@@ -372,7 +371,6 @@ def load_data():
                 cmd_role_perms   = data.get('cmd_role_perms', {})
                 daily_streaks    = data.get('daily_streaks', {})
                 ticket_purchases = data.get('ticket_purchases', {})
-                reputations      = data.get('reputations', {})
                 birthdays        = data.get('birthdays', {})
                 crypto_alerts    = data.get('crypto_alerts', {})
                 tournament_elo   = data.get('tournament_elo', {})
@@ -461,7 +459,6 @@ def save_data():
     data_to_save['casino_config']    = casino_config
     data_to_save['daily_streaks']    = daily_streaks
     data_to_save['ticket_purchases'] = ticket_purchases
-    data_to_save['reputations']      = reputations
     data_to_save['birthdays']        = birthdays
     data_to_save['crypto_alerts']    = crypto_alerts
     data_to_save['tournament_elo']   = tournament_elo
@@ -716,7 +713,6 @@ def _build_help_categories(ctx):
                  "Commandes générales",
                  "`!aide` — Ce menu\n"
                  "`!profil` (`!profile`, `!stats`) — Voir sa fiche complète\n"
-                 "`!rep @membre [+/-]` (`!reputation`) — Voter la réputation\n"
                  "`!anniversaire JJ/MM` (`!anniv`) — Enregistrer son anniversaire\n"
                  "`!stats_serveur` (`!serveur`) — Vue globale du serveur"))
     cats.append(("eco", "🪙 Économie de base",
@@ -6531,7 +6527,6 @@ async def cmd_profil(ctx, member: discord.Member = None):
     h_crypto = {s: q for s, q in crypto_holdings.get(uid, {}).items() if q > 0.000001}
     crypto_val = sum(q * crypto_prices.get(s, 0) for s, q in h_crypto.items())
     streak = daily_streaks.get(uid, {}).get('streak', 0)
-    rep    = reputations.get(uid, {}).get('points', 0)
     elo    = tournament_elo.get(uid, 1000)
     job    = jobs_data.get(uid, {}).get('job', None)
     job_str = JOBS[job]['name'] if job and job in JOBS else "Aucun"
@@ -6549,7 +6544,6 @@ async def cmd_profil(ctx, member: discord.Member = None):
     if crypto_val > 0:
         embed.add_field(name="📈 Crypto", value=f"≈ {crypto_val:,.0f} coins", inline=True)
     embed.add_field(name="🔥 Streak Daily", value=f"{streak} jour{'s' if streak != 1 else ''}", inline=True)
-    embed.add_field(name="⭐ Réputation", value=f"{rep:+d} pts", inline=True)
     embed.add_field(name="🏆 ELO Tournoi", value=str(elo), inline=True)
     embed.add_field(name="💼 Métier", value=job_str, inline=True)
     embed.add_field(name="🏭 Usine", value=f"{workers} ouvrier{'s' if workers != 1 else ''}", inline=True)
@@ -6559,38 +6553,6 @@ async def cmd_profil(ctx, member: discord.Member = None):
 
 
 # ── Réputation ───────────────────────────────────────────────────────────
-@bot.command(name="rep", aliases=["reputation"])
-async def cmd_rep(ctx, member: discord.Member = None, action: str = "+"):
-    if member is None:
-        return await ctx.send("❌ Mention un membre. Ex : `!rep @pseudo` ou `!rep @pseudo -`")
-    if member.id == ctx.author.id:
-        return await ctx.send("❌ Vous ne pouvez pas vous noter vous-même.")
-    if member.bot:
-        return await ctx.send("❌ Les bots n'ont pas de réputation.")
-
-    giver_uid = str(ctx.author.id)
-    target_uid = str(member.id)
-    today = datetime.now().date().isoformat()
-
-    rep_data = reputations.setdefault(giver_uid, {'points': 0, 'given': {}})
-    last_given_to = rep_data['given'].get(target_uid)
-    if last_given_to == today:
-        return await ctx.send(f"❌ Vous avez déjà noté {member.display_name} aujourd'hui.")
-
-    delta = +1 if action.strip() in ('+', '➕', 'plus') else -1
-    rep_data['given'][target_uid] = today
-
-    target_rep = reputations.setdefault(target_uid, {'points': 0, 'given': {}})
-    target_rep['points'] += delta
-    save_data()
-
-    sign = "+" if delta > 0 else ""
-    emoji = "⬆️" if delta > 0 else "⬇️"
-    await ctx.send(
-        f"{emoji} {ctx.author.mention} a {'augmenté' if delta > 0 else 'diminué'} la réputation de "
-        f"{member.mention} ! *(Score : **{sign}{target_rep['points']} pts**)*"
-    )
-
 
 # ── Anniversaires ────────────────────────────────────────────────────────
 @bot.command(name="anniversaire", aliases=["birthday", "anniv"])
