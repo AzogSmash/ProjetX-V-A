@@ -304,7 +304,7 @@ def load_data():
     global teams, user_team, disabled_cmds, cmd_role_perms
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r') as f:
+        with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
             try:
                 data = json.load(f)
 
