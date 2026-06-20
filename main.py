@@ -218,8 +218,6 @@ daily_streaks    = {}   # str(uid) -> {'streak': int, 'last_day': 'YYYY-MM-DD'}
 reputations      = {}   # str(uid) -> {'points': int, 'given': {str(uid): 'YYYY-MM-DD'}}
 birthdays        = {}   # str(uid) -> {'day': int, 'month': int, 'guild_id': int}
 crypto_alerts    = {}   # str(uid) -> [{'symbol': str, 'target': float, 'direction': str}]
-market_listings  = {}   # str(listing_id) -> {'seller': int, 'item_id': int, 'price': int, 'created': ISO}
-market_next_id   = 1
 tournament_elo   = {}   # str(uid) -> int (score ELO tournoi)
 ADMIN_LOG_CHANNEL_ID = 0  # à configurer via !set_admin_log <channel_id>
 
@@ -301,7 +299,7 @@ def load_data():
     global theft_cooldowns, miner_cooldowns, hacker_cooldowns, risque_cooldowns, rob_cooldowns
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms
-    global daily_streaks, reputations, birthdays, crypto_alerts, market_listings, market_next_id, tournament_elo, ADMIN_LOG_CHANNEL_ID
+    global daily_streaks, reputations, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r') as f:
             try:
@@ -375,8 +373,6 @@ def load_data():
                 reputations      = data.get('reputations', {})
                 birthdays        = data.get('birthdays', {})
                 crypto_alerts    = data.get('crypto_alerts', {})
-                market_listings  = data.get('market_listings', {})
-                market_next_id   = data.get('market_next_id', 1)
                 tournament_elo   = data.get('tournament_elo', {})
                 ADMIN_LOG_CHANNEL_ID = data.get('admin_log_channel_id', 0)
                 loaded_cfg = data.get('casino_config', {})
@@ -465,8 +461,6 @@ def save_data():
     data_to_save['reputations']      = reputations
     data_to_save['birthdays']        = birthdays
     data_to_save['crypto_alerts']    = crypto_alerts
-    data_to_save['market_listings']  = market_listings
-    data_to_save['market_next_id']   = market_next_id
     data_to_save['tournament_elo']   = tournament_elo
     data_to_save['admin_log_channel_id'] = ADMIN_LOG_CHANNEL_ID
 
@@ -766,15 +760,11 @@ def _build_help_categories(ctx):
                  f"`!embaucher` (`!hire`) — Embaucher un employé *(cooldown {FACTORY_HIRE_COOLDOWN_HOURS}h)*\n"
                  f"`!collecter` (`!collect`) — Collecter la production\n"
                  f"Max **{MAX_FACTORY_WORKERS} employés**"))
-    cats.append(("shop", "🛒 Magasin & Marché",
-                 "Items, inventaire et marché entre joueurs",
+    cats.append(("shop", "🛒 Magasin & Tickets",
+                 "Items et inventaire",
                  "`!shop` (`!boutique`) — Magasin (boutons d'achat)\n"
                  "`!acheter <item_id>` (`!buy`) — Acheter un item\n"
-                 "`!inventaire` (`!inv`) — Voir vos items\n"
-                 "`!marche` (`!market`) — Voir les annonces du marché joueurs\n"
-                 "`!mettre_en_vente <item_id> <prix>` (`!vente`, `!mev`) — Vendre un item\n"
-                 "`!acheter_offre <ID>` (`!offre`) — Acheter une annonce\n"
-                 "`!retirer_offre <ID>` (`!ro`) — Retirer son annonce"))
+                 "`!inventaire` (`!inv`) — Voir vos items"))
     cats.append(("team", "👥 Clubs / Teams",
                  "Créer ou rejoindre un club de joueurs",
                  "`!team` (`!club`, `!guilde`) — Interface du club\n"
@@ -6763,96 +6753,6 @@ async def cmd_stats_serveur(ctx):
 
 
 # ── Marché entre joueurs ──────────────────────────────────────────────────
-@bot.command(name="mettre_en_vente", aliases=["sell_item", "vendre_item", "vente", "mev"])
-async def cmd_mettre_en_vente(ctx, item_id: int, prix: int):
-    uid = str(ctx.author.id)
-    items = owned_items.get(uid, {})
-    qty = items.get(str(item_id), 0)
-    if item_id not in SHOP_ITEMS:
-        return await ctx.send("❌ Objet invalide.")
-    if qty < 1:
-        return await ctx.send(f"❌ Vous ne possédez pas cet objet.")
-    if prix < 1:
-        return await ctx.send("❌ Prix invalide.")
-    global market_next_id
-    listing_id = str(market_next_id)
-    market_next_id += 1
-    market_listings[listing_id] = {
-        'seller': ctx.author.id,
-        'item_id': item_id,
-        'price': prix,
-        'created': datetime.now().isoformat()
-    }
-    items[str(item_id)] = qty - 1
-    owned_items[uid] = items
-    save_data()
-    item_name = SHOP_ITEMS[item_id]['name']
-    await ctx.send(
-        f"🏪 **{item_name}** mis en vente pour **{prix:,} coins** ! (ID annonce : `#{listing_id}`)\n"
-        f"Les autres peuvent l'acheter avec `!acheter_offre {listing_id}`"
-    )
-
-
-@bot.command(name="acheter_offre", aliases=["buy_listing", "offre"])
-async def cmd_acheter_offre(ctx, listing_id: str):
-    listing = market_listings.get(listing_id)
-    if not listing:
-        return await ctx.send(f"❌ Annonce `#{listing_id}` introuvable.")
-    if listing['seller'] == ctx.author.id:
-        return await ctx.send("❌ Vous ne pouvez pas acheter votre propre annonce.")
-    price = listing['price']
-    if coins[ctx.author.id] < price:
-        return await ctx.send(f"❌ Pas assez de coins. Il vous faut **{price:,} coins**.")
-    item_id = listing['item_id']
-    item_name = SHOP_ITEMS.get(item_id, {}).get('name', f"Item #{item_id}")
-    coins[ctx.author.id] -= price
-    coins[listing['seller']] += price
-    uid = str(ctx.author.id)
-    owned_items.setdefault(uid, {})
-    owned_items[uid][str(item_id)] = owned_items[uid].get(str(item_id), 0) + 1
-    del market_listings[listing_id]
-    save_data()
-    seller = ctx.guild.get_member(listing['seller'])
-    seller_str = seller.mention if seller else f"<@{listing['seller']}>"
-    await ctx.send(
-        f"✅ Vous avez acheté **{item_name}** pour **{price:,} coins** auprès de {seller_str} !"
-    )
-
-
-@bot.command(name="marche", aliases=["market", "marché"])
-async def cmd_marche(ctx):
-    if not market_listings:
-        return await ctx.send("🏪 Le marché est vide pour l'instant.")
-    lines = []
-    for lid, lst in list(market_listings.items())[:15]:
-        item_name = SHOP_ITEMS.get(lst['item_id'], {}).get('name', f"Item #{lst['item_id']}")
-        seller = ctx.guild.get_member(lst['seller'])
-        seller_name = seller.display_name if seller else "Inconnu"
-        lines.append(f"`#{lid}` {item_name} — **{lst['price']:,} coins** *(par {seller_name})*")
-    embed = discord.Embed(
-        title="🏪 Marché entre joueurs",
-        description='\n'.join(lines),
-        color=0xe67e22
-    )
-    embed.set_footer(text="!acheter_offre <ID> | !mettre_en_vente <item_id> <prix>")
-    await ctx.send(embed=embed)
-
-
-@bot.command(name="retirer_offre", aliases=["cancel_listing", "ro", "annuler_offre"])
-async def cmd_retirer_offre(ctx, listing_id: str):
-    listing = market_listings.get(listing_id)
-    if not listing:
-        return await ctx.send(f"❌ Annonce `#{listing_id}` introuvable.")
-    if listing['seller'] != ctx.author.id and not ctx.author.guild_permissions.administrator:
-        return await ctx.send("❌ Vous ne pouvez retirer que vos propres annonces.")
-    item_id = listing['item_id']
-    uid = str(ctx.author.id if listing['seller'] == ctx.author.id else listing['seller'])
-    owned_items.setdefault(uid, {})
-    owned_items[uid][str(item_id)] = owned_items[uid].get(str(item_id), 0) + 1
-    del market_listings[listing_id]
-    save_data()
-    await ctx.send(f"✅ Annonce `#{listing_id}` retirée. L'objet a été rendu à son propriétaire.")
-
 
 # ── ELO tournoi ───────────────────────────────────────────────────────────
 def _update_elo(winner_id: int, loser_id: int):
