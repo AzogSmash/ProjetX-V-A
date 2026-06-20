@@ -220,6 +220,7 @@ birthdays        = {}   # str(uid) -> {'day': int, 'month': int, 'guild_id': int
 crypto_alerts    = {}   # str(uid) -> [{'symbol': str, 'target': float, 'direction': str}]
 tournament_elo   = {}   # str(uid) -> int (score ELO tournoi)
 ADMIN_LOG_CHANNEL_ID = 0  # à configurer via !set_admin_log <channel_id>
+draft_sessions   = {}   # channel_id -> session dict (phase de ban Brawl Stars)
 
 # ── Configuration prix / mises (modifiable par !prix_casino) ─────────────
 BOT_OWNER_ID = 1056848438270115900   # happy_gt3 — créateur du bot
@@ -768,14 +769,15 @@ def _build_help_categories(ctx):
                  "Créer ou rejoindre un club de joueurs",
                  "`!team` (`!club`, `!guilde`) — Interface du club\n"
                  "`!gdt` — Compétitions inter-clubs"))
-    cats.append(("tournoi", "🏆 Tournois",
-                 "Tournois solo ou par équipes (2v2 / 3v3 / 4v4 / 5v5)",
+    cats.append(("tournoi", "🏆 Tournois & Draft",
+                 "Tournois, ELO et phase de ban Brawl Stars",
                  "`!tournois solo` · `2v2` · `3v3` · `4v4` · `5v5` *(Admin)*\n"
                  "`!tournoi_status` (`!t_status`) — Voir le bracket\n"
                  "`!classement_tournoi` (`!elo`) — Classement ELO\n"
                  "Résultat : **les 2 capitaines** valident le même vainqueur\n"
                  "*(Admin)* `!win <n°>` (`!victoire`) — Trancher un match\n"
-                 "*(Admin)* `!prix_tournoi <montant>` — Définir la récompense"))
+                 "*(Admin)* `!prix_tournoi <montant>` — Définir la récompense\n"
+                 "`!draft <1v1|2v2|3v3|4v4|5v5> @cap2` — Phase de ban Brawl Stars"))
 
     if has_manage_messages or has_ban_members:
         lines = []
@@ -6793,6 +6795,325 @@ async def _admin_log(guild, title: str, description: str, color=0xe74c3c, author
 # =======================================================================
 # ======================== FIN CASINO ===================================
 # =======================================================================
+
+# =======================================================================
+# ======================== SYSTÈME DRAFT (BAN PHASE) ====================
+# =======================================================================
+
+class BrawlerBanModal(discord.ui.Modal, title="🚫 Bannir un Brawler"):
+    brawler = discord.ui.TextInput(
+        label="Nom du brawler à bannir",
+        placeholder="Ex : Shelly, Colt, Spike…",
+        required=True,
+        max_length=64,
+    )
+
+    def __init__(self, channel_id: int, uid: int, team: int):
+        super().__init__()
+        self.channel_id = channel_id
+        self.uid = uid
+        self.team = team
+
+    async def on_submit(self, interaction: discord.Interaction):
+        sess = draft_sessions.get(self.channel_id)
+        if not sess or sess['phase'] != 'ban':
+            return await interaction.response.send_message(
+                "❌ Cette session draft n'est plus active.", ephemeral=True
+            )
+
+        brawler_name = self.brawler.value.strip()
+        if not brawler_name:
+            return await interaction.response.send_message("❌ Nom invalide.", ephemeral=True)
+
+        ban_list  = sess['bans1'] if self.team == 1 else sess['bans2']
+        team_list = sess['team1'] if self.team == 1 else sess['team2']
+
+        if any(b['uid'] == self.uid for b in ban_list):
+            return await interaction.response.send_message(
+                "❌ Vous avez déjà banni un brawler.", ephemeral=True
+            )
+
+        ban_list.append({'uid': self.uid, 'brawler': brawler_name})
+
+        my_bans = "\n".join(f"• <@{b['uid']}> → **{b['brawler']}**" for b in ban_list)
+        await interaction.response.send_message(
+            f"✅ Vous avez banni **{brawler_name}** !\n\n"
+            f"**Bans de votre équipe :**\n{my_bans}\n\n"
+            f"*{len(ban_list)}/{len(team_list)} membres ont banni.*",
+            ephemeral=True,
+        )
+
+        total_members = len(sess['team1']) + len(sess['team2'])
+        total_bans    = len(sess['bans1']) + len(sess['bans2'])
+        if total_bans >= total_members:
+            await _do_draft_reveal(interaction.channel, self.channel_id)
+
+
+async def _do_draft_reveal(channel, channel_id: int):
+    sess = draft_sessions.pop(channel_id, None)
+    if not sess:
+        return
+
+    embed = discord.Embed(title="🚫 Phase de Ban — Résultats", color=0xff4444)
+
+    t1_lines = "\n".join(
+        f"• <@{b['uid']}> → **{b['brawler']}**" for b in sess['bans1']
+    ) or "*Aucun ban*"
+    t2_lines = "\n".join(
+        f"• <@{b['uid']}> → **{b['brawler']}**" for b in sess['bans2']
+    ) or "*Aucun ban*"
+
+    embed.add_field(name="🔵 Équipe 1 — Bans", value=t1_lines, inline=True)
+    embed.add_field(name="🔴 Équipe 2 — Bans", value=t2_lines, inline=True)
+
+    banned_all = ", ".join(
+        f"**{b['brawler']}**" for b in sess['bans1'] + sess['bans2']
+    )
+    if banned_all:
+        embed.set_footer(text=f"Brawlers bannis : {banned_all}")
+
+    await channel.send("🏁 **Tous les bans sont révélés !**", embed=embed)
+
+
+def _draft_setup_embed(sess):
+    n   = sess['mode']
+    t1  = sess['team1']
+    t2  = sess['team2']
+    embed = discord.Embed(
+        title=f"🎮 Draft {n}v{n} — Phase de recrutement",
+        description=(
+            f"**Capitaine équipe 1 :** <@{sess['cap1']}>\n"
+            f"**Capitaine équipe 2 :** <@{sess['cap2']}>\n\n"
+            f"Chaque équipe a besoin de **{n} joueur(s)**.\n"
+            "Rejoignez une équipe en cliquant sur les boutons !"
+        ),
+        color=0x5865f2,
+    )
+    t1_val = "\n".join(f"• <@{uid}>" for uid in t1) if t1 else "*En attente…*"
+    t2_val = "\n".join(f"• <@{uid}>" for uid in t2) if t2 else "*En attente…*"
+    embed.add_field(name=f"🔵 Équipe 1 ({len(t1)}/{n})", value=t1_val, inline=True)
+    embed.add_field(name=f"🔴 Équipe 2 ({len(t2)}/{n})", value=t2_val, inline=True)
+    return embed
+
+
+def _ban_phase_embed(sess):
+    n  = sess['mode']
+    t1 = sess['team1']
+    t2 = sess['team2']
+    embed = discord.Embed(
+        title=f"🚫 Draft {n}v{n} — Phase de Ban",
+        description=(
+            "Chaque joueur peut bannir **1 brawler**.\n"
+            "Cliquez sur **🚫 Bannir** pour entrer votre ban.\n"
+            "Les bans de l'équipe adverse sont **cachés** jusqu'à la révélation.\n\n"
+            "Quand tout le monde a banni, les bans sont révélés automatiquement."
+        ),
+        color=0xff4444,
+    )
+    n1 = len(sess['bans1'])
+    n2 = len(sess['bans2'])
+    embed.add_field(
+        name=f"🔵 Équipe 1 — {n1}/{len(t1)} bans",
+        value=" ".join(f"<@{uid}>" for uid in t1),
+        inline=True,
+    )
+    embed.add_field(
+        name=f"🔴 Équipe 2 — {n2}/{len(t2)} bans",
+        value=" ".join(f"<@{uid}>" for uid in t2),
+        inline=True,
+    )
+    return embed
+
+
+class DraftSetupView(discord.ui.View):
+    def __init__(self, channel_id: int):
+        super().__init__(timeout=300)
+        self.channel_id = channel_id
+
+    @discord.ui.button(label="🔵 Rejoindre Équipe 1", style=discord.ButtonStyle.primary)
+    async def join_t1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._join(interaction, 1)
+
+    @discord.ui.button(label="🔴 Rejoindre Équipe 2", style=discord.ButtonStyle.danger)
+    async def join_t2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._join(interaction, 2)
+
+    async def _join(self, interaction: discord.Interaction, team: int):
+        sess = draft_sessions.get(self.channel_id)
+        if not sess or sess['phase'] != 'setup':
+            return await interaction.response.send_message(
+                "❌ Cette session n'est plus active.", ephemeral=True
+            )
+
+        uid = interaction.user.id
+        t1, t2 = sess['team1'], sess['team2']
+        n = sess['mode']
+
+        if uid in t1 or uid in t2:
+            return await interaction.response.send_message(
+                "❌ Vous avez déjà rejoint une équipe.", ephemeral=True
+            )
+
+        target = t1 if team == 1 else t2
+        if len(target) >= n:
+            return await interaction.response.send_message(
+                f"❌ L'équipe {team} est déjà complète !", ephemeral=True
+            )
+
+        target.append(uid)
+        await interaction.response.send_message(
+            f"✅ Vous avez rejoint l'**Équipe {team}** !", ephemeral=True
+        )
+
+        embed = _draft_setup_embed(sess)
+
+        if len(t1) == n and len(t2) == n:
+            sess['phase'] = 'ban'
+            for item in self.children:
+                item.disabled = True
+            await interaction.message.edit(embed=embed, view=self)
+            ban_view  = BanPhaseView(self.channel_id)
+            ban_embed = _ban_phase_embed(sess)
+            mentions  = " ".join(f"<@{uid}>" for uid in t1 + t2)
+            ban_msg = await interaction.channel.send(
+                f"✅ Les deux équipes sont complètes ! La phase de ban commence.\n{mentions}",
+                embed=ban_embed,
+                view=ban_view,
+            )
+            sess['ban_msg_id'] = ban_msg.id
+        else:
+            await interaction.message.edit(embed=embed, view=self)
+
+    async def on_timeout(self):
+        draft_sessions.pop(self.channel_id, None)
+        for item in self.children:
+            item.disabled = True
+
+
+class BanPhaseView(discord.ui.View):
+    def __init__(self, channel_id: int):
+        super().__init__(timeout=600)
+        self.channel_id = channel_id
+
+    @discord.ui.button(label="🚫 Bannir un Brawler", style=discord.ButtonStyle.danger)
+    async def ban_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        sess = draft_sessions.get(self.channel_id)
+        if not sess or sess['phase'] != 'ban':
+            return await interaction.response.send_message(
+                "❌ Cette session n'est plus active.", ephemeral=True
+            )
+
+        uid = interaction.user.id
+        if uid in sess['team1']:
+            team = 1
+        elif uid in sess['team2']:
+            team = 2
+        else:
+            return await interaction.response.send_message(
+                "❌ Vous ne faites pas partie de ce draft.", ephemeral=True
+            )
+
+        ban_list = sess['bans1'] if team == 1 else sess['bans2']
+        if any(b['uid'] == uid for b in ban_list):
+            return await interaction.response.send_message(
+                "❌ Vous avez déjà banni un brawler.", ephemeral=True
+            )
+
+        await interaction.response.send_modal(
+            BrawlerBanModal(self.channel_id, uid, team)
+        )
+
+    @discord.ui.button(label="🏁 Révéler maintenant", style=discord.ButtonStyle.secondary)
+    async def force_reveal_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        sess = draft_sessions.get(self.channel_id)
+        if not sess or sess['phase'] != 'ban':
+            return await interaction.response.send_message(
+                "❌ Cette session n'est plus active.", ephemeral=True
+            )
+
+        uid      = interaction.user.id
+        is_cap   = uid in (sess['cap1'], sess['cap2'])
+        is_admin = interaction.user.guild_permissions.administrator
+
+        if not is_cap and not is_admin:
+            return await interaction.response.send_message(
+                "❌ Seuls les capitaines ou admins peuvent forcer la révélation.", ephemeral=True
+            )
+
+        await interaction.response.send_message(
+            "🏁 Révélation forcée par un capitaine/admin !", ephemeral=False
+        )
+        await _do_draft_reveal(interaction.channel, self.channel_id)
+
+    async def on_timeout(self):
+        draft_sessions.pop(self.channel_id, None)
+
+
+@bot.command(name="draft")
+async def cmd_draft(ctx, mode: str = None, captain2: discord.Member = None):
+    """Phase de ban style Brawl Stars — !draft <1v1|2v2|3v3|4v4|5v5> @capitaine2"""
+    if ctx.channel.id in draft_sessions:
+        return await ctx.send(
+            "❌ Une session draft est déjà en cours dans ce salon. "
+            "Attendez qu'elle se termine ou qu'elle expire."
+        )
+
+    if not mode or not captain2:
+        return await ctx.send(
+            "❌ Usage : `!draft <mode> @capitaine2`\n"
+            "Modes disponibles : `1v1`, `2v2`, `3v3`, `4v4`, `5v5`"
+        )
+
+    mode_str = mode.lower().strip()
+    valid_modes = {'1v1': 1, '2v2': 2, '3v3': 3, '4v4': 4, '5v5': 5}
+    if mode_str not in valid_modes:
+        return await ctx.send(
+            "❌ Mode invalide. Utilisez : `1v1`, `2v2`, `3v3`, `4v4` ou `5v5`"
+        )
+
+    n    = valid_modes[mode_str]
+    cap1 = ctx.author
+    cap2 = captain2
+
+    if cap2.bot:
+        return await ctx.send("❌ Un bot ne peut pas être capitaine.")
+    if cap1.id == cap2.id:
+        return await ctx.send("❌ Les deux capitaines doivent être différents.")
+
+    sess = {
+        'mode':       n,
+        'team1':      [cap1.id],
+        'team2':      [cap2.id],
+        'cap1':       cap1.id,
+        'cap2':       cap2.id,
+        'bans1':      [],
+        'bans2':      [],
+        'phase':      'setup',
+        'ban_msg_id': None,
+    }
+    draft_sessions[ctx.channel.id] = sess
+
+    if n == 1:
+        sess['phase'] = 'ban'
+        ban_view  = BanPhaseView(ctx.channel.id)
+        ban_embed = _ban_phase_embed(sess)
+        await ctx.send(
+            f"🎮 **Draft 1v1** : <@{cap1.id}> vs <@{cap2.id}> — Phase de ban !\n"
+            f"<@{cap1.id}> <@{cap2.id}>",
+            embed=ban_embed,
+            view=ban_view,
+        )
+    else:
+        setup_view  = DraftSetupView(ctx.channel.id)
+        setup_embed = _draft_setup_embed(sess)
+        await ctx.send(
+            f"🎮 **Draft {mode_str}** lancé par <@{cap1.id}> !\n"
+            f"Capitaines : <@{cap1.id}> (🔵) vs <@{cap2.id}> (🔴)\n"
+            f"Rejoignez une équipe ci-dessous.",
+            embed=setup_embed,
+            view=setup_view,
+        )
+
 
 keep_alive()
 
