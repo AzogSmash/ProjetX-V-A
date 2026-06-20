@@ -6746,7 +6746,7 @@ async def cmd_top_crypto(ctx):
 
 
 # ── Stats serveur ─────────────────────────────────────────────────────────
-@bot.command(name="stats_serveur", aliases=["stats-serveur", "server_stats", "stats"])
+@bot.command(name="stats_serveur", aliases=["stats-serveur", "server_stats", "serveur"])
 async def cmd_stats_serveur(ctx):
     guild_members = {m.id for m in ctx.guild.members if not m.bot}
     total_coins   = sum(coins[uid] + safes.get(str(uid), 0) for uid in guild_members)
