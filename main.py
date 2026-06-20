@@ -6,7 +6,6 @@ import random
 import json
 import io
 from collections import defaultdict
-from keep_alive import keep_alive
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
@@ -7114,8 +7113,6 @@ async def cmd_draft(ctx, mode: str = None, captain2: discord.Member = None):
             view=setup_view,
         )
 
-
-keep_alive()
 
 token = os.getenv("TOKEN")
 if token is not None:
