@@ -2221,7 +2221,10 @@ async def cmd_coins(ctx, member: discord.Member = None):
 async def cmd_daily(ctx):
     uid  = str(ctx.author.id)
     now  = datetime.now()
-    AMOUNT = 500
+    BASE_AMOUNT = 500
+    LUCKY_BONUS = 150
+    has_lucky = _has_item(ctx.author.id, 1)
+    AMOUNT = BASE_AMOUNT + (LUCKY_BONUS if has_lucky else 0)
     cd_h = cooldown_h('daily')
     if uid in daily_cooldowns:
         last = datetime.fromisoformat(daily_cooldowns[uid])
@@ -2234,9 +2237,10 @@ async def cmd_daily(ctx):
     daily_cooldowns[uid] = now.isoformat()
     coins[ctx.author.id] += AMOUNT
     save_data()
+    bonus_str = f"\n🍀 Bonus Porte-bonheur : **+{LUCKY_BONUS} coins** !" if has_lucky else ""
     embed = discord.Embed(
         title="🎁 Daily Coins !",
-        description=f"{ctx.author.mention} a reçu **{AMOUNT:,} 🪙 coins** !\n💰 Solde : **{coins[ctx.author.id]:,} coins**",
+        description=f"{ctx.author.mention} a reçu **{AMOUNT:,} 🪙 coins** !{bonus_str}\n💰 Solde : **{coins[ctx.author.id]:,} coins**",
         color=0xf1c40f
     )
     embed.set_footer(text=f"Revenez dans {cd_h:g}h !")
@@ -2256,7 +2260,8 @@ async def cmd_travail(ctx):
             m = rem // 60
             await ctx.send(f"⏳ {ctx.author.mention}, vous êtes fatigué(e) ! Revenez dans **{h}h {m}min**.")
             return
-    amount = random.randint(10, 300)
+    has_pro = _has_item(ctx.author.id, 2)
+    amount = random.randint(50, 400) if has_pro else random.randint(10, 300)
     work_cooldowns[uid] = now.isoformat()
     coins[ctx.author.id] += amount
     save_data()
@@ -2268,11 +2273,12 @@ async def cmd_travail(ctx):
         "plombier 🔩", "photographe 📸"
     ]
     job = random.choice(jobs)
+    pro_str = "\n⚒️ *Équipement Pro actif — meilleur salaire !*" if has_pro else ""
     embed = discord.Embed(
         title="💼 Travail effectué !",
         description=(
             f"{ctx.author.mention} a travaillé comme **{job}**\n"
-            f"et a gagné **{amount:,} 🪙 coins** !\n\n"
+            f"et a gagné **{amount:,} 🪙 coins** !{pro_str}\n\n"
             f"💰 Solde : **{coins[ctx.author.id]:,} coins**"
         ),
         color=0x2ecc71
@@ -4347,18 +4353,31 @@ def _perm_embed():
 
 
 class PermissionView(discord.ui.View):
-    def __init__(self, ctx):
+    PAGE_SIZE = 25
+
+    def __init__(self, ctx, page: int = 0):
         super().__init__(timeout=300)
         self.ctx = ctx
+        self.page = page
         cmds = _all_command_names()
-        # Discord 25 options max — on prend les 25 premières (alphabétique)
-        options = [discord.SelectOption(label=f"!{c}"[:100], value=c) for c in cmds[:25]]
+        self.total_pages = max(1, (len(cmds) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        start = page * self.PAGE_SIZE
+        page_cmds = cmds[start:start + self.PAGE_SIZE]
+        options = [discord.SelectOption(label=f"!{c}"[:100], value=c) for c in page_cmds]
         self.select = discord.ui.Select(
-            placeholder=f"📂 Choisir une commande ({len(cmds)} total)",
+            placeholder=f"📂 Page {page + 1}/{self.total_pages} — choisir une commande",
             options=options
         )
         self.select.callback = self._on_pick
         self.add_item(self.select)
+        if page > 0:
+            prev_btn = discord.ui.Button(label="◀ Précédent", style=discord.ButtonStyle.secondary, row=1)
+            prev_btn.callback = self._prev
+            self.add_item(prev_btn)
+        if page < self.total_pages - 1:
+            next_btn = discord.ui.Button(label="Suivant ▶", style=discord.ButtonStyle.secondary, row=1)
+            next_btn.callback = self._next
+            self.add_item(next_btn)
 
     async def interaction_check(self, interaction):
         if not is_bot_owner(interaction.user):
@@ -4374,6 +4393,12 @@ class PermissionView(discord.ui.View):
             view=PermSelectRolesView(self.ctx, cmd),
             ephemeral=True
         )
+
+    async def _prev(self, interaction):
+        await interaction.response.edit_message(view=PermissionView(self.ctx, self.page - 1))
+
+    async def _next(self, interaction):
+        await interaction.response.edit_message(view=PermissionView(self.ctx, self.page + 1))
 
 
 @bot.command(name="permission", aliases=["permissions", "perm"])
@@ -4893,7 +4918,7 @@ def _usine_embed(author_id):
         f"👷 **Employés :** {workers}/{MAX_FACTORY_WORKERS}\n"
         f"⚡ **Production :** {rate:,.0f} coins/heure\n"
         f"💰 **En attente :** {pending:,} coins\n"
-        + ("🔧 **Usine améliorée** (+50% production)\n" if upgraded else "") +
+        + ("🔧 **Usine améliorée** (+15% production)\n" if upgraded else "") +
         f"\n{hire_line}\n"
         "Utilisez les boutons ci-dessous."
     ))
