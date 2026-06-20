@@ -180,12 +180,12 @@ RACE_DRIVERS_BASE = [
 ]
 # Nb de trèfles → (poids, gain, label)
 SCRATCH_PRIZES = {
-    0: (18, 0,      "😢 Aucun trèfle... Rien cette fois."),
-    1: (40, 500,    "🍀 1 trèfle — +500 coins !"),
-    2: (20, 2000,   "🍀🍀 2 trèfles — +2 000 coins !"),
-    3: (15, 5000,   "🍀🍀🍀 3 trèfles — +5 000 coins !"),
-    4: ( 5, 10000,  "🍀🍀🍀🍀 4 trèfles — +10 000 coins !"),
-    5: ( 2, 100000, "🍀🍀🍀🍀🍀 5 trèfles — +100 000 coins !! 🎉"),
+    0: (45, 0,      "😢 Aucun trèfle... Rien cette fois."),
+    1: (33, 300,    "🍀 1 trèfle — +300 coins !"),
+    2: (14, 1500,   "🍀🍀 2 trèfles — +1 500 coins !"),
+    3: ( 6, 4000,   "🍀🍀🍀 3 trèfles — +4 000 coins !"),
+    4: ( 2, 15000,  "🍀🍀🍀🍀 4 trèfles — +15 000 coins !"),
+    5: ( 0.3, 100000, "🍀🍀🍀🍀🍀 5 trèfles — +100 000 coins !! 🎉"),
 }
 
 crypto_prices    = dict(CRYPTO_BASE)
