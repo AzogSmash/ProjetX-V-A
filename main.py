@@ -386,23 +386,23 @@ def load_data():
                     casino_config['max_bets']      = loaded_cfg.get('max_bets', {}) or {}
                     casino_config['cooldowns']     = loaded_cfg.get('cooldowns', {}) or {}
 
-                print("Données chargées avec succès.")
-            except json.JSONDecodeError:
-                print("Erreur de décodage JSON. Le fichier de données est corrompu ou vide. Initialisation des données.")
+                logging.warning("Données chargées avec succès depuis %s", DATA_FILE)
+            except json.JSONDecodeError as e:
+                logging.warning("ERREUR JSON dans %s : %s — données réinitialisées", DATA_FILE, e)
                 warns = {}
                 mutes = {}
                 silenced_users = {}
                 coins = defaultdict(int)
                 giveaway_data = {}
             except Exception as e:
-                print(f"Erreur inattendue lors du chargement des données: {e}. Initialisation des données.")
+                logging.warning("ERREUR chargement données : %s — données réinitialisées", e)
                 warns = {}
                 mutes = {}
                 silenced_users = {}
                 coins = defaultdict(int)
                 giveaway_data = {}
     else:
-        print("Fichier de données non trouvé. Initialisation des données.")
+        logging.warning("Fichier %s non trouvé — données réinitialisées", DATA_FILE)
         warns = {}
         mutes = {}
         silenced_users = {}
@@ -564,7 +564,7 @@ async def check_mutes():
 
 @bot.event
 async def on_ready():
-    print(f"Connecté en tant que {bot.user}")
+    logging.warning("Connecté en tant que %s — DATA_FILE=%s — fichier_existe=%s", bot.user, DATA_FILE, os.path.exists(DATA_FILE))
     load_data()
     if not check_mutes.is_running():
         check_mutes.start()
@@ -572,7 +572,7 @@ async def on_ready():
         update_crypto_prices.start()
     if not check_birthdays.is_running():
         check_birthdays.start()
-    print("Bot prêt et fonctionnel !")
+    logging.warning("Bot prêt et fonctionnel !")
 
 
 # ── Liste des commandes toujours autorisées (anti-bricking) ──────────────
