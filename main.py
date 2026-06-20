@@ -5766,7 +5766,7 @@ class TournamentJoinView(discord.ui.View):
             join.callback = self._join_team
             self.add_item(join)
 
-    async def _refresh(self, interaction, t, gid):
+    async def _refresh_board(self, interaction, t, gid):
         embed = _build_tournament_embed(t, gid)
         embed.add_field(
             name="⚙️ Admin",
@@ -5802,7 +5802,7 @@ class TournamentJoinView(discord.ui.View):
             'name': interaction.user.display_name,
             'members': [uid],
         })
-        await self._refresh(interaction, t, gid)
+        await self._refresh_board(interaction, t, gid)
         await interaction.response.send_message(
             f"✅ **{interaction.user.display_name}** a rejoint le tournoi ! "
             f"({len(t['participants'])} inscrit(s))"
@@ -5824,7 +5824,7 @@ class TournamentJoinView(discord.ui.View):
             'name': f"Équipe {interaction.user.display_name}",
             'members': [uid],
         })
-        await self._refresh(interaction, t, gid)
+        await self._refresh_board(interaction, t, gid)
         await interaction.response.send_message(
             f"✅ **{interaction.user.display_name}** a créé une équipe "
             f"(capitaine). Il manque **{self.team_size - 1}** joueur(s)."
@@ -5890,7 +5890,7 @@ class _JoinTeamSelectView(discord.ui.View):
         ts        = _team_size(t)
         remaining = ts - len(_p_members(p))
         full_txt  = "✅ Équipe complète !" if remaining <= 0 else f"Il manque **{remaining}** joueur(s)."
-        await self.parent_view._refresh(interaction, t, gid)
+        await self.parent_view._refresh_board(interaction, t, gid)
         await interaction.response.send_message(
             f"✅ **{interaction.user.display_name}** a rejoint **{p['name']}** ! {full_txt}",
             ephemeral=False
