@@ -50,6 +50,22 @@ CRYPTO_DISPLAY = {
     'DOGE': 'Dogecoin 🐕', 'SOL': 'Solana 🟣', 'XRP': 'Ripple 🔵'
 }
 CRYPTO_SYMBOLS = list(CRYPTO_BASE.keys())
+# Salon où poster les news crypto (pumps/dumps). 0 = désactivé.
+NEWS_CRYPTO_CHANNEL_ID = 0
+CRYPTO_NEWS_UP = [
+    "🚀 {name} s'envole ! Une grande institution vient d'investir massivement.",
+    "📈 {name} en plein boom : l'adoption explose chez les commerçants.",
+    "🔥 {name} bat un nouveau record, les investisseurs affluent !",
+    "🎉 Une annonce majeure propulse {name} vers le sommet !",
+    "💎 Les baleines accumulent {name} : le cours grimpe en flèche.",
+]
+CRYPTO_NEWS_DOWN = [
+    "📉 {name} dévisse ! Une régulation surprise fait paniquer le marché.",
+    "🐻 {name} s'effondre : vague de ventes massives.",
+    "⚠️ {name} chute après une faille de sécurité signalée.",
+    "💥 Krach soudain sur {name} : les traders fuient.",
+    "🩸 Sell-off généralisé : {name} plonge dans le rouge.",
+]
 SHOP_ITEMS = {
     1: {'name': '🍀 Porte-bonheur',       'price': 500,  'desc': 'Daily = 650 coins', 'unique': True},
     2: {'name': '⚒️ Équipement Pro',      'price': 1000, 'desc': 'Travail : 50–400 coins', 'unique': True},
@@ -3314,10 +3330,24 @@ def _race_odds(idx: int) -> float:
 
 # ── Tâche de fond : prix crypto ──────────────────────────────────────────
 
+def _crypto_news_embed(symbol, direction, old_price, new_price):
+    name = CRYPTO_DISPLAY.get(symbol, symbol)
+    pct  = ((new_price - old_price) / old_price * 100) if old_price else 0
+    if direction == 'up':
+        headline, color = random.choice(CRYPTO_NEWS_UP), 0x2ecc71
+    else:
+        headline, color = random.choice(CRYPTO_NEWS_DOWN), 0xe74c3c
+    embed = discord.Embed(title="📰 News Crypto", description=headline.format(name=name), color=color)
+    embed.add_field(name="Cours actuel", value=f"**{new_price:,.2f}** coins ({pct:+.1f}%)", inline=True)
+    embed.set_footer(text="!crypto pour tous les cours · !graphique <SYM>")
+    return embed
+
+
 @tasks.loop(seconds=90)
 async def update_crypto_prices():
     """Modèle de marché simulé : momentum (tendances), retour à la moyenne,
     volatilité propre à chaque crypto et 'news' occasionnelles (pumps/dumps)."""
+    news = []  # (symbol, direction, old_price)
     for s in CRYPTO_SYMBOLS:
         price = crypto_prices[s]
         base  = CRYPTO_BASE[s]
@@ -3330,7 +3360,9 @@ async def update_crypto_prices():
         # 2) Évènement "news" rare (~3% par tick) : choc marqué qui lance
         #    une vraie tendance haussière ou baissière.
         if random.random() < 0.03:
-            trend += random.gauss(0, vol * 4)
+            shock  = random.gauss(0, vol * 4)
+            trend += shock
+            news.append((s, 'up' if shock >= 0 else 'down', price))
 
         # 3) Retour à la moyenne : le prix est doucement ramené vers sa base,
         #    d'autant plus fort qu'il s'en est éloigné.
@@ -3352,6 +3384,16 @@ async def update_crypto_prices():
         if len(hist) > 30:
             price_history[s] = hist[-30:]
     save_data()
+
+    # Annonce des news dans le salon dédié (si configuré)
+    if news and NEWS_CRYPTO_CHANNEL_ID:
+        channel = bot.get_channel(NEWS_CRYPTO_CHANNEL_ID)
+        if channel:
+            for s, direction, old_price in news:
+                try:
+                    await channel.send(embed=_crypto_news_embed(s, direction, old_price, crypto_prices[s]))
+                except discord.HTTPException:
+                    pass
 
 @update_crypto_prices.before_loop
 async def _before_crypto():
