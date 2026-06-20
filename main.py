@@ -6567,6 +6567,9 @@ async def cmd_anniversaire(ctx, date: str = None):
         if not bd:
             return await ctx.send("❌ Aucun anniversaire enregistré. Ex : `!anniversaire 15/06`")
         return await ctx.send(f"🎂 Votre anniversaire est le **{bd['day']:02d}/{bd['month']:02d}**.")
+    if uid in birthdays:
+        bd = birthdays[uid]
+        return await ctx.send(f"❌ Votre anniversaire est déjà enregistré le **{bd['day']:02d}/{bd['month']:02d}** et ne peut pas être modifié.")
     try:
         parts = date.replace('-', '/').split('/')
         day, month = int(parts[0]), int(parts[1])
@@ -6576,7 +6579,7 @@ async def cmd_anniversaire(ctx, date: str = None):
         return await ctx.send("❌ Format invalide. Ex : `!anniversaire 15/06`")
     birthdays[uid] = {'day': day, 'month': month, 'guild_id': ctx.guild.id}
     save_data()
-    await ctx.send(f"🎂 Anniversaire enregistré : **{day:02d}/{month:02d}** ! Je vous souhaiterai automatiquement bonne fête !")
+    await ctx.send(f"🎂 Anniversaire enregistré : **{day:02d}/{month:02d}** ! Je vous souhaiterai automatiquement bonne fête !\n⚠️ *Cette date est définitive et ne peut plus être modifiée.*")
 
 
 @tasks.loop(hours=1)
