@@ -7558,21 +7558,23 @@ async def cmd_maville(ctx, *, ville: str = None):
             await ctx.send("Tu n'as pas encore enregistré ta ville. Utilise `!maville <nom de ville>`")
         return
 
-    async with aiohttp.ClientSession() as session:
-        params  = {"q": ville, "format": "json", "limit": 1}
-        headers = {"User-Agent": "VynaroCasinoBot/1.0"}
-        try:
+    ville = ville.strip()
+    try:
+        async with aiohttp.ClientSession() as session:
+            params  = {"q": ville, "format": "json", "limit": 1}
+            headers = {"User-Agent": "VynaroCasinoBot/1.0 Discord bot"}
             async with session.get(
                 "https://nominatim.openstreetmap.org/search",
                 params=params, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=10)
+                timeout=aiohttp.ClientTimeout(total=15)
             ) as resp:
-                results = await resp.json()
-        except Exception:
-            await ctx.send("❌ Erreur réseau lors de la recherche. Réessaie.")
-            return
+                results = await resp.json(content_type=None)
+    except Exception as e:
+        logging.warning(f"[maville] erreur nominatim pour '{ville}': {e}")
+        await ctx.send("❌ Erreur réseau lors de la recherche. Réessaie dans quelques instants.")
+        return
 
-    if not results:
+    if not results or not isinstance(results, list):
         await ctx.send(f"❌ **{ville}** introuvable. Essaie un nom plus précis.")
         return
 
