@@ -169,7 +169,7 @@ SHOP_ITEMS = {
 JOBS = {
     'hacker': {'name': '💻 Hacker',   'action' : '`!hacker @cible', 'desc': 'Vole la crypto des autres (cd 1h)'},
     'mineur':  {'name': '⛏️ Mineur',   'action': '`!miner`',         'desc': 'Mine 50–200 coins par heure'},
-    'escroc':  {'name': '🎭 Escroc',   'action': 'Bonus passif',     'desc': '+20% succès sur `!voler`'},
+    'escroc':  {'name': '🎭 Escroc',   'action': 'Bonus passif',     'desc': '+20% succès sur `!voler` · +20% montant sur `!rob`'},
     'gardien': {'name': '🛡️ Gardien', 'action': 'Bonus passif',     'desc': '-50% pertes si quelqu\'un vous vole'},
 }
 RACE_DRIVERS_BASE = [
@@ -646,8 +646,8 @@ COMMAND_USAGE = {
     'vendre_crypto': '`!vendre_crypto <SYM> <quantité|all>`\nEx : `!vendre_crypto ETH 0.5` · `!vendre_crypto BTC all`',
     'choisir_metier':'`!choisir_metier <metier>`\nMétiers : `hacker` `mineur` `escroc` `gardien` `trader`',
     'hacker':        '`!hacker @membre` — Voler la crypto d\'un joueur\n*(Réservé au métier Hacker)*',
-    'voler':         '`!voler @membre` — Voler le coffre d\'un joueur (5-20% du coffre)\nEx : `!voler @Riche`',
-    'rob':           '`!rob @membre` — Voler le cash d\'un joueur (55% réussite, 5-15% du cash · -0 à 300 si raté)\nCooldown 12h',
+    'voler':         '`!voler @membre` — Voler le coffre d\'un joueur (5-20% du coffre)\nLa victime gagne une **immunité de 6h** après un vol réussi\nEx : `!voler @Riche`',
+    'rob':           '`!rob @membre` — Voler le cash d\'un joueur (55% réussite, 5-15% du cash · -0 à 300 si raté)\nEscroc : +20% sur le montant volé · Cooldown 12h',
     'coffre':        '`!coffre` — Ouvrir le coffre (boutons Déposer / Retirer)',
     'team':          '`!team` — Système de clubs (créer / rejoindre / quitter / trésorerie)',
     'gdt':           '`!gdt` *(Admin)* — Gérer la compétition inter-clubs (ouvrir/fermer/récompenser)',
@@ -6559,6 +6559,8 @@ async def cmd_profil(ctx, member: discord.Member = None):
     job_str = JOBS[job]['name'] if job and job in JOBS else "Aucun"
     factory = factories.get(uid, {})
     workers = factory.get('workers', 0) if factory else 0
+    imm_ok, imm_wait = _cd_ok(steal_immunity, member.id, 6)
+    imm_str = None if imm_ok else f"🛡️ Immunité vol active encore **{imm_wait}**"
 
     embed = discord.Embed(
         title=f"👤 Profil de {member.display_name}",
@@ -6574,6 +6576,8 @@ async def cmd_profil(ctx, member: discord.Member = None):
     embed.add_field(name="🏆 ELO Tournoi", value=str(elo), inline=True)
     embed.add_field(name="💼 Métier", value=job_str, inline=True)
     embed.add_field(name="🏭 Usine", value=f"{workers} ouvrier{'s' if workers != 1 else ''}", inline=True)
+    if imm_str:
+        embed.add_field(name="🛡️ Protection", value=imm_str, inline=False)
     if item_lines:
         embed.add_field(name="🎒 Inventaire", value='\n'.join(item_lines), inline=False)
     await ctx.send(embed=embed)
