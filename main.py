@@ -4977,7 +4977,8 @@ def _shop_embed(author_id):
     return embed
 
 
-TICKET_DAILY_LIMIT = 10
+TICKET_DAILY_LIMIT   = 10
+SCRATCH_DAILY_LIMIT  = 10
 
 def _do_purchase(author_id, item_id):
     """Effectue un achat. Retourne (success: bool, message: str)."""
@@ -5160,6 +5161,15 @@ async def cmd_gratter(ctx):
             "❌ Vous n'avez pas de ticket à gratter.\n"
             "Achetez-en avec `!acheter 4` (1500 coins) ou un pack×5 avec `!acheter 5` (7000 coins)."
         )
+    # Limite journalière de grattage
+    today = datetime.now().date().isoformat()
+    tp = ticket_purchases.get(uid, {'count': 0, 'scratch_count': 0, 'day': None})
+    if tp.get('day') != today:
+        tp = {'count': 0, 'scratch_count': 0, 'day': today}
+    if tp.get('scratch_count', 0) >= SCRATCH_DAILY_LIMIT:
+        return await ctx.send(f"❌ Limite journalière atteinte ! Vous ne pouvez gratter que **{SCRATCH_DAILY_LIMIT} tickets/jour**.")
+    tp['scratch_count'] = tp.get('scratch_count', 0) + 1
+    ticket_purchases[uid] = tp
     _use_item(ctx.author.id, 4)
     save_data()
 
