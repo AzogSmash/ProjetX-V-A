@@ -160,7 +160,7 @@ CRYPTO_NEWS_DOWN = [
 SHOP_ITEMS = {
     1: {'name': '🍀 Porte-bonheur',       'price': 500,  'desc': 'Daily = 650 coins', 'unique': True},
     2: {'name': '⚒️ Équipement Pro',      'price': 1000, 'desc': 'Travail : 50–400 coins', 'unique': True},
-    3: {'name': '🛡️ Bouclier Anti-Vol',  'price': 800,  'desc': 'Bloque le prochain vol de coffre subi', 'unique': False},
+    3: {'name': '🛡️ Bouclier Anti-Vol',  'price': 800,  'desc': 'Bloque le prochain vol de coffre subi (max 1)', 'unique': True},
     4: {'name': '🎟️ Ticket à gratter',   'price': 200,  'desc': '1 ticket à gratter', 'unique': False},
     5: {'name': '💼 Pack ×5 Tickets',    'price': 5000,  'desc': '5 tickets à gratter', 'unique': False},
     6: {'name': '🏭 Amélioration Usine', 'price': 3000, 'desc': '+15% production usine', 'unique': True},
@@ -205,6 +205,7 @@ miner_cooldowns  = {}   # str(uid) -> ISO
 hacker_cooldowns = {}   # str(uid) -> ISO
 risque_cooldowns = {}   # str(uid) -> ISO  (cooldown 3h)
 rob_cooldowns    = {}   # str(uid) -> ISO  (cooldown 12h)
+steal_immunity   = {}   # str(uid) -> ISO  (immunité 6h après avoir été volé via !voler)
 race_bets        = {}   # str(uid) -> {'driver': int, 'amount': int}
 race_drivers_live = [dict(d) for d in RACE_DRIVERS_BASE]
 race_accepting    = False
@@ -303,7 +304,7 @@ if not os.path.exists(DATA_FILE) and os.path.exists('/app/data.json'):
 def load_data():
     global warns, mutes, silenced_users, coins, giveaway_data, daily_cooldowns, work_cooldowns
     global crypto_prices, price_history, crypto_trends, crypto_holdings, safes, factories, jobs_data, owned_items
-    global theft_cooldowns, miner_cooldowns, hacker_cooldowns, risque_cooldowns, rob_cooldowns
+    global theft_cooldowns, miner_cooldowns, hacker_cooldowns, risque_cooldowns, rob_cooldowns, steal_immunity
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations
@@ -366,6 +367,7 @@ def load_data():
                 hacker_cooldowns = data.get('hacker_cooldowns', {})
                 risque_cooldowns = data.get('risque_cooldowns', {})
                 rob_cooldowns    = data.get('rob_cooldowns', {})
+                steal_immunity   = data.get('steal_immunity', {})
                 race_bets        = data.get('race_bets', {})
                 race_drivers_live = data.get('race_drivers_live', [dict(d) for d in RACE_DRIVERS_BASE])
                 race_accepting   = data.get('race_accepting', False)
@@ -456,6 +458,7 @@ def save_data():
     data_to_save['hacker_cooldowns'] = hacker_cooldowns
     data_to_save['risque_cooldowns'] = risque_cooldowns
     data_to_save['rob_cooldowns']    = rob_cooldowns
+    data_to_save['steal_immunity']   = steal_immunity
     data_to_save['race_bets']        = race_bets
     data_to_save['race_drivers_live'] = race_drivers_live
     data_to_save['race_accepting']   = race_accepting
@@ -4384,6 +4387,10 @@ async def cmd_voler(ctx, cible: discord.Member):
     safe_cible = safes.get(str(cible.id), 0)
     if safe_cible < 300:
         return await ctx.send(f"❌ Le coffre de {cible.mention} est trop pauvre (min 300 coins dans le coffre).")
+    # Vérifier immunité 6h
+    imm_ok, imm_wait = _cd_ok(steal_immunity, cible.id, 6)
+    if not imm_ok:
+        return await ctx.send(f"🛡️ {cible.mention} est protégé pendant encore **{imm_wait}** (immunité après vol subi).")
     # Vérifier bouclier
     if _has_item(cible.id, 3):
         _use_item(cible.id, 3)
@@ -4398,6 +4405,8 @@ async def cmd_voler(ctx, cible: discord.Member):
         if _get_job(cible.id) == 'gardien': stolen //= 2
         safes[str(cible.id)] = safe_cible - stolen
         coins[ctx.author.id] += stolen
+        # Poser l'immunité 6h sur la victime
+        steal_immunity[str(cible.id)] = datetime.utcnow().isoformat()
         save_data()
         embed = discord.Embed(title="🦹 Vol de coffre réussi !", color=0x2ecc71,
             description=(
@@ -4428,14 +4437,17 @@ async def cmd_rob(ctx, cible: discord.Member):
     if random.random() < 0.55:
         pct    = random.uniform(0.05, 0.15)
         stolen = int(cash_cible * pct)
+        if _get_job(ctx.author.id) == 'escroc':
+            stolen = int(stolen * 1.2)
         stolen = max(20, stolen)
         coins[ctx.author.id] += stolen
         coins[cible.id]      -= stolen
         save_data()
+        escroc_bonus = " *(+20% escroc)*" if _get_job(ctx.author.id) == 'escroc' else ""
         embed = discord.Embed(title="🦹 Rob réussi !", color=0x2ecc71,
             description=(
-                f"Vous avez braqué {cible.mention} et volé **{stolen:,} coins** "
-                f"({pct*100:.1f}% de son cash) !\n💰 Solde : **{coins[ctx.author.id]:,} coins**\n"
+                f"Vous avez braqué {cible.mention} et volé **{stolen:,} coins**{escroc_bonus} !\n"
+                f"💰 Solde : **{coins[ctx.author.id]:,} coins**\n"
                 f"⏳ Prochain rob dans **{cd_hours:g}h**."
             ))
     else:
