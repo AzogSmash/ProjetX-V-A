@@ -7525,6 +7525,12 @@ _CARTE_COLORS = [
     '#FF4488', '#88FF44', '#00BBFF', '#FF6622',
 ]
 
+_CARTE_PRESETS = {
+    'monde':  {'label': '🌍 Monde',   'zoom': 2, 'clat': 25.0, 'clon': 10.0},
+    'europe': {'label': '🌍 Europe',  'zoom': 4, 'clat': 52.0, 'clon': 12.0},
+    'france': {'label': '🇫🇷 France', 'zoom': 6, 'clat': 46.5, 'clon': 2.5},
+}
+
 def _latlon_to_px(lat, lon, zoom, center_lat, center_lon, img_w, img_h):
     n = 2 ** zoom
     ts = 256
@@ -7588,6 +7594,89 @@ async def cmd_maville(ctx, *, ville: str = None):
     await ctx.send(f"✅ Ville enregistrée : **{display_name}**")
 
 
+def _render_carte(preset, guild):
+    from staticmap import StaticMap, CircleMarker
+    from PIL import ImageDraw
+
+    IMG_W, IMG_H = 1200, 650
+    zoom = preset['zoom']
+    clat, clon = preset['clat'], preset['clon']
+
+    m = StaticMap(IMG_W, IMG_H)
+    loc_items = list(locations.items())
+
+    for i, (uid, loc) in enumerate(loc_items):
+        color = _CARTE_COLORS[i % len(_CARTE_COLORS)]
+        m.add_marker(CircleMarker((loc['lon'], loc['lat']), color, 14))
+
+    image = m.render(zoom=zoom, center=[clon, clat])
+    draw  = ImageDraw.Draw(image)
+    font  = _carte_font(13)
+
+    for i, (uid, loc) in enumerate(loc_items):
+        px, py = _latlon_to_px(loc['lat'], loc['lon'], zoom, clat, clon, IMG_W, IMG_H)
+        member = guild.get_member(int(uid))
+        name   = member.display_name if member else loc['ville']
+        color  = _CARTE_COLORS[i % len(_CARTE_COLORS)]
+        draw.text((px + 10, py - 7 + 1), name, fill='black', font=font)
+        draw.text((px + 10, py - 7),     name, fill=color,   font=font)
+
+    buf = io.BytesIO()
+    image.save(buf, 'PNG')
+    buf.seek(0)
+    return buf
+
+
+class CarteView(discord.ui.View):
+    def __init__(self, guild, current='monde'):
+        super().__init__(timeout=180)
+        self.guild   = guild
+        self.current = current
+        self._build()
+
+    def _build(self):
+        self.clear_items()
+        for key, preset in _CARTE_PRESETS.items():
+            btn = discord.ui.Button(
+                label=preset['label'],
+                style=discord.ButtonStyle.primary if key == self.current else discord.ButtonStyle.secondary,
+            )
+            btn.callback = self._make_cb(key)
+            self.add_item(btn)
+
+    def _make_cb(self, key):
+        async def callback(interaction: discord.Interaction):
+            if key == self.current:
+                await interaction.response.defer()
+                return
+            self.current = key
+            self._build()
+            await interaction.response.defer()
+            try:
+                buf = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: _render_carte(_CARTE_PRESETS[key], self.guild)
+                )
+            except Exception as e:
+                await interaction.followup.send(f"❌ Erreur : {e}", ephemeral=True)
+                return
+            await interaction.edit_original_response(
+                content=self._content(),
+                attachments=[discord.File(buf, 'carte.png')],
+                view=self,
+            )
+        return callback
+
+    def _content(self):
+        count  = len(locations)
+        header = f"🗺️ **Carte de la communauté** — {count} membre{'s' if count > 1 else ''} enregistré{'s' if count > 1 else ''}"
+        lines  = [header]
+        for uid, loc in locations.items():
+            member = self.guild.get_member(int(uid))
+            name   = member.mention if member else f"<@{uid}>"
+            lines.append(f"{name} — **{loc['ville']}**")
+        return '\n'.join(lines)
+
+
 @bot.command(name='carte')
 async def cmd_carte(ctx):
     if not locations:
@@ -7595,59 +7684,17 @@ async def cmd_carte(ctx):
         return
 
     await ctx.typing()
-    guild = ctx.guild
-
-    def _render():
-        from staticmap import StaticMap, CircleMarker
-        from PIL import ImageDraw
-
-        IMG_W, IMG_H    = 1200, 650
-        ZOOM            = 2
-        CENTER_LON      = 10.0
-        CENTER_LAT      = 25.0
-
-        m = StaticMap(IMG_W, IMG_H)
-        loc_items = list(locations.items())
-
-        for i, (uid, loc) in enumerate(loc_items):
-            color = _CARTE_COLORS[i % len(_CARTE_COLORS)]
-            m.add_marker(CircleMarker((loc['lon'], loc['lat']), color, 14))
-
-        image = m.render(zoom=ZOOM, center=[CENTER_LON, CENTER_LAT])
-        draw  = ImageDraw.Draw(image)
-        font  = _carte_font(13)
-
-        for i, (uid, loc) in enumerate(loc_items):
-            px, py = _latlon_to_px(loc['lat'], loc['lon'], ZOOM, CENTER_LAT, CENTER_LON, IMG_W, IMG_H)
-            member = guild.get_member(int(uid))
-            name   = member.display_name if member else loc['ville']
-            color  = _CARTE_COLORS[i % len(_CARTE_COLORS)]
-            draw.text((px + 10, py - 7 + 1), name, fill='black', font=font)
-            draw.text((px + 10, py - 7),     name, fill=color,   font=font)
-
-        buf = io.BytesIO()
-        image.save(buf, 'PNG')
-        buf.seek(0)
-        return buf
+    view = CarteView(ctx.guild, current='monde')
 
     try:
-        loop = asyncio.get_event_loop()
-        buf  = await loop.run_in_executor(None, _render)
+        buf = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _render_carte(_CARTE_PRESETS['monde'], ctx.guild)
+        )
     except Exception as e:
         await ctx.send(f"❌ Erreur lors de la génération de la carte : {e}")
         return
 
-    count = len(locations)
-    lines = []
-    for i, (uid, loc) in enumerate(locations.items()):
-        member = guild.get_member(int(uid))
-        name   = member.mention if member else f"<@{uid}>"
-        lines.append(f"{name} — **{loc['ville']}**")
-
-    await ctx.send(
-        f"🗺️ **Carte de la communauté** — {count} membre{'s' if count > 1 else ''} enregistré{'s' if count > 1 else ''}\n" + '\n'.join(lines),
-        file=discord.File(buf, 'carte.png')
-    )
+    await ctx.send(view._content(), file=discord.File(buf, 'carte.png'), view=view)
 
 
 token = os.getenv("TOKEN")
