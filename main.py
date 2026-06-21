@@ -428,6 +428,20 @@ def load_data():
                     casino_config['cooldowns']     = loaded_cfg.get('cooldowns', {}) or {}
 
                 logging.warning("Données chargées avec succès depuis %s", DATA_FILE)
+
+                # Migration : cap boucliers (item '3') à 1 pour tous sauf 730152107511906436
+                _BOUCLIER_EXEMPT = '730152107511906436'
+                _migrated = False
+                for _uid, _items in owned_items.items():
+                    if _uid == _BOUCLIER_EXEMPT:
+                        continue
+                    if isinstance(_items.get('3'), int) and _items['3'] > 1:
+                        logging.warning("Migration bouclier : %s avait %d → 1", _uid, _items['3'])
+                        _items['3'] = 1
+                        _migrated = True
+                if _migrated:
+                    save_data()
+
             except json.JSONDecodeError as e:
                 logging.warning("ERREUR JSON dans %s : %s — données réinitialisées", DATA_FILE, e)
                 warns = {}
