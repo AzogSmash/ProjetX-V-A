@@ -3,6 +3,7 @@ from discord.ext import commands, tasks
 import asyncio
 import os
 import logging
+import math
 import random
 import json
 import io
@@ -159,7 +160,7 @@ CRYPTO_NEWS_DOWN = [
 SHOP_ITEMS = {
     1: {'name': '🍀 Porte-bonheur',       'price': 500,  'desc': 'Daily = 650 coins', 'unique': True},
     2: {'name': '⚒️ Équipement Pro',      'price': 1000, 'desc': 'Travail : 50–400 coins', 'unique': True},
-    3: {'name': '🛡️ Bouclier Anti-Vol',  'price': 800,  'desc': 'Bloque le prochain vol subi', 'unique': False},
+    3: {'name': '🛡️ Bouclier Anti-Vol',  'price': 800,  'desc': 'Bloque le prochain vol de coffre subi', 'unique': False},
     4: {'name': '🎟️ Ticket à gratter',   'price': 200,  'desc': '1 ticket à gratter', 'unique': False},
     5: {'name': '💼 Pack ×5 Tickets',    'price': 5000,  'desc': '5 tickets à gratter', 'unique': False},
     6: {'name': '🏭 Amélioration Usine', 'price': 3000, 'desc': '+15% production usine', 'unique': True},
@@ -198,6 +199,7 @@ safes            = {}   # str(uid) -> int
 factories        = {}   # str(uid) -> {'workers': int, 'last': ISO, 'upgraded': bool}
 jobs_data        = {}   # str(uid) -> {'job': str}
 owned_items      = {}   # str(uid) -> {str(item_id): int}
+locations        = {}   # str(uid) -> {'ville': str, 'lat': float, 'lon': float}
 theft_cooldowns  = {}   # str(uid) -> ISO
 miner_cooldowns  = {}   # str(uid) -> ISO
 hacker_cooldowns = {}   # str(uid) -> ISO
@@ -304,7 +306,7 @@ def load_data():
     global theft_cooldowns, miner_cooldowns, hacker_cooldowns, risque_cooldowns, rob_cooldowns
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms
-    global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID
+    global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
             try:
@@ -379,6 +381,7 @@ def load_data():
                 birthdays        = data.get('birthdays', {})
                 crypto_alerts    = data.get('crypto_alerts', {})
                 tournament_elo   = data.get('tournament_elo', {})
+                locations        = data.get('locations', {})
                 ADMIN_LOG_CHANNEL_ID = data.get('admin_log_channel_id', 0)
                 loaded_cfg = data.get('casino_config', {})
                 if isinstance(loaded_cfg, dict):
@@ -467,6 +470,7 @@ def save_data():
     data_to_save['birthdays']        = birthdays
     data_to_save['crypto_alerts']    = crypto_alerts
     data_to_save['tournament_elo']   = tournament_elo
+    data_to_save['locations']        = locations
     data_to_save['admin_log_channel_id'] = ADMIN_LOG_CHANNEL_ID
 
     try:
@@ -4421,11 +4425,6 @@ async def cmd_rob(ctx, cible: discord.Member):
     cash_cible = coins[cible.id]
     if cash_cible < 200:
         return await ctx.send(f"❌ {cible.mention} n'a pas assez de cash à voler (min 200 coins en poche).")
-    # Bouclier
-    if _has_item(cible.id, 3):
-        _use_item(cible.id, 3)
-        save_data()
-        return await ctx.send(f"🛡️ {cible.mention} possède un **Bouclier Anti-Vol** ! Le vol a été bloqué.")
     if random.random() < 0.55:
         pct    = random.uniform(0.05, 0.15)
         stolen = int(cash_cible * pct)
@@ -7117,6 +7116,137 @@ async def cmd_draft(ctx, mode: str = None, captain2: discord.Member = None):
             embed=setup_embed,
             view=setup_view,
         )
+
+
+# === CARTE COMMUNAUTAIRE ===
+
+_CARTE_COLORS = [
+    '#FF4444', '#4477FF', '#44DD88', '#FFD700',
+    '#FF44FF', '#00DDDD', '#FF8800', '#AA44FF',
+    '#FF4488', '#88FF44', '#00BBFF', '#FF6622',
+]
+
+def _latlon_to_px(lat, lon, zoom, center_lat, center_lon, img_w, img_h):
+    n = 2 ** zoom
+    ts = 256
+    def _x(lo): return (lo + 180) / 360 * n
+    def _y(la):
+        r = math.radians(la)
+        return (1 - math.log(math.tan(r) + 1 / math.cos(r)) / math.pi) / 2 * n
+    px = (_x(lon) - _x(center_lon)) * ts + img_w / 2
+    py = (_y(lat) - _y(center_lat)) * ts + img_h / 2
+    return int(px), int(py)
+
+def _carte_font(size):
+    from PIL import ImageFont
+    for path in [
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+        '/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf',
+    ]:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+@bot.command(name='maville')
+async def cmd_maville(ctx, *, ville: str = None):
+    uid = str(ctx.author.id)
+    if not ville:
+        if uid in locations:
+            await ctx.send(f"📍 Ta ville enregistrée : **{locations[uid]['ville']}**")
+        else:
+            await ctx.send("Tu n'as pas encore enregistré ta ville. Utilise `!maville <nom de ville>`")
+        return
+
+    async with aiohttp.ClientSession() as session:
+        params  = {"q": ville, "format": "json", "limit": 1}
+        headers = {"User-Agent": "VynaroCasinoBot/1.0"}
+        try:
+            async with session.get(
+                "https://nominatim.openstreetmap.org/search",
+                params=params, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                results = await resp.json()
+        except Exception:
+            await ctx.send("❌ Erreur réseau lors de la recherche. Réessaie.")
+            return
+
+    if not results:
+        await ctx.send(f"❌ **{ville}** introuvable. Essaie un nom plus précis.")
+        return
+
+    lat = float(results[0]['lat'])
+    lon = float(results[0]['lon'])
+    display_name = results[0]['display_name'].split(',')[0].strip()
+
+    locations[uid] = {"ville": display_name, "lat": lat, "lon": lon}
+    save_data()
+    await ctx.send(f"✅ Ville enregistrée : **{display_name}**")
+
+
+@bot.command(name='carte')
+async def cmd_carte(ctx):
+    if not locations:
+        await ctx.send("Personne n'a encore enregistré sa ville avec `!maville`.")
+        return
+
+    await ctx.typing()
+    guild = ctx.guild
+
+    def _render():
+        from staticmap import StaticMap, CircleMarker
+        from PIL import ImageDraw
+
+        IMG_W, IMG_H    = 1200, 650
+        ZOOM            = 2
+        CENTER_LON      = 10.0
+        CENTER_LAT      = 25.0
+
+        m = StaticMap(IMG_W, IMG_H)
+        loc_items = list(locations.items())
+
+        for i, (uid, loc) in enumerate(loc_items):
+            color = _CARTE_COLORS[i % len(_CARTE_COLORS)]
+            m.add_marker(CircleMarker((loc['lon'], loc['lat']), color, 14))
+
+        image = m.render(zoom=ZOOM, center=[CENTER_LON, CENTER_LAT])
+        draw  = ImageDraw.Draw(image)
+        font  = _carte_font(13)
+
+        for i, (uid, loc) in enumerate(loc_items):
+            px, py = _latlon_to_px(loc['lat'], loc['lon'], ZOOM, CENTER_LAT, CENTER_LON, IMG_W, IMG_H)
+            member = guild.get_member(int(uid))
+            name   = member.display_name if member else loc['ville']
+            color  = _CARTE_COLORS[i % len(_CARTE_COLORS)]
+            draw.text((px + 10, py - 7 + 1), name, fill='black', font=font)
+            draw.text((px + 10, py - 7),     name, fill=color,   font=font)
+
+        buf = io.BytesIO()
+        image.save(buf, 'PNG')
+        buf.seek(0)
+        return buf
+
+    try:
+        loop = asyncio.get_event_loop()
+        buf  = await loop.run_in_executor(None, _render)
+    except Exception as e:
+        await ctx.send(f"❌ Erreur lors de la génération de la carte : {e}")
+        return
+
+    count = len(locations)
+    lines = []
+    for i, (uid, loc) in enumerate(locations.items()):
+        member = guild.get_member(int(uid))
+        name   = member.mention if member else f"<@{uid}>"
+        lines.append(f"{name} — **{loc['ville']}**")
+
+    await ctx.send(
+        f"🗺️ **Carte de la communauté** — {count} membre{'s' if count > 1 else ''} enregistré{'s' if count > 1 else ''}\n" + '\n'.join(lines),
+        file=discord.File(buf, 'carte.png')
+    )
 
 
 token = os.getenv("TOKEN")
