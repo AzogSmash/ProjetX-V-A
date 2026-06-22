@@ -4200,21 +4200,20 @@ async def cmd_acheter_crypto(ctx, symbol: str, montant: str):
 
     price = crypto_prices[symbol]
 
-    # Slippage pour gros ordres : commence à 5k, max 10% à 505k coins
-    slippage_pct    = max(0.0, min(0.10, (montant - 5_000) / 500_000))
-    effective_price = round(price * (1 + slippage_pct), 4)
+    # Pas de slippage à l'achat — prix du marché direct
+    qty = montant / price
 
-    # Avertissement slippage AVANT l'achat si significatif
-    if slippage_pct >= 0.02:
-        coins_perdus = int(montant * slippage_pct)
+    # Avertissement : slippage qui s'appliquerait si revente immédiate
+    sell_slip_pct = max(0.0, min(0.10, (montant - 5_000) / 500_000))
+    if sell_slip_pct >= 0.01:
+        coins_perdus = int(montant * sell_slip_pct)
         await ctx.send(
-            f"⚠️ **Attention slippage élevé !** Votre ordre de **{montant:,} coins** subit un slippage de "
-            f"**{slippage_pct*100:.1f}%** ({coins_perdus:,} coins perdus en valeur).\n"
-            f"Prix affiché : {price:,.2f} → Prix effectif : **{effective_price:,.2f}**\n"
-            f"*Réduisez votre mise pour éviter le slippage.*"
+            f"⚠️ **Attention — taxe de slippage à la revente** : si vous revendez maintenant "
+            f"**{montant:,} coins** de {symbol}, vous subiriez **{sell_slip_pct*100:.1f}%** de slippage "
+            f"({coins_perdus:,} coins perdus).\n"
+            f"*Plus votre ordre est gros, plus la revente coûte cher.*"
         )
 
-    qty = montant / effective_price
     coins[ctx.author.id] -= montant
     crypto_holdings.setdefault(uid, {})
     crypto_holdings[uid][symbol] = round(crypto_holdings[uid].get(symbol, 0) + qty, 8)
@@ -4222,10 +4221,9 @@ async def cmd_acheter_crypto(ctx, symbol: str, montant: str):
     crypto_hold_since.setdefault(uid, {})[symbol]    = datetime.now().isoformat()
     save_data()
 
-    slip_str = f" *(slippage {slippage_pct*100:.1f}%)*" if slippage_pct > 0.001 else ""
     embed = discord.Embed(title="💹 Achat Crypto !", color=0x2ecc71, description=(
         f"Acheté **{qty:.6f} {symbol}** pour **{montant:,} coins**\n"
-        f"Prix unitaire : **{effective_price:,.2f} coins**{slip_str}\n"
+        f"Prix unitaire : **{price:,.2f} coins**\n"
         f"💼 {symbol} total : **{crypto_holdings[uid][symbol]:.6f}**\n"
         f"⏳ Prochain achat **{symbol}** dans **30min** · Vente possible dans **10min**"
     ))
