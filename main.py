@@ -6234,6 +6234,7 @@ async def _advance_tournament(guild, t: dict, gid: str):
             await channel.send(embed=embed)
         if gid in tournaments:
             del tournaments[gid]
+            save_data()
         return
     # Prochain tour
     t['current_round'] += 1
