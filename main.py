@@ -2665,6 +2665,7 @@ async def cmd_risque(ctx):
 
 
 @bot.command(name="give")
+@commands.has_permissions(administrator=True)
 async def cmd_give(ctx, member: discord.Member, amount: str):
     bal = coins[ctx.author.id]
     raw = str(amount).strip().lower()
