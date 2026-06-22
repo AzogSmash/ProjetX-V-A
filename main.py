@@ -7640,9 +7640,15 @@ class BusinessView(discord.ui.View):
             if last_col:
                 h_since = (datetime.now() - datetime.fromisoformat(last_col)).total_seconds() / 3600
                 if h_since <= 24:
-                    b['reputation'] = min(5, b.get('reputation', 0) + 1)
-                elif h_since > 48:
-                    b['reputation'] = max(0, b.get('reputation', 0) - 1)
+                    prog = b.get('rep_progress', 0) + 1
+                    if prog >= 2:
+                        b['reputation']   = min(5, b.get('reputation', 0) + 1)
+                        b['rep_progress'] = 0
+                    else:
+                        b['rep_progress'] = prog
+                else:
+                    b['reputation']   = 0
+                    b['rep_progress'] = 0
             b['last_collect'] = datetime.now().isoformat()
         coins[self.author_id] += pending
         b['last'] = datetime.now().isoformat()
@@ -7679,20 +7685,24 @@ class BusinessView(discord.ui.View):
         biz = BIZ_DEFS['restaurant']
         stars = '⭐' * rep + '☆' * (5 - rep)
         last_col = b.get('last_collect')
+        prog = b.get('rep_progress', 0)
         if last_col:
             h_since = (datetime.now() - datetime.fromisoformat(last_col)).total_seconds() / 3600
-            trend = ("📈 En hausse *(collecte dans les 24h)*" if h_since <= 24
-                     else "📉 En baisse *(+48h sans collecte !)*" if h_since > 48
-                     else "➡️ Stable")
+            if h_since <= 24:
+                trend = f"📈 En progression *(collecte {2 - prog}× encore dans les 24h pour +⭐)*"
+            else:
+                trend = "💀 **Réputation en danger** — sans collecte sous 24h tu repasses à 0⭐ !"
         else:
-            trend = "📈 Première collecte = +⭐"
+            trend = "📈 Première collecte = début de progression"
+        prog_bar = "🟡" * prog + "⚫" * (2 - prog)
         await interaction.response.send_message(
             f"🌟 **Réputation** : {stars}\n"
             f"✖️ Multiplicateur : **×{biz['rep_mult'][rep]:.2f}**\n"
+            f"📊 Progression prochaine ⭐ : {prog_bar} ({prog}/2)\n"
             f"{trend}\n\n"
             "**Règles :**\n"
-            "• Collectez dans les **24h** → +⭐ (max ⭐⭐⭐⭐⭐)\n"
-            "• Sans collecte **48h+** → -⭐\n"
+            "• Collectez **2× dans les 24h** → +⭐\n"
+            "• Sans collecte **24h+** → retour à **0⭐** immédiat\n"
             "• ⭐⭐⭐⭐⭐ = **×1.70** de production", ephemeral=True)
 
     async def _refresh(self, interaction: discord.Interaction):
