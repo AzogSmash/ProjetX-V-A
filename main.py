@@ -1,12 +1,14 @@
 import discord
 from discord.ext import commands, tasks
 import asyncio
+import aiohttp
 import os
+import logging
+import math
 import random
 import json
 import io
 from collections import defaultdict
-from keep_alive import keep_alive
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
@@ -159,16 +161,47 @@ CRYPTO_NEWS_DOWN = [
 SHOP_ITEMS = {
     1: {'name': '🍀 Porte-bonheur',       'price': 500,  'desc': 'Daily = 650 coins', 'unique': True},
     2: {'name': '⚒️ Équipement Pro',      'price': 1000, 'desc': 'Travail : 50–400 coins', 'unique': True},
-    3: {'name': '🛡️ Bouclier Anti-Vol',  'price': 800,  'desc': 'Bloque le prochain vol subi', 'unique': False},
+    3: {'name': '🛡️ Bouclier Anti-Vol',  'price': 800,  'desc': 'Bloque le prochain vol de coffre subi (max 1)', 'unique': True},
     4: {'name': '🎟️ Ticket à gratter',   'price': 200,  'desc': '1 ticket à gratter', 'unique': False},
     5: {'name': '💼 Pack ×5 Tickets',    'price': 5000,  'desc': '5 tickets à gratter', 'unique': False},
-    6: {'name': '🏭 Amélioration Usine', 'price': 3000, 'desc': '+15% production usine', 'unique': True},
-    7: {'name': '📈 Cours de Trading',   'price': 2000, 'desc': '+15% gains ventes crypto', 'unique': True},
+    6: {'name': '🏭 Amélioration Usine', 'price': 3000,    'desc': '+15% production usine (unique)', 'unique': True},
+    7: {'name': '📈 Cours de Trading',   'price': 2000,    'desc': '+15% gains ventes crypto (unique)', 'unique': True},
+    8: {'name': '🏪 Ouvrir Épicerie',    'price': 80_000,  'desc': 'Débloque l\'épicerie · Requiert : Usine 10/10 + améliorée', 'unique': True, 'biz': 'epicerie'},
+    9: {'name': '🍔 Ouvrir Fast Food',   'price': 300_000, 'desc': 'Débloque le fast food · Requiert : Épicerie 8/8 + améliorée', 'unique': True, 'biz': 'fastfood'},
+   10: {'name': '🍽️ Ouvrir Restaurant', 'price': 800_000, 'desc': 'Débloque le restaurant · Requiert : Fast Food 10/10 + amélioré', 'unique': True, 'biz': 'restaurant'},
+}
+
+BIZ_DEFS = {
+    'epicerie': {
+        'name': 'Épicerie', 'emoji': '🏪', 'color': 0x27ae60,
+        'shop_item': 8, 'open_cost': 80_000,
+        'max_workers': 8,
+        'worker_costs': [3_000, 4_500, 6_000, 8_000, 10_000, 13_000, 16_000, 20_000],
+        'base_rate': 100, 'upgrade_cost': 8_000, 'upgrade_bonus': 0.20,
+        'requires': ('factory', 10, True),
+    },
+    'fastfood': {
+        'name': 'Fast Food', 'emoji': '🍔', 'color': 0xe67e22,
+        'shop_item': 9, 'open_cost': 300_000,
+        'max_workers': 10,
+        'worker_costs': [5_000, 7_500, 10_000, 13_500, 17_000, 22_000, 27_500, 34_000, 42_000, 52_000],
+        'base_rate': 280, 'upgrade_cost': 60_000, 'upgrade_bonus': 0.20,
+        'requires': ('epicerie', 8, True),
+    },
+    'restaurant': {
+        'name': 'Restaurant Gastronomique', 'emoji': '🍽️', 'color': 0x8e44ad,
+        'shop_item': 10, 'open_cost': 800_000,
+        'max_workers': 12,
+        'worker_costs': [8_000, 12_000, 17_000, 23_000, 30_000, 39_000, 49_000, 61_000, 74_000, 89_000, 106_000, 125_000],
+        'base_rate': 300, 'upgrade_cost': None, 'upgrade_bonus': None,
+        'requires': ('fastfood', 10, True),
+        'rep_mult': [1.0, 1.1, 1.2, 1.35, 1.5, 1.7],
+    },
 }
 JOBS = {
     'hacker': {'name': '💻 Hacker',   'action' : '`!hacker @cible', 'desc': 'Vole la crypto des autres (cd 1h)'},
     'mineur':  {'name': '⛏️ Mineur',   'action': '`!miner`',         'desc': 'Mine 50–200 coins par heure'},
-    'escroc':  {'name': '🎭 Escroc',   'action': 'Bonus passif',     'desc': '+20% succès sur `!voler`'},
+    'escroc':  {'name': '🎭 Escroc',   'action': 'Bonus passif',     'desc': '+20% succès sur `!voler` · +20% montant sur `!rob`'},
     'gardien': {'name': '🛡️ Gardien', 'action': 'Bonus passif',     'desc': '-50% pertes si quelqu\'un vous vole'},
 }
 RACE_DRIVERS_BASE = [
@@ -198,11 +231,14 @@ safes            = {}   # str(uid) -> int
 factories        = {}   # str(uid) -> {'workers': int, 'last': ISO, 'upgraded': bool}
 jobs_data        = {}   # str(uid) -> {'job': str}
 owned_items      = {}   # str(uid) -> {str(item_id): int}
+businesses       = {}   # str(uid) -> {biz_key: {workers, last, upgraded, last_hire, [reputation, last_collect]}}
+locations        = {}   # str(uid) -> {'ville': str, 'lat': float, 'lon': float}
 theft_cooldowns  = {}   # str(uid) -> ISO
 miner_cooldowns  = {}   # str(uid) -> ISO
 hacker_cooldowns = {}   # str(uid) -> ISO
 risque_cooldowns = {}   # str(uid) -> ISO  (cooldown 3h)
 rob_cooldowns    = {}   # str(uid) -> ISO  (cooldown 12h)
+steal_immunity   = {}   # str(uid) -> ISO  (immunité 6h après avoir été volé via !voler)
 race_bets        = {}   # str(uid) -> {'driver': int, 'amount': int}
 race_drivers_live = [dict(d) for d in RACE_DRIVERS_BASE]
 race_accepting    = False
@@ -248,6 +284,7 @@ casino_config = {
     'min_bets':      {},  # str(game) -> int
     'max_bets':      {},  # str(game) -> int
     'cooldowns':     {},  # str(cmd) -> heures (override DEFAULT_COOLDOWNS_H)
+    'biz_overrides': {},  # biz_key -> {'base_rate': int, 'open_cost': int, 'upgrade_cost': int}
 }
 
 
@@ -290,19 +327,23 @@ def _team_of(user_id):
     tid = _user_team_id(user_id)
     return teams.get(tid) if tid else None
 
-# Nom du fichier de données
-DATA_FILE = 'data.json'
+# Nom du fichier de données — sur Railway, monté via Volume sur /data
+import shutil
+DATA_FILE = os.environ.get('DATA_FILE', '/data/data.json' if os.path.isdir('/data') else 'data.json')
+if not os.path.exists(DATA_FILE) and os.path.exists('/app/data.json'):
+    os.makedirs(os.path.dirname(DATA_FILE) or '.', exist_ok=True)
+    shutil.copy('/app/data.json', DATA_FILE)
 
 # --- Fonctions de chargement et de sauvegarde des données ---
 def load_data():
     global warns, mutes, silenced_users, coins, giveaway_data, daily_cooldowns, work_cooldowns
     global crypto_prices, price_history, crypto_trends, crypto_holdings, safes, factories, jobs_data, owned_items
-    global theft_cooldowns, miner_cooldowns, hacker_cooldowns, risque_cooldowns, rob_cooldowns
+    global theft_cooldowns, miner_cooldowns, hacker_cooldowns, risque_cooldowns, rob_cooldowns, steal_immunity
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms
-    global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID
+    global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r') as f:
+        with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
             try:
                 data = json.load(f)
 
@@ -360,6 +401,7 @@ def load_data():
                 hacker_cooldowns = data.get('hacker_cooldowns', {})
                 risque_cooldowns = data.get('risque_cooldowns', {})
                 rob_cooldowns    = data.get('rob_cooldowns', {})
+                steal_immunity   = data.get('steal_immunity', {})
                 race_bets        = data.get('race_bets', {})
                 race_drivers_live = data.get('race_drivers_live', [dict(d) for d in RACE_DRIVERS_BASE])
                 race_accepting   = data.get('race_accepting', False)
@@ -375,6 +417,8 @@ def load_data():
                 birthdays        = data.get('birthdays', {})
                 crypto_alerts    = data.get('crypto_alerts', {})
                 tournament_elo   = data.get('tournament_elo', {})
+                locations        = data.get('locations', {})
+                businesses       = data.get('businesses', {})
                 ADMIN_LOG_CHANNEL_ID = data.get('admin_log_channel_id', 0)
                 loaded_cfg = data.get('casino_config', {})
                 if isinstance(loaded_cfg, dict):
@@ -383,24 +427,55 @@ def load_data():
                     casino_config['min_bets']      = loaded_cfg.get('min_bets', {}) or {}
                     casino_config['max_bets']      = loaded_cfg.get('max_bets', {}) or {}
                     casino_config['cooldowns']     = loaded_cfg.get('cooldowns', {}) or {}
+                    casino_config['biz_overrides'] = loaded_cfg.get('biz_overrides', {}) or {}
 
-                print("Données chargées avec succès.")
-            except json.JSONDecodeError:
-                print("Erreur de décodage JSON. Le fichier de données est corrompu ou vide. Initialisation des données.")
+                logging.warning("Données chargées avec succès depuis %s", DATA_FILE)
+
+                # Migration : cap boucliers (item '3') à 1 pour tous sauf 730152107511906436
+                _BOUCLIER_EXEMPT = '730152107511906436'
+                _migrated = False
+                for _uid, _items in owned_items.items():
+                    if _uid == _BOUCLIER_EXEMPT:
+                        continue
+                    if isinstance(_items.get('3'), int) and _items['3'] > 1:
+                        logging.warning("Migration bouclier : %s avait %d → 1", _uid, _items['3'])
+                        _items['3'] = 1
+                        _migrated = True
+                if _migrated:
+                    save_data()
+
+                # Migration : reset tickets (items 4 et 5) + remboursement au prix d'achat
+                _ticket_migrated = False
+                for _uid, _items in owned_items.items():
+                    _nb4 = _items.get('4', 0)
+                    _nb5 = _items.get('5', 0)
+                    if _nb4 > 0 or _nb5 > 0:
+                        _refund = _nb4 * 200 + _nb5 * 5000
+                        coins[int(_uid)] += _refund
+                        _items.pop('4', None)
+                        _items.pop('5', None)
+                        logging.warning("Migration tickets : %s — %d tickets + %d packs remboursés (%d coins)", _uid, _nb4, _nb5, _refund)
+                        _ticket_migrated = True
+                if _ticket_migrated:
+                    ticket_purchases.clear()
+                    save_data()
+
+            except json.JSONDecodeError as e:
+                logging.warning("ERREUR JSON dans %s : %s — données réinitialisées", DATA_FILE, e)
                 warns = {}
                 mutes = {}
                 silenced_users = {}
                 coins = defaultdict(int)
                 giveaway_data = {}
             except Exception as e:
-                print(f"Erreur inattendue lors du chargement des données: {e}. Initialisation des données.")
+                logging.warning("ERREUR chargement données : %s — données réinitialisées", e)
                 warns = {}
                 mutes = {}
                 silenced_users = {}
                 coins = defaultdict(int)
                 giveaway_data = {}
     else:
-        print("Fichier de données non trouvé. Initialisation des données.")
+        logging.warning("Fichier %s non trouvé — données réinitialisées", DATA_FILE)
         warns = {}
         mutes = {}
         silenced_users = {}
@@ -449,6 +524,7 @@ def save_data():
     data_to_save['hacker_cooldowns'] = hacker_cooldowns
     data_to_save['risque_cooldowns'] = risque_cooldowns
     data_to_save['rob_cooldowns']    = rob_cooldowns
+    data_to_save['steal_immunity']   = steal_immunity
     data_to_save['race_bets']        = race_bets
     data_to_save['race_drivers_live'] = race_drivers_live
     data_to_save['race_accepting']   = race_accepting
@@ -463,6 +539,8 @@ def save_data():
     data_to_save['birthdays']        = birthdays
     data_to_save['crypto_alerts']    = crypto_alerts
     data_to_save['tournament_elo']   = tournament_elo
+    data_to_save['locations']        = locations
+    data_to_save['businesses']       = businesses
     data_to_save['admin_log_channel_id'] = ADMIN_LOG_CHANNEL_ID
 
     try:
@@ -562,7 +640,7 @@ async def check_mutes():
 
 @bot.event
 async def on_ready():
-    print(f"Connecté en tant que {bot.user}")
+    logging.warning("Connecté en tant que %s — DATA_FILE=%s — fichier_existe=%s", bot.user, DATA_FILE, os.path.exists(DATA_FILE))
     load_data()
     if not check_mutes.is_running():
         check_mutes.start()
@@ -570,7 +648,7 @@ async def on_ready():
         update_crypto_prices.start()
     if not check_birthdays.is_running():
         check_birthdays.start()
-    print("Bot prêt et fonctionnel !")
+    logging.warning("Bot prêt et fonctionnel !")
 
 
 # ── Liste des commandes toujours autorisées (anti-bricking) ──────────────
@@ -635,14 +713,14 @@ COMMAND_USAGE = {
     'vendre_crypto': '`!vendre_crypto <SYM> <quantité|all>`\nEx : `!vendre_crypto ETH 0.5` · `!vendre_crypto BTC all`',
     'choisir_metier':'`!choisir_metier <metier>`\nMétiers : `hacker` `mineur` `escroc` `gardien` `trader`',
     'hacker':        '`!hacker @membre` — Voler la crypto d\'un joueur\n*(Réservé au métier Hacker)*',
-    'voler':         '`!voler @membre` — Voler le coffre d\'un joueur (5-20% du coffre)\nEx : `!voler @Riche`',
-    'rob':           '`!rob @membre` — Voler le cash d\'un joueur (55% réussite, 5-15% du cash · -0 à 300 si raté)\nCooldown 12h',
+    'voler':         '`!voler @membre` — Voler le coffre d\'un joueur (5-20% du coffre)\nLa victime gagne une **immunité de 6h** après un vol réussi\nEx : `!voler @Riche`',
+    'rob':           '`!rob @membre` — Voler le cash d\'un joueur (55% réussite, 5-15% du cash · -0 à 300 si raté)\nEscroc : +20% sur le montant volé · Cooldown 12h',
     'coffre':        '`!coffre` — Ouvrir le coffre (boutons Déposer / Retirer)',
     'team':          '`!team` — Système de clubs (créer / rejoindre / quitter / trésorerie)',
     'gdt':           '`!gdt` *(Admin)* — Gérer la compétition inter-clubs (ouvrir/fermer/récompenser)',
     'gestion':       '`!gestion` *(Owner/Admin)* — Activer/désactiver n\'importe quelle commande',
     'permission':    '`!permission` *(Owner)* — Restreindre une commande à certains rôles Discord',
-    'cooldown':      '`!cooldown` ou `!cd` *(Owner/Admin)* — Modifier les cooldowns des commandes',
+    'cooldown':      '`!cd_set` ou `!cooldown_set` *(Owner/Admin)* — Modifier les cooldowns des commandes',
     'cd':            '`!cd` — Voir/modifier les cooldowns',
     'acheter':       '`!acheter <n°>` — Numéro de l\'item affiché dans `!shop`\nEx : `!acheter 1`',
     'parier':        '`!parier <n°pilote> <mise|all>`\nVoir les pilotes avec `!course`\nEx : `!parier 3 500` · `!parier 1 all`',
@@ -714,6 +792,7 @@ def _build_help_categories(ctx):
                  "Commandes générales",
                  "`!aide` — Ce menu\n"
                  "`!profil` (`!profile`, `!stats`) — Voir sa fiche complète\n"
+                 "`!cd` (`!cooldown`) — Voir tous tes cooldowns en cours *(privé)*\n"
                  "`!anniversaire JJ/MM` (`!anniv`) — Enregistrer son anniversaire\n"
                  "`!stats_serveur` (`!serveur`) — Vue globale du serveur"))
     cats.append(("eco", "🪙 Économie de base",
@@ -760,6 +839,14 @@ def _build_help_categories(ctx):
                  f"`!embaucher` (`!hire`) — Embaucher un employé *(cooldown {FACTORY_HIRE_COOLDOWN_HOURS}h)*\n"
                  f"`!collecter` (`!collect`) — Collecter la production\n"
                  f"Max **{MAX_FACTORY_WORKERS} employés**"))
+    cats.append(("commerces", "🏪 Commerces",
+                 "Chaîne de business à débloquer progressivement",
+                 "`!epicerie` — Épicerie 🏪 *(débloque après usine 10/10 + améliorée)*\n"
+                 "`!fastfood` — Fast Food 🍔 *(débloque après épicerie 8/8 + améliorée)*\n"
+                 "`!restaurant` (`!resto`) — Restaurant 🍽️ *(débloque après fast food 10/10 + amélioré)*\n"
+                 "Chaque commerce : embaucher, collecter, améliorer — via boutons\n"
+                 "Le restaurant a un système de ⭐ **Réputation** : 2 collectes/24h = +⭐, oublier 24h = retour à 0⭐\n"
+                 "Achetez les commerces via `!shop` (items 8, 9, 10)"))
     cats.append(("shop", "🛒 Magasin & Tickets",
                  "Items et inventaire",
                  "`!shop` (`!boutique`) — Magasin (boutons d'achat)\n"
@@ -806,7 +893,7 @@ def _build_help_categories(ctx):
                      "`!removecoins @membre <n>` (`!rmc`) — Retirer des coins\n"
                      "`!prix_casino` (`!prixcasino`) — Prix shop/usine + mises min/max\n"
                      "`!gestion` (`!gest`, `!admin`) — Activer/désactiver des commandes\n"
-                     "`!cooldown` (`!cd`) — Modifier les cooldowns\n"
+                     "`!cd_set` (`!cooldown_set`) — Modifier les cooldowns\n"
                      "`!ouvrir_course` (`!oc`) / `!lancer_course` (`!lc`) — Courses\n"
                      "`!ouverture_tournoi` (`!bracket`) — Lancer le tournoi\n"
                      "`!annuler_tournoi` — Annuler le tournoi en cours\n"
@@ -3461,6 +3548,30 @@ def _cd_ok(cd_dict: dict, uid, hours: float):
     cd_dict[key] = now.isoformat()
     return True, ""
 
+def _cd_remaining_str(cd_dict: dict, uid, hours: float) -> str:
+    """Read-only: retourne 'Xh Ymin' si en cooldown, '' si disponible."""
+    key = str(uid)
+    if key not in cd_dict:
+        return ''
+    try:
+        last = datetime.fromisoformat(cd_dict[key])
+    except (ValueError, TypeError):
+        return ''
+    wait = last + timedelta(hours=hours) - datetime.now()
+    if wait.total_seconds() <= 0:
+        return ''
+    h, rem = divmod(int(wait.total_seconds()), 3600)
+    m = rem // 60
+    return f"{h}h {m}min"
+
+def _secs_to_hm(secs: float) -> str:
+    """Convertit des secondes en 'Xh Ymin', ou '' si <= 0."""
+    if secs <= 0:
+        return ''
+    h, rem = divmod(int(secs), 3600)
+    m = rem // 60
+    return f"{h}h {m}min"
+
 def _factory_rate(workers: int, upgraded: bool) -> float:
     """Taux horaire total : 50+100+...+(workers×50) = 50×n×(n+1)/2"""
     base = 50 * workers * (workers + 1) / 2
@@ -3498,6 +3609,115 @@ def _factory_earnings(uid_str: str) -> int:
     rate      = _factory_rate(f['workers'], upgraded)
     earn      = rate * hours
     return int(min(earn, rate * 168))  # cap 1 semaine
+
+def _biz_def(biz_key, field):
+    """Retourne la valeur de config d'un commerce, avec override admin si présent."""
+    override = casino_config.get('biz_overrides', {}).get(biz_key, {})
+    return override.get(field, BIZ_DEFS[biz_key][field])
+
+def _biz_unlock_status(uid_str, biz_key):
+    """Retourne (unlocked: bool, raison: str). raison = '' si OK."""
+    biz = BIZ_DEFS[biz_key]
+    req_type, req_workers, req_upgraded = biz['requires']
+    if req_type == 'factory':
+        f = factories.get(uid_str, {})
+        w = f.get('workers', 0)
+        up = f.get('upgraded', False) or _has_item(int(uid_str), 6)
+        if w < req_workers:
+            return False, f"Usine {w}/{req_workers} employés"
+        if req_upgraded and not up:
+            return False, "Amélioration d'usine requise (item 6 du shop)"
+        return True, ''
+    else:
+        b = businesses.get(uid_str, {}).get(req_type, {})
+        d = BIZ_DEFS[req_type]
+        if not b:
+            return False, f"{d['emoji']} {d['name']} non ouverte"
+        w = b.get('workers', 0)
+        up = b.get('upgraded', False)
+        if w < req_workers:
+            return False, f"{d['emoji']} {d['name']} {w}/{req_workers} employés"
+        if req_upgraded and not up:
+            return False, f"{d['emoji']} {d['name']} non améliorée"
+        return True, ''
+
+def _biz_rate(biz_key, workers, upgraded, reputation=0):
+    biz = BIZ_DEFS[biz_key]
+    base = _biz_def(biz_key, 'base_rate') * workers * (workers + 1) / 2
+    if upgraded and biz.get('upgrade_bonus'):
+        base *= 1 + biz['upgrade_bonus']
+    if biz_key == 'restaurant' and reputation > 0:
+        base *= biz['rep_mult'][reputation]
+    return base
+
+def _biz_earnings(uid_str, biz_key):
+    b = businesses.get(uid_str, {}).get(biz_key)
+    if not b or b.get('workers', 0) == 0:
+        return 0
+    try:
+        last = datetime.fromisoformat(b['last'])
+    except (ValueError, KeyError):
+        return 0
+    hours = (datetime.now() - last).total_seconds() / 3600
+    rep   = b.get('reputation', 0) if biz_key == 'restaurant' else 0
+    rate  = _biz_rate(biz_key, b['workers'], b.get('upgraded', False), rep)
+    return int(min(rate * hours, rate * 168))
+
+def _biz_cost_next(biz_key, current_workers):
+    biz = BIZ_DEFS[biz_key]
+    costs = _biz_def(biz_key, 'worker_costs')
+    if current_workers >= biz['max_workers'] or current_workers >= len(costs):
+        return None
+    return costs[current_workers]
+
+def _biz_hire_remaining(uid_str, biz_key):
+    b = businesses.get(uid_str, {}).get(biz_key, {})
+    last_hire = b.get('last_hire')
+    if not last_hire:
+        return 0
+    try:
+        last = datetime.fromisoformat(last_hire)
+    except ValueError:
+        return 0
+    cd      = cooldown_h('embaucher') * 3600
+    elapsed = (datetime.now() - last).total_seconds()
+    return max(0, cd - elapsed)
+
+def _biz_embed(author_id, biz_key):
+    uid  = str(author_id)
+    biz  = BIZ_DEFS[biz_key]
+    b    = businesses.get(uid, {}).get(biz_key, {})
+    workers  = b.get('workers', 0)
+    upgraded = b.get('upgraded', False)
+    rep      = b.get('reputation', 0) if biz_key == 'restaurant' else None
+    pending  = _biz_earnings(uid, biz_key)
+    rate     = _biz_rate(biz_key, workers, upgraded, rep or 0)
+    next_cost = _biz_cost_next(biz_key, workers)
+    remaining = _biz_hire_remaining(uid, biz_key)
+    max_w    = biz['max_workers']
+
+    if next_cost is None:
+        hire_line = f"✅ **{biz['emoji']} {biz['name']} au maximum** ({max_w}/{max_w} employés)"
+    elif remaining > 0:
+        h, m = int(remaining // 3600), int((remaining % 3600) // 60)
+        hire_line = f"⏳ Prochain employé : **{next_cost:,} coins** *(dispo dans {h}h {m}min)*"
+    else:
+        hire_line = f"💼 Prochain employé : **{next_cost:,} coins** *(disponible)*"
+
+    desc = (
+        f"👷 **Employés :** {workers}/{max_w}\n"
+        f"⚡ **Production :** {rate:,.0f} coins/heure\n"
+        f"💰 **En attente :** {pending:,} coins\n"
+    )
+    if upgraded and biz.get('upgrade_bonus'):
+        desc += f"🔧 **{biz['name']} améliorée** (+{int(biz['upgrade_bonus']*100)}% production)\n"
+    if rep is not None:
+        stars = '⭐' * rep + '☆' * (5 - rep)
+        desc += f"🌟 **Réputation :** {stars} (×{biz['rep_mult'][rep]:.2f})\n"
+    desc += f"\n{hire_line}\nUtilisez les boutons ci-dessous."
+
+    return discord.Embed(title=f"{biz['emoji']} Votre {biz['name']}", color=biz['color'], description=desc)
+
 
 def _race_odds(idx: int) -> float:
     d  = race_drivers_live[idx]
@@ -4376,6 +4596,10 @@ async def cmd_voler(ctx, cible: discord.Member):
     safe_cible = safes.get(str(cible.id), 0)
     if safe_cible < 300:
         return await ctx.send(f"❌ Le coffre de {cible.mention} est trop pauvre (min 300 coins dans le coffre).")
+    # Vérifier immunité 6h
+    imm_ok, imm_wait = _cd_ok(steal_immunity, cible.id, 6)
+    if not imm_ok:
+        return await ctx.send(f"🛡️ {cible.mention} est protégé pendant encore **{imm_wait}** (immunité après vol subi).")
     # Vérifier bouclier
     if _has_item(cible.id, 3):
         _use_item(cible.id, 3)
@@ -4390,6 +4614,8 @@ async def cmd_voler(ctx, cible: discord.Member):
         if _get_job(cible.id) == 'gardien': stolen //= 2
         safes[str(cible.id)] = safe_cible - stolen
         coins[ctx.author.id] += stolen
+        # Poser l'immunité 6h sur la victime
+        steal_immunity[str(cible.id)] = datetime.utcnow().isoformat()
         save_data()
         embed = discord.Embed(title="🦹 Vol de coffre réussi !", color=0x2ecc71,
             description=(
@@ -4417,22 +4643,20 @@ async def cmd_rob(ctx, cible: discord.Member):
     cash_cible = coins[cible.id]
     if cash_cible < 200:
         return await ctx.send(f"❌ {cible.mention} n'a pas assez de cash à voler (min 200 coins en poche).")
-    # Bouclier
-    if _has_item(cible.id, 3):
-        _use_item(cible.id, 3)
-        save_data()
-        return await ctx.send(f"🛡️ {cible.mention} possède un **Bouclier Anti-Vol** ! Le vol a été bloqué.")
     if random.random() < 0.55:
         pct    = random.uniform(0.05, 0.15)
         stolen = int(cash_cible * pct)
+        if _get_job(ctx.author.id) == 'escroc':
+            stolen = int(stolen * 1.2)
         stolen = max(20, stolen)
         coins[ctx.author.id] += stolen
         coins[cible.id]      -= stolen
         save_data()
+        escroc_bonus = " *(+20% escroc)*" if _get_job(ctx.author.id) == 'escroc' else ""
         embed = discord.Embed(title="🦹 Rob réussi !", color=0x2ecc71,
             description=(
-                f"Vous avez braqué {cible.mention} et volé **{stolen:,} coins** "
-                f"({pct*100:.1f}% de son cash) !\n💰 Solde : **{coins[ctx.author.id]:,} coins**\n"
+                f"Vous avez braqué {cible.mention} et volé **{stolen:,} coins**{escroc_bonus} !\n"
+                f"💰 Solde : **{coins[ctx.author.id]:,} coins**\n"
                 f"⏳ Prochain rob dans **{cd_hours:g}h**."
             ))
     else:
@@ -4676,7 +4900,7 @@ async def cmd_permission(ctx):
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# ── !cooldown / !cd : modifier les cooldowns (Admin & Owner) ────────────
+# ── !cd_set / !cooldown_set : modifier les cooldowns (Admin & Owner) ────
 # ═════════════════════════════════════════════════════════════════════════
 
 class CooldownModal(discord.ui.Modal):
@@ -4754,17 +4978,95 @@ class CooldownView(discord.ui.View):
         await interaction.response.send_modal(CooldownModal(cmd))
 
 
-@bot.command(name="cooldown", aliases=["cd"])
-async def cmd_cooldown(ctx):
+@bot.command(name="cd_set", aliases=["cooldown_set"])
+async def cmd_cd_set(ctx):
     if not (ctx.author.guild_permissions.administrator or is_bot_owner(ctx.author)):
         return await ctx.send("❌ Réservé aux administrateurs ou au créateur du bot.")
     await ctx.send(embed=_cd_embed(), view=CooldownView(ctx.author.id))
 
 
+def _build_cd_embed(uid_int, guild):
+    uid = str(uid_int)
+
+    def line(emoji, label, remaining):
+        return f"{emoji} `{label}` — {'⏳ **' + remaining + '**' if remaining else '✅ Disponible'}"
+
+    lines = []
+    lines.append("**── Économie ──**")
+    lines.append(line("💼", "!travail", _cd_remaining_str(work_cooldowns,   uid_int, cooldown_h('travail'))))
+    lines.append(line("📅", "!daily",   _cd_remaining_str(daily_cooldowns,  uid_int, cooldown_h('daily'))))
+    lines.append(line("🎲", "!risque",  _cd_remaining_str(risque_cooldowns, uid_int, cooldown_h('risque'))))
+
+    lines.append("**── Vol ──**")
+    lines.append(line("🦹", "!voler",   _cd_remaining_str(theft_cooldowns,  uid_int, cooldown_h('voler'))))
+    lines.append(line("💸", "!rob",     _cd_remaining_str(rob_cooldowns,    uid_int, cooldown_h('rob'))))
+    imm = _cd_remaining_str(steal_immunity, uid_int, 6)
+    lines.append(f"🛡️ Immunité vol — {'⏳ **' + imm + '** restantes' if imm else '❌ Inactive'}")
+
+    lines.append("**── Jobs ──**")
+    lines.append(line("⛏️", "!miner",  _cd_remaining_str(miner_cooldowns,  uid_int, cooldown_h('miner'))))
+    lines.append(line("💻", "!hacker", _cd_remaining_str(hacker_cooldowns, uid_int, cooldown_h('hacker'))))
+
+    lines.append("**── Usine ──**")
+    factory   = factories.get(uid, {})
+    workers_f = factory.get('workers', 0)
+    if workers_f >= MAX_FACTORY_WORKERS:
+        lines.append(f"🏭 `!embaucher` usine — ✅ Complète ({MAX_FACTORY_WORKERS}/{MAX_FACTORY_WORKERS})")
+    else:
+        lines.append(line("🏭", "!embaucher usine", _secs_to_hm(_factory_hire_remaining(uid))))
+
+    user_biz = businesses.get(uid, {})
+    if any(user_biz.get(k) for k in BIZ_DEFS):
+        lines.append("**── Commerces ──**")
+        for biz_key, biz_def in BIZ_DEFS.items():
+            b = user_biz.get(biz_key)
+            if not b:
+                continue
+            w, max_w = b.get('workers', 0), biz_def['max_workers']
+            if w >= max_w:
+                lines.append(f"{biz_def['emoji']} `!embaucher` {biz_def['name']} — ✅ Complet ({max_w}/{max_w})")
+            else:
+                lines.append(line(biz_def['emoji'], f"!embaucher {biz_def['name']}", _secs_to_hm(_biz_hire_remaining(uid, biz_key))))
+
+    member = guild.get_member(uid_int) if guild else None
+    name   = member.display_name if member else str(uid_int)
+    embed  = discord.Embed(title="⏳ Tes cooldowns", description='\n'.join(lines), color=0x3498db)
+    embed.set_footer(text=f"Cooldowns de {name} · visible seulement par toi")
+    return embed
+
+
+class CdView(discord.ui.View):
+    def __init__(self, author_id, guild):
+        super().__init__(timeout=60)
+        self.author_id = author_id
+        self.guild     = guild
+
+    @discord.ui.button(label="Voir mes cooldowns", style=discord.ButtonStyle.primary, emoji="⏳")
+    async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Ce bouton n'est pas pour toi.", ephemeral=True)
+            return
+        embed = _build_cd_embed(self.author_id, self.guild)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.command(name="cd", aliases=["cooldown", "cooldowns", "cds"])
+async def cmd_cd_member(ctx):
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+    await ctx.send(
+        f"{ctx.author.mention}",
+        view=CdView(ctx.author.id, ctx.guild),
+        delete_after=60
+    )
+
+
 # ===== Commande !prix_casino (admin only) ============================
 
 class PrixShopModal(discord.ui.Modal, title="🛒 Modifier le prix d'un item"):
-    item_id_input = discord.ui.TextInput(label="ID de l'item (1 à 7)", placeholder="Ex : 3", required=True, max_length=2)
+    item_id_input = discord.ui.TextInput(label="ID de l'item (1 à 10)", placeholder="Ex : 3", required=True, max_length=2)
     prix_input = discord.ui.TextInput(label="Nouveau prix (en coins, 0 = défaut)", placeholder="Ex : 1500 ou 0", required=True, max_length=15)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -4812,6 +5114,39 @@ class PrixUsineModal(discord.ui.Modal, title="🏭 Modifier le prix d'un employ�
             costs[pos - 1] = price
             msg = f"✅ Prix du **{pos}ᵉ employé** réglé à **{price:,} coins**."
         casino_config['factory_costs'] = costs
+        save_data()
+        await interaction.response.send_message(msg, ephemeral=True)
+
+
+class PrixBizModal(discord.ui.Modal, title="🏢 Modifier un commerce"):
+    biz_input   = discord.ui.TextInput(label="Commerce (epicerie / fastfood / restaurant)", placeholder="Ex : epicerie", required=True, max_length=12)
+    champ_input = discord.ui.TextInput(label="Paramètre (baserate / opencost / upgrade)", placeholder="Ex : baserate", required=True, max_length=12)
+    valeur_input = discord.ui.TextInput(label="Nouvelle valeur (0 = valeur par défaut)", placeholder="Ex : 150 ou 0", required=True, max_length=15)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        biz_key = str(self.biz_input.value).strip().lower()
+        champ   = str(self.champ_input.value).strip().lower()
+        if biz_key not in BIZ_DEFS:
+            return await interaction.response.send_message("❌ Commerce inconnu. Utilisez : epicerie, fastfood ou restaurant.", ephemeral=True)
+        try:
+            val = int(str(self.valeur_input.value).strip())
+        except ValueError:
+            return await interaction.response.send_message("❌ Valeur invalide.", ephemeral=True)
+        if val < 0:
+            return await interaction.response.send_message("❌ La valeur ne peut pas être négative.", ephemeral=True)
+        field_map = {'baserate': 'base_rate', 'opencost': 'open_cost', 'upgrade': 'upgrade_cost'}
+        if champ not in field_map:
+            return await interaction.response.send_message("❌ Paramètre inconnu. Utilisez : baserate, opencost ou upgrade.", ephemeral=True)
+        field = field_map[champ]
+        overrides = casino_config.setdefault('biz_overrides', {}).setdefault(biz_key, {})
+        biz_def = BIZ_DEFS[biz_key]
+        if val == 0:
+            overrides.pop(field, None)
+            default = biz_def.get(field)
+            msg = f"✅ **{biz_def['emoji']} {biz_def['name']}** — `{field}` réinitialisé à **{default}** (défaut)."
+        else:
+            overrides[field] = val
+            msg = f"✅ **{biz_def['emoji']} {biz_def['name']}** — `{field}` réglé à **{val:,}**."
         save_data()
         await interaction.response.send_message(msg, ephemeral=True)
 
@@ -4896,6 +5231,19 @@ def _prix_casino_embed():
     if not bet_lines:
         bet_lines.append("*Aucune limite configurée (par défaut)*")
     embed.add_field(name="🎰 Limites de mise", value='\n'.join(bet_lines)[:1024], inline=False)
+    # Section commerces
+    biz_lines = []
+    for biz_key, biz_def in BIZ_DEFS.items():
+        ov        = casino_config.get('biz_overrides', {}).get(biz_key, {})
+        base_rate = ov.get('base_rate',    biz_def['base_rate'])
+        open_cost = ov.get('open_cost',    biz_def['open_cost'])
+        upg_cost  = ov.get('upgrade_cost', biz_def.get('upgrade_cost'))
+        custom    = " 🔧" if ov else ""
+        upg_str   = f" · upgrade {upg_cost:,}" if upg_cost else ""
+        biz_lines.append(
+            f"{biz_def['emoji']} **{biz_def['name']}**{custom} — ouverture {open_cost:,} · rate {base_rate}{upg_str}"
+        )
+    embed.add_field(name="🏢 Commerces", value='\n'.join(biz_lines), inline=False)
     embed.set_footer(text="🔧 = valeur personnalisée")
     return embed
 
@@ -4923,6 +5271,10 @@ class PrixCasinoView(discord.ui.View):
     async def bet_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(PrixMiseModal())
 
+    @discord.ui.button(label="Prix Commerces", style=discord.ButtonStyle.primary, emoji="🏢")
+    async def biz_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PrixBizModal())
+
     @discord.ui.button(label="Actualiser", style=discord.ButtonStyle.secondary, emoji="🔄")
     async def refresh_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(embed=_prix_casino_embed(), view=self)
@@ -4946,23 +5298,41 @@ async def cmd_prix_casino(ctx):
 
 
 def _shop_embed(author_id):
-    uid = str(author_id)
+    uid   = str(author_id)
     items = owned_items.get(uid, {})
     embed = discord.Embed(title="🛒 Magasin", color=0xe67e22,
         description=f"💰 Votre solde : **{coins[author_id]:,} coins**\n\nChoisissez un item dans le menu déroulant ci-dessous.")
+
     for iid, info in SHOP_ITEMS.items():
-        cnt = items.get(str(iid), 0)
-        tag = (" ✅ *(possédé)*" if info['unique'] and cnt > 0
-               else f" *(×{cnt})*" if cnt > 0 else "")
         price = _shop_price(iid)
+        if info.get('biz'):
+            bk  = info['biz']
+            biz = BIZ_DEFS[bk]
+            if businesses.get(uid, {}).get(bk):
+                tag   = " ✅ *(déjà ouverte)*"
+                value = f"{info['desc']}\n> Commande : `!{bk}`"
+            else:
+                ok, reason = _biz_unlock_status(uid, bk)
+                if ok:
+                    tag   = " 🟢 *(disponible à l'achat)*"
+                    value = f"{info['desc']}\n> `!acheter {iid}` pour ouvrir"
+                else:
+                    tag   = f" 🔒 *(Requis : {reason})*"
+                    value = info['desc']
+        else:
+            cnt = items.get(str(iid), 0)
+            tag = (" ✅ *(possédé)*" if info['unique'] and cnt > 0
+                   else f" *(×{cnt})*" if cnt > 0 else "")
+            value = info['desc']
         embed.add_field(
             name=f"**{iid}.** {info['name']} — {price:,} coins{tag}",
-            value=info['desc'], inline=False
+            value=value, inline=False
         )
     return embed
 
 
-TICKET_DAILY_LIMIT = 10
+TICKET_DAILY_LIMIT   = 10
+SCRATCH_DAILY_LIMIT  = 10
 
 def _do_purchase(author_id, item_id):
     """Effectue un achat. Retourne (success: bool, message: str)."""
@@ -4971,7 +5341,15 @@ def _do_purchase(author_id, item_id):
     info = SHOP_ITEMS[item_id]
     price = _shop_price(item_id)
     uid = str(author_id)
-    if info['unique'] and owned_items.get(uid, {}).get(str(item_id), 0) > 0:
+    # Vérification unique pour les commerces (tracked via businesses, pas inventory)
+    if info.get('biz'):
+        bk = info['biz']
+        if businesses.get(uid, {}).get(bk):
+            return False, f"❌ Vous avez déjà ouvert **{BIZ_DEFS[bk]['emoji']} {BIZ_DEFS[bk]['name']}**."
+        ok, reason = _biz_unlock_status(uid, bk)
+        if not ok:
+            return False, f"❌ Prérequis non remplis : **{reason}**"
+    elif info['unique'] and owned_items.get(uid, {}).get(str(item_id), 0) > 0:
         return False, f"❌ Vous possédez déjà **{info['name']}**."
     # Limite journalière tickets (items 4 = 1 ticket, 5 = pack ×5)
     if item_id in (4, 5):
@@ -4991,6 +5369,20 @@ def _do_purchase(author_id, item_id):
     if coins[author_id] < price:
         return False, f"❌ Pas assez de coins. Prix : **{price:,}** | Solde : **{coins[author_id]:,}**"
     coins[author_id] -= price
+    # Ouverture d'un commerce (pas en inventaire, dans businesses)
+    if info.get('biz'):
+        bk = info['biz']
+        biz = BIZ_DEFS[bk]
+        entry = {'workers': 0, 'last': datetime.now().isoformat(), 'upgraded': False, 'last_hire': None}
+        if bk == 'restaurant':
+            entry['reputation'] = 0
+            entry['last_collect'] = None
+        businesses.setdefault(uid, {})[bk] = entry
+        save_data()
+        return True, (
+            f"🎉 **{biz['emoji']} {biz['name']}** ouverte ! Bienvenue dans le monde du commerce.\n"
+            f"💰 Solde : **{coins[author_id]:,} coins**\n"
+            f"Tapez `!{bk}` pour commencer à embaucher !")
     oi = owned_items.setdefault(uid, {})
     if item_id == 5:
         oi[str(4)] = oi.get(str(4), 0) + 5
@@ -5145,6 +5537,15 @@ async def cmd_gratter(ctx):
             "❌ Vous n'avez pas de ticket à gratter.\n"
             "Achetez-en avec `!acheter 4` (1500 coins) ou un pack×5 avec `!acheter 5` (7000 coins)."
         )
+    # Limite journalière de grattage
+    today = datetime.now().date().isoformat()
+    tp = ticket_purchases.get(uid, {'count': 0, 'scratch_count': 0, 'day': None})
+    if tp.get('day') != today:
+        tp = {'count': 0, 'scratch_count': 0, 'day': today}
+    if tp.get('scratch_count', 0) >= SCRATCH_DAILY_LIMIT:
+        return await ctx.send(f"❌ Limite journalière atteinte ! Vous ne pouvez gratter que **{SCRATCH_DAILY_LIMIT} tickets/jour**.")
+    tp['scratch_count'] = tp.get('scratch_count', 0) + 1
+    ticket_purchases[uid] = tp
     _use_item(ctx.author.id, 4)
     save_data()
 
@@ -6534,6 +6935,8 @@ async def cmd_profil(ctx, member: discord.Member = None):
     job_str = JOBS[job]['name'] if job and job in JOBS else "Aucun"
     factory = factories.get(uid, {})
     workers = factory.get('workers', 0) if factory else 0
+    imm_ok, imm_wait = _cd_ok(steal_immunity, member.id, 6)
+    imm_str = None if imm_ok else f"🛡️ Immunité vol active encore **{imm_wait}**"
 
     embed = discord.Embed(
         title=f"👤 Profil de {member.display_name}",
@@ -6548,7 +6951,30 @@ async def cmd_profil(ctx, member: discord.Member = None):
     embed.add_field(name="🔥 Streak Daily", value=f"{streak} jour{'s' if streak != 1 else ''}", inline=True)
     embed.add_field(name="🏆 ELO Tournoi", value=str(elo), inline=True)
     embed.add_field(name="💼 Métier", value=job_str, inline=True)
-    embed.add_field(name="🏭 Usine", value=f"{workers} ouvrier{'s' if workers != 1 else ''}", inline=True)
+    factory_rate = _factory_rate(workers, factories.get(uid, {}).get('upgraded', False) or _has_item(uid_int, 6))
+    factory_pending = _factory_earnings(uid)
+    embed.add_field(name="🏭 Usine", value=f"{workers} ouvrier{'s' if workers != 1 else ''} · {factory_rate:,.0f}/h · {factory_pending:,} en attente", inline=False)
+    biz_lines = []
+    for biz_key, biz_def in BIZ_DEFS.items():
+        user_biz = businesses.get(uid, {}).get(biz_key)
+        if user_biz:
+            w       = user_biz.get('workers', 0)
+            max_w   = biz_def['max_workers']
+            upg     = user_biz.get('upgraded', False)
+            pending = _biz_earnings(uid, biz_key)
+            rate    = _biz_rate(biz_key, w, upg, user_biz.get('reputation', 0))
+            upg_str = " 🔧" if upg else ""
+            rep_str = ""
+            if biz_key == 'restaurant':
+                rep = user_biz.get('reputation', 0)
+                rep_str = f" · {'⭐' * rep if rep else '☆ 0⭐'}"
+            biz_lines.append(
+                f"{biz_def['emoji']} **{biz_def['name']}**{upg_str} — {w}/{max_w} emp · {rate:,.0f}/h · {pending:,} en attente{rep_str}"
+            )
+    if biz_lines:
+        embed.add_field(name="🏢 Commerces", value='\n'.join(biz_lines), inline=False)
+    if imm_str:
+        embed.add_field(name="🛡️ Protection", value=imm_str, inline=False)
     if item_lines:
         embed.add_field(name="🎒 Inventaire", value='\n'.join(item_lines), inline=False)
     await ctx.send(embed=embed)
@@ -7115,7 +7541,382 @@ async def cmd_draft(ctx, mode: str = None, captain2: discord.Member = None):
         )
 
 
-keep_alive()
+# === COMMERCES ============================================================
+
+class BusinessView(discord.ui.View):
+    def __init__(self, author_id, biz_key):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+        self.biz_key   = biz_key
+        self._build()
+
+    def _build(self):
+        self.clear_items()
+        uid = str(self.author_id)
+        biz = BIZ_DEFS[self.biz_key]
+        b   = businesses.get(uid, {}).get(self.biz_key, {})
+        upgraded = b.get('upgraded', False)
+        v = self
+
+        hire = discord.ui.Button(label="Embaucher", style=discord.ButtonStyle.success, emoji="👷")
+        async def on_hire(inter, _v=v): await _v._hire(inter)
+        hire.callback = on_hire
+        self.add_item(hire)
+
+        collect = discord.ui.Button(label="Collecter", style=discord.ButtonStyle.primary, emoji="💰")
+        async def on_collect(inter, _v=v): await _v._collect(inter)
+        collect.callback = on_collect
+        self.add_item(collect)
+
+        if biz.get('upgrade_cost'):
+            if upgraded:
+                btn = discord.ui.Button(label="Améliorée ✅", style=discord.ButtonStyle.secondary, emoji="🔧", disabled=True)
+            else:
+                btn = discord.ui.Button(label=f"Améliorer ({biz['upgrade_cost']:,})", style=discord.ButtonStyle.secondary, emoji="🔧")
+                async def on_upg(inter, _v=v): await _v._upgrade(inter)
+                btn.callback = on_upg
+            self.add_item(btn)
+
+        if self.biz_key == 'restaurant':
+            rep_btn = discord.ui.Button(label="Réputation", style=discord.ButtonStyle.secondary, emoji="⭐")
+            async def on_rep(inter, _v=v): await _v._rep_info(inter)
+            rep_btn.callback = on_rep
+            self.add_item(rep_btn)
+
+        refresh = discord.ui.Button(label="Actualiser", style=discord.ButtonStyle.secondary, emoji="🔄")
+        async def on_refresh(inter, _v=v): await _v._refresh(inter)
+        refresh.callback = on_refresh
+        self.add_item(refresh)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            biz = BIZ_DEFS[self.biz_key]
+            await interaction.response.send_message(
+                f"❌ Ce n'est pas votre {biz['name']}. Tapez `!{self.biz_key}`.", ephemeral=True)
+            return False
+        return True
+
+    async def _hire(self, interaction: discord.Interaction):
+        uid = str(self.author_id)
+        bk  = self.biz_key
+        biz = BIZ_DEFS[bk]
+        b   = businesses.get(uid, {}).get(bk)
+        if not b:
+            return await interaction.response.send_message("❌ Commerce non ouvert.", ephemeral=True)
+        remaining = _biz_hire_remaining(uid, bk)
+        if remaining > 0:
+            h, m = int(remaining // 3600), int((remaining % 3600) // 60)
+            return await interaction.response.send_message(f"⏳ Attendez **{h}h {m}min** avant d'embaucher.", ephemeral=True)
+        cost = _biz_cost_next(bk, b['workers'])
+        if cost is None:
+            return await interaction.response.send_message(f"❌ Maximum de **{biz['max_workers']} employés** atteint.", ephemeral=True)
+        if coins[self.author_id] < cost:
+            return await interaction.response.send_message(f"❌ Il vous faut **{cost:,} coins**. Solde : **{coins[self.author_id]:,}**", ephemeral=True)
+        pending = _biz_earnings(uid, bk)
+        if pending > 0:
+            coins[self.author_id] += pending
+            b['last'] = datetime.now().isoformat()
+        coins[self.author_id] -= cost
+        b['workers']   += 1
+        b['last_hire']  = datetime.now().isoformat()
+        save_data()
+        self._build()
+        await interaction.response.edit_message(embed=_biz_embed(self.author_id, bk), view=self)
+        await interaction.followup.send(
+            f"👷 Employé #{b['workers']} recruté pour **{cost:,} coins** !\n"
+            f"⏳ Prochain employé dispo dans **{cooldown_h('embaucher'):g}h**.", ephemeral=True)
+
+    async def _collect(self, interaction: discord.Interaction):
+        uid = str(self.author_id)
+        bk  = self.biz_key
+        b   = businesses.get(uid, {}).get(bk)
+        if not b:
+            return await interaction.response.send_message("❌ Commerce non ouvert.", ephemeral=True)
+        pending = _biz_earnings(uid, bk)
+        if pending <= 0:
+            return await interaction.response.send_message("❌ Aucun gain à collecter. Embauchez des employés !", ephemeral=True)
+        if bk == 'restaurant':
+            last_col = b.get('last_collect')
+            if last_col:
+                h_since = (datetime.now() - datetime.fromisoformat(last_col)).total_seconds() / 3600
+                if h_since <= 24:
+                    prog = b.get('rep_progress', 0) + 1
+                    if prog >= 2:
+                        b['reputation']   = min(5, b.get('reputation', 0) + 1)
+                        b['rep_progress'] = 0
+                    else:
+                        b['rep_progress'] = prog
+                else:
+                    b['reputation']   = 0
+                    b['rep_progress'] = 0
+            b['last_collect'] = datetime.now().isoformat()
+        coins[self.author_id] += pending
+        b['last'] = datetime.now().isoformat()
+        save_data()
+        await interaction.response.edit_message(embed=_biz_embed(self.author_id, bk), view=self)
+        await interaction.followup.send(
+            f"{BIZ_DEFS[bk]['emoji']} **{pending:,} coins** collectés ! Solde : **{coins[self.author_id]:,}**", ephemeral=True)
+
+    async def _upgrade(self, interaction: discord.Interaction):
+        uid = str(self.author_id)
+        bk  = self.biz_key
+        biz = BIZ_DEFS[bk]
+        b   = businesses.get(uid, {}).get(bk)
+        if not b:
+            return await interaction.response.send_message("❌ Commerce non ouvert.", ephemeral=True)
+        if b.get('upgraded', False):
+            return await interaction.response.send_message("✅ Ce commerce est déjà amélioré.", ephemeral=True)
+        cost = biz['upgrade_cost']
+        if coins[self.author_id] < cost:
+            return await interaction.response.send_message(f"❌ Il vous faut **{cost:,} coins**. Solde : **{coins[self.author_id]:,}**", ephemeral=True)
+        coins[self.author_id] -= cost
+        b['upgraded'] = True
+        save_data()
+        self._build()
+        await interaction.response.edit_message(embed=_biz_embed(self.author_id, bk), view=self)
+        await interaction.followup.send(
+            f"🔧 **{biz['emoji']} {biz['name']}** améliorée ! +{int(biz['upgrade_bonus']*100)}% production.\n"
+            f"💰 Solde : **{coins[self.author_id]:,} coins**", ephemeral=True)
+
+    async def _rep_info(self, interaction: discord.Interaction):
+        uid = str(self.author_id)
+        b   = businesses.get(uid, {}).get('restaurant', {})
+        rep = b.get('reputation', 0)
+        biz = BIZ_DEFS['restaurant']
+        stars = '⭐' * rep + '☆' * (5 - rep)
+        last_col = b.get('last_collect')
+        prog = b.get('rep_progress', 0)
+        if last_col:
+            h_since = (datetime.now() - datetime.fromisoformat(last_col)).total_seconds() / 3600
+            if h_since <= 24:
+                trend = f"📈 En progression *(collecte {2 - prog}× encore dans les 24h pour +⭐)*"
+            else:
+                trend = "💀 **Réputation en danger** — sans collecte sous 24h tu repasses à 0⭐ !"
+        else:
+            trend = "📈 Première collecte = début de progression"
+        prog_bar = "🟡" * prog + "⚫" * (2 - prog)
+        await interaction.response.send_message(
+            f"🌟 **Réputation** : {stars}\n"
+            f"✖️ Multiplicateur : **×{biz['rep_mult'][rep]:.2f}**\n"
+            f"📊 Progression prochaine ⭐ : {prog_bar} ({prog}/2)\n"
+            f"{trend}\n\n"
+            "**Règles :**\n"
+            "• Collectez **2× dans les 24h** → +⭐\n"
+            "• Sans collecte **24h+** → retour à **0⭐** immédiat\n"
+            "• ⭐⭐⭐⭐⭐ = **×1.70** de production", ephemeral=True)
+
+    async def _refresh(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(embed=_biz_embed(self.author_id, self.biz_key), view=self)
+
+
+async def _cmd_biz(ctx, biz_key):
+    uid = str(ctx.author.id)
+    b   = businesses.get(uid, {}).get(biz_key)
+    biz = BIZ_DEFS[biz_key]
+    if not b:
+        ok, reason = _biz_unlock_status(uid, biz_key)
+        if not ok:
+            return await ctx.send(
+                f"🔒 **{biz['emoji']} {biz['name']}** non débloquée.\n"
+                f"Prérequis manquants : **{reason}**\n"
+                f"Remplissez les conditions puis achetez-la avec `!acheter {biz['shop_item']}`.")
+        return await ctx.send(
+            f"{biz['emoji']} **{biz['name']}** disponible !\n"
+            f"Ouvrez-la pour **{biz['open_cost']:,} coins** avec `!acheter {biz['shop_item']}`.")
+    await ctx.send(embed=_biz_embed(ctx.author.id, biz_key), view=BusinessView(ctx.author.id, biz_key))
+
+@bot.command(name="epicerie")
+async def cmd_epicerie(ctx):
+    await _cmd_biz(ctx, 'epicerie')
+
+@bot.command(name="fastfood", aliases=["fast_food"])
+async def cmd_fastfood(ctx):
+    await _cmd_biz(ctx, 'fastfood')
+
+@bot.command(name="restaurant", aliases=["resto"])
+async def cmd_restaurant(ctx):
+    await _cmd_biz(ctx, 'restaurant')
+
+
+# === CARTE COMMUNAUTAIRE ===
+
+_CARTE_COLORS = [
+    '#FF4444', '#4477FF', '#44DD88', '#FFD700',
+    '#FF44FF', '#00DDDD', '#FF8800', '#AA44FF',
+    '#FF4488', '#88FF44', '#00BBFF', '#FF6622',
+]
+
+_CARTE_PRESETS = {
+    'monde':  {'label': '🌍 Monde',   'zoom': 2, 'clat': 25.0, 'clon': 10.0},
+    'europe': {'label': '🌍 Europe',  'zoom': 4, 'clat': 52.0, 'clon': 12.0},
+    'france': {'label': '🇫🇷 France', 'zoom': 6, 'clat': 46.5, 'clon': 2.5},
+}
+
+def _latlon_to_px(lat, lon, zoom, center_lat, center_lon, img_w, img_h):
+    n = 2 ** zoom
+    ts = 256
+    def _x(lo): return (lo + 180) / 360 * n
+    def _y(la):
+        r = math.radians(la)
+        return (1 - math.log(math.tan(r) + 1 / math.cos(r)) / math.pi) / 2 * n
+    px = (_x(lon) - _x(center_lon)) * ts + img_w / 2
+    py = (_y(lat) - _y(center_lat)) * ts + img_h / 2
+    return int(px), int(py)
+
+def _carte_font(size):
+    from PIL import ImageFont
+    for path in [
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+        '/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf',
+    ]:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+@bot.command(name='maville')
+async def cmd_maville(ctx, *, ville: str = None):
+    uid = str(ctx.author.id)
+    if not ville:
+        if uid in locations:
+            await ctx.send(f"📍 Ta ville enregistrée : **{locations[uid]['ville']}**")
+        else:
+            await ctx.send("Tu n'as pas encore enregistré ta ville. Utilise `!maville <nom de ville>`")
+        return
+
+    ville = ville.strip()
+    try:
+        async with aiohttp.ClientSession() as session:
+            params  = {"q": ville, "format": "json", "limit": 1}
+            headers = {"User-Agent": "VynaroCasinoBot/1.0 Discord bot"}
+            async with session.get(
+                "https://nominatim.openstreetmap.org/search",
+                params=params, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                results = await resp.json(content_type=None)
+    except Exception as e:
+        logging.warning(f"[maville] erreur nominatim pour '{ville}': {e}")
+        await ctx.send("❌ Erreur réseau lors de la recherche. Réessaie dans quelques instants.")
+        return
+
+    if not results or not isinstance(results, list):
+        await ctx.send(f"❌ **{ville}** introuvable. Essaie un nom plus précis.")
+        return
+
+    lat = float(results[0]['lat'])
+    lon = float(results[0]['lon'])
+    display_name = results[0]['display_name'].split(',')[0].strip()
+
+    locations[uid] = {"ville": display_name, "lat": lat, "lon": lon}
+    save_data()
+    await ctx.send(f"✅ Ville enregistrée : **{display_name}**")
+
+
+def _render_carte(preset, guild):
+    from staticmap import StaticMap, CircleMarker
+    from PIL import ImageDraw
+
+    IMG_W, IMG_H = 1200, 650
+    zoom = preset['zoom']
+    clat, clon = preset['clat'], preset['clon']
+
+    m = StaticMap(IMG_W, IMG_H)
+    loc_items = list(locations.items())
+
+    for i, (uid, loc) in enumerate(loc_items):
+        color = _CARTE_COLORS[i % len(_CARTE_COLORS)]
+        m.add_marker(CircleMarker((loc['lon'], loc['lat']), color, 14))
+
+    image = m.render(zoom=zoom, center=[clon, clat])
+    draw  = ImageDraw.Draw(image)
+    font  = _carte_font(13)
+
+    for i, (uid, loc) in enumerate(loc_items):
+        px, py = _latlon_to_px(loc['lat'], loc['lon'], zoom, clat, clon, IMG_W, IMG_H)
+        member = guild.get_member(int(uid))
+        name   = member.display_name if member else loc['ville']
+        color  = _CARTE_COLORS[i % len(_CARTE_COLORS)]
+        draw.text((px + 10, py - 7 + 1), name, fill='black', font=font)
+        draw.text((px + 10, py - 7),     name, fill=color,   font=font)
+
+    buf = io.BytesIO()
+    image.save(buf, 'PNG')
+    buf.seek(0)
+    return buf
+
+
+class CarteView(discord.ui.View):
+    def __init__(self, guild, current='monde'):
+        super().__init__(timeout=180)
+        self.guild   = guild
+        self.current = current
+        self._build()
+
+    def _build(self):
+        self.clear_items()
+        for key, preset in _CARTE_PRESETS.items():
+            btn = discord.ui.Button(
+                label=preset['label'],
+                style=discord.ButtonStyle.primary if key == self.current else discord.ButtonStyle.secondary,
+            )
+            btn.callback = self._make_cb(key)
+            self.add_item(btn)
+
+    def _make_cb(self, key):
+        async def callback(interaction: discord.Interaction):
+            if key == self.current:
+                await interaction.response.defer()
+                return
+            self.current = key
+            self._build()
+            await interaction.response.defer()
+            try:
+                buf = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: _render_carte(_CARTE_PRESETS[key], self.guild)
+                )
+            except Exception as e:
+                await interaction.followup.send(f"❌ Erreur : {e}", ephemeral=True)
+                return
+            await interaction.edit_original_response(
+                content=self._content(),
+                attachments=[discord.File(buf, 'carte.png')],
+                view=self,
+            )
+        return callback
+
+    def _content(self):
+        count  = len(locations)
+        header = f"🗺️ **Carte de la communauté** — {count} membre{'s' if count > 1 else ''} enregistré{'s' if count > 1 else ''}"
+        lines  = [header]
+        for uid, loc in locations.items():
+            member = self.guild.get_member(int(uid))
+            name   = member.mention if member else f"<@{uid}>"
+            lines.append(f"{name} — **{loc['ville']}**")
+        return '\n'.join(lines)
+
+
+@bot.command(name='carte')
+async def cmd_carte(ctx):
+    if not locations:
+        await ctx.send("Personne n'a encore enregistré sa ville avec `!maville`.")
+        return
+
+    await ctx.typing()
+    view = CarteView(ctx.guild, current='monde')
+
+    try:
+        buf = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _render_carte(_CARTE_PRESETS['monde'], ctx.guild)
+        )
+    except Exception as e:
+        await ctx.send(f"❌ Erreur lors de la génération de la carte : {e}")
+        return
+
+    await ctx.send(view._content(), file=discord.File(buf, 'carte.png'), view=view)
+
 
 token = os.getenv("TOKEN")
 if token is not None:
