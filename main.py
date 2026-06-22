@@ -6262,6 +6262,25 @@ def _already_registered(t, uid):
     return False
 
 
+async def _update_tournament_board(guild, t, gid, view=None):
+    board_id = t.get('board_message_id')
+    channel  = guild.get_channel(t['channel_id'])
+    if not channel or not board_id:
+        return
+    embed = _build_tournament_embed(t, gid)
+    embed.add_field(
+        name="⚙️ Admin",
+        value=("`!prix_tournoi <montant>` · `!ouverture_tournoi`\n"
+               "`!tournoi_ajouter @m [équipe]` · `!tournoi_retirer @m`"),
+        inline=False
+    )
+    try:
+        board = await channel.fetch_message(board_id)
+        await board.edit(embed=embed, view=view)
+    except discord.HTTPException:
+        pass
+
+
 class TournamentJoinView(discord.ui.View):
     def __init__(self, guild_id: str, team_size: int = 1):
         super().__init__(timeout=None)
@@ -6286,25 +6305,7 @@ class TournamentJoinView(discord.ui.View):
             self.add_item(join)
 
     async def _refresh_board(self, interaction, t, gid):
-        embed = _build_tournament_embed(t, gid)
-        embed.add_field(
-            name="⚙️ Admin",
-            value=("`!prix_tournoi <montant>` · `!ouverture_tournoi`\n"
-                   "`!tournoi_ajouter @m [équipe]` · `!tournoi_retirer @m`"),
-            inline=False
-        )
-        # Édite le message du tableau (et pas un éventuel message éphémère)
-        board_id = t.get('board_message_id')
-        if board_id and interaction.message and interaction.message.id == board_id:
-            await interaction.message.edit(embed=embed, view=self)
-            return
-        channel = interaction.guild.get_channel(t['channel_id'])
-        if channel and board_id:
-            try:
-                board = await channel.fetch_message(board_id)
-                await board.edit(embed=embed, view=self)
-            except discord.HTTPException:
-                pass
+        await _update_tournament_board(interaction.guild, t, gid, self)
 
     async def _solo_join(self, interaction: discord.Interaction):
         gid = str(interaction.guild_id)
@@ -6755,12 +6756,14 @@ async def cmd_tournoi_retirer(ctx, membre: discord.Member):
             if len(members) == 1:
                 t['participants'].remove(p)
                 save_data()
+                await _update_tournament_board(ctx.guild, t, gid, TournamentJoinView(gid, _team_size(t)))
                 return await ctx.send(f"✅ **{membre.display_name}** retiré — équipe **{p['name']}** supprimée.")
             members.remove(uid)
             p['members'] = members
             if p['captain'] == uid:
                 p['captain'] = members[0]
             save_data()
+            await _update_tournament_board(ctx.guild, t, gid, TournamentJoinView(gid, _team_size(t)))
             return await ctx.send(f"✅ **{membre.display_name}** retiré de l'équipe **{p['name']}** ({len(members)}/{_team_size(t)}).")
     await ctx.send(f"❌ **{membre.display_name}** n'est pas inscrit au tournoi.")
 
@@ -6792,11 +6795,13 @@ async def cmd_tournoi_ajouter(ctx, membre: discord.Member, *, team_name: str = N
         idx = len(t['participants'])
         t['participants'].append({'idx': idx, 'captain': uid, 'name': team_name, 'members': [uid]})
         save_data()
+        await _update_tournament_board(ctx.guild, t, gid, TournamentJoinView(gid, ts))
         return await ctx.send(f"✅ Équipe **{team_name}** créée avec **{membre.display_name}** comme capitaine (1/{ts}).")
     if _team_full(t, target):
         return await ctx.send(f"❌ L'équipe **{target['name']}** est déjà complète ({ts}/{ts}).")
     target['members'].append(uid)
     save_data()
+    await _update_tournament_board(ctx.guild, t, gid, TournamentJoinView(gid, ts))
     await ctx.send(f"✅ **{membre.display_name}** ajouté à **{target['name']}** ({len(target['members'])}/{ts}).")
 
 
