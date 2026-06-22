@@ -6164,6 +6164,7 @@ async def _advance_tournament(guild, t: dict, gid: str):
             else:
                 prize_line = f"💰 **{prize:,} coins** versés au vainqueur !"
         t['status'] = 'finished'
+        save_data()
         members_str = ', '.join(f"<@{u}>" for u in members)
         embed = discord.Embed(
             title="🏆 Tournoi terminé — Vainqueur !",
@@ -6184,6 +6185,7 @@ async def _advance_tournament(guild, t: dict, gid: str):
     random.shuffle(winners)
     new_matches, t['next_match_id'] = _generate_round_matches(winners, t['next_match_id'])
     t['rounds'].append(new_matches)
+    save_data()
     if channel:
         await channel.send(embed=discord.Embed(
             title=f"✅ Tour {t['current_round']} terminé !",
@@ -6387,6 +6389,7 @@ class MatchView(discord.ui.View):
 
     async def _finalize(self, interaction, t, gid, match, winner_idx, by_admin):
         match['winner'] = winner_idx
+        save_data()
         loser_idx   = self.p2_idx if winner_idx == self.p1_idx else self.p1_idx
         winner_name = _t_name(t, winner_idx)
         loser_name  = _t_name(t, loser_idx)
@@ -6548,6 +6551,7 @@ async def cmd_prix_tournoi(ctx, montant: int):
     if montant < 0:
         return await ctx.send("❌ Le montant doit être positif.")
     t['prize'] = montant
+    save_data()
     await ctx.send(embed=discord.Embed(
         title="💰 Prix du tournoi défini !",
         description=f"Le vainqueur remportera **{montant:,} coins** !",
@@ -6602,6 +6606,7 @@ async def cmd_ouverture_tournoi(ctx):
         ),
         color=0x2ecc71
     )
+    save_data()
     await ctx.send(embed=embed)
     await _post_round(ctx.guild, t, 0, gid)
     if _round_done(round0):
@@ -6631,6 +6636,7 @@ async def cmd_win(ctx, numero: int):
             "❌ Seul un **administrateur du serveur** peut déclarer le vainqueur d'un match.")
     loser_idx  = match['p2'] if winner_idx == match['p1'] else match['p1']
     match['winner'] = winner_idx
+    save_data()
     embed = discord.Embed(
         title=f"✅ Match #{match['match_id']} — Résultat déclaré",
         description=(
@@ -7270,6 +7276,7 @@ def _update_elo(winner_id: int, loser_id: int):
     exp_l = 1 - exp_w
     tournament_elo[str(winner_id)] = round(ew + K * (1 - exp_w))
     tournament_elo[str(loser_id)]  = round(el + K * (0 - exp_l))
+    save_data()
 
 
 @bot.command(name="classement_tournoi", aliases=["elo", "top_elo"])
