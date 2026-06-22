@@ -5103,31 +5103,37 @@ class _CiblesView(discord.ui.View):
     async def _show(self, interaction: discord.Interaction):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("❌", ephemeral=True)
-        now = datetime.now()
         rows = []
-        for uid_int, cash in coins.items():
-            if cash <= 0:
+        all_uids = set(coins.keys()) | {int(k) for k in safes.keys()}
+        for uid_int in all_uids:
+            cash   = coins.get(uid_int, 0)
+            coffre = safes.get(str(uid_int), 0)
+            if cash <= 0 and coffre <= 0:
                 continue
-            uid_str = str(uid_int)
-            imm_str = _cd_remaining_str(steal_immunity, uid_int, 6)
+            uid_str     = str(uid_int)
+            imm_str     = _cd_remaining_str(steal_immunity, uid_int, 6)
             nb_bouclier = owned_items.get(uid_str, {}).get('3', 0)
-            job = _get_job(uid_int)
-            member = interaction.guild.get_member(uid_int)
-            name = member.display_name if member else f"#{uid_int}"
-            rows.append((cash, name, imm_str, nb_bouclier, job))
-        rows.sort(key=lambda x: -x[0])
+            job         = _get_job(uid_int)
+            member      = interaction.guild.get_member(uid_int)
+            name        = member.display_name if member else f"#{uid_int}"
+            rows.append((cash, coffre, name, imm_str, nb_bouclier, job))
+        rows.sort(key=lambda x: -(x[0] + x[1]))
         lines = []
-        for i, (cash, name, imm, bouclier, job) in enumerate(rows[:30], 1):
-            prot = []
-            if imm:            prot.append(f"⏳{imm}")
-            if bouclier > 0:   prot.append(f"🛡️×{bouclier}")
-            if job == 'gardien': prot.append("⚔️")
-            prot_str = " ".join(prot) if prot else "✅"
-            job_str = f" *{job}*" if job and job != 'gardien' else ""
-            lines.append(f"`{i}.` **{name}** — {cash:,} 💰 · {prot_str}{job_str}")
-        desc = '\n'.join(lines) if lines else "Aucun joueur avec du cash."
+        for i, (cash, coffre, name, imm, bouclier, job) in enumerate(rows[:30], 1):
+            # !rob : vise le cash, aucune protection
+            rob_str = f"💵 {cash:,}" if cash >= 200 else f"~~💵 {cash:,}~~"
+            # !voler : vise le coffre, bloqué par bouclier/immunité
+            if bouclier > 0:
+                voler_str = f"🔒 {coffre:,} 🛡️"
+            elif imm:
+                voler_str = f"🔒 {coffre:,} ⏳{imm}"
+            else:
+                voler_str = f"🔒 {coffre:,} ✅" if coffre > 0 else "🔒 —"
+            job_str = f" *{job}*" if job else ""
+            lines.append(f"`{i}.` **{name}** — {rob_str} · {voler_str}{job_str}")
+        desc = '\n'.join(lines) if lines else "Aucun joueur avec des fonds."
         embed = discord.Embed(title="🎯 Cibles", description=desc, color=0xe74c3c)
-        embed.set_footer(text="✅=libre · ⏳=immunité !voler · 🛡️=bouclier · ⚔️=gardien")
+        embed.set_footer(text="💵=cash (!rob) · 🔒=coffre (!voler) · ✅=libre · ⏳=immunité · 🛡️=bouclier")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
