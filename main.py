@@ -256,7 +256,8 @@ birthdays        = {}   # str(uid) -> {'day': int, 'month': int, 'guild_id': int
 crypto_alerts    = {}   # str(uid) -> [{'symbol': str, 'target': float, 'direction': str}]
 tournament_elo   = {}   # str(uid) -> int (score ELO tournoi)
 ADMIN_LOG_CHANNEL_ID = 0  # à configurer via !set_admin_log <channel_id>
-draft_sessions   = {}   # channel_id -> session dict (phase de ban Brawl Stars)
+draft_sessions       = {}   # channel_id -> session dict (phase de ban Brawl Stars)
+_trader_prev_trends  = {}   # symbol -> trend du tick précédent (pour détecter les croisements)
 
 # ── Configuration prix / mises (modifiable par !prix_casino) ─────────────
 BOT_OWNER_ID = 1056848438270115900   # happy_gt3 — créateur du bot
@@ -3815,42 +3816,100 @@ async def update_crypto_prices():
     # Vérification des alertes crypto utilisateurs
     await _check_crypto_alerts()
 
-    # Signaux de trading perso
-    _TRADER_UID = 550678866839207937
+    # Signaux de trading perso — logique basée sur le modèle AR(1)
+    # Tick = 90s. Trend décroît ×0.85/tick → demi-vie ~4 ticks (~6min).
+    # Une news pump lance un trend fort qui dure ~20-30 ticks (~30-45min).
+    # Reversion = 0.02×(base-prix)/base → force constante vers la base.
+    _TRADER_UID  = 550678866839207937
     _trader_user = bot.get_user(_TRADER_UID)
     if _trader_user:
-        signals = []
+        uid_str  = str(_TRADER_UID)
+        holdings = crypto_holdings.get(uid_str, {})
+        signals  = []
+        news_syms = {s for s, _, _ in news}
+
         for s, direction, old_price in news:
-            new_p = crypto_prices[s]
-            pct   = (new_p - old_price) / old_price * 100
-            held  = crypto_holdings.get(str(_TRADER_UID), {}).get(s, 0)
+            new_p   = crypto_prices[s]
+            base    = CRYPTO_BASE[s]
+            held    = holdings.get(s, 0)
+            held_val= int(held * new_p)
+            pct     = (new_p - old_price) / old_price * 100
+            ratio   = new_p / base  # 1.0 = prix normal, 2.0 = double la base
+
             if direction == 'up':
-                signals.append(
-                    f"📈 **ACHAT** — **{s}** pump détecté ! {old_price:,.0f} → {new_p:,.0f} (+{pct:.1f}%)\n"
-                    f"{'Tu en détiens déjà.' if held > 0 else 'Tu nen as pas encore.'}"
-                )
-            else:
-                signals.append(
-                    f"📉 **VENTE** — **{s}** dump détecté ! {old_price:,.0f} → {new_p:,.0f} ({pct:.1f}%)\n"
-                    f"{'⚠️ Tu en détiens **{:.6f}** — vends vite !'.format(held) if held > 0 else 'Tu nen as pas, pas de risque.'}"
-                )
-        # Alerte tendance forte (même sans news)
-        for s in CRYPTO_SYMBOLS:
-            t_val = crypto_trends.get(s, 0)
-            hist  = price_history.get(s, [])
-            if len(hist) >= 3 and t_val > 0.06:
-                pct3 = (hist[-1] - hist[-3]) / hist[-3] * 100 if hist[-3] > 0 else 0
-                if pct3 > 4 and s not in [n[0] for n in news]:
-                    signals.append(f"🚀 **TENDANCE** — **{s}** monte fort (+{pct3:.1f}% sur 3 ticks) — momentum {t_val:.3f}")
-            elif t_val < -0.06:
-                held = crypto_holdings.get(str(_TRADER_UID), {}).get(s, 0)
+                # Pump news : le trend va rester positif ~30 ticks (45min)
+                # Meilleur moment d'achat : juste après la news, avant que le trend se propage
                 if held > 0:
-                    signals.append(f"⚠️ **ATTENTION** — **{s}** tendance baissière (momentum {t_val:.3f}) — tu détiens {held:.6f}")
+                    signals.append(
+                        f"🚨 **PUMP {s}** (+{pct:.1f}%) — Prix : **{new_p:,.0f}** ({ratio:.1f}×base)\n"
+                        f"Tu en as déjà ({held:.6f} ≈ {held_val:,} coins). "
+                        f"{'Rajoute si ratio < 1.5 — potentiel encore bon.' if ratio < 1.5 else 'Prix déjà élevé, ne rajoute pas trop.'}"
+                    )
+                else:
+                    signals.append(
+                        f"🚨 **PUMP {s}** (+{pct:.1f}%) — Prix : **{new_p:,.0f}** ({ratio:.1f}×base)\n"
+                        f"➡️ **Achète maintenant** avec `!acheter_crypto {s} <montant>`.\n"
+                        f"{'Bon ratio (' + str(round(ratio,1)) + '×base) — opportunité solide.' if ratio < 1.8 else 'Ratio élevé (' + str(round(ratio,1)) + '×) — mise modérée seulement.'}\n"
+                        f"Revends dans ~30-45min quand je te dis que le trend bascule."
+                    )
+            else:
+                # Dump news : le trend va rester négatif ~30 ticks
+                if held > 0:
+                    signals.append(
+                        f"💀 **DUMP {s}** ({pct:.1f}%) — Prix : **{new_p:,.0f}**\n"
+                        f"⚠️ Tu détiens {held:.6f} ≈ **{held_val:,} coins** — **vends MAINTENANT** !\n"
+                        f"`!vendre_crypto {s} all` — Le prix va continuer à baisser ~30-45min."
+                    )
+                else:
+                    signals.append(
+                        f"📉 **DUMP {s}** ({pct:.1f}%) — Prix : **{new_p:,.0f}**\n"
+                        f"Tu n'en as pas. Attends le fond (~30min) puis rachète si ratio < 0.8."
+                    )
+
+        # Analyse tendance hors news (chaque tick)
+        for s in CRYPTO_SYMBOLS:
+            if s in news_syms:
+                continue
+            t_val  = crypto_trends.get(s, 0)
+            hist   = price_history.get(s, [])
+            price  = crypto_prices[s]
+            base   = CRYPTO_BASE[s]
+            ratio  = price / base
+            held   = holdings.get(s, 0)
+            held_val = int(held * price)
+
+            # Signal de sortie : trend croise 0 à la baisse et on détient
+            if held > 0 and t_val < -0.02:
+                prev_trend = _trader_prev_trends.get(s, 0)
+                if prev_trend >= 0:
+                    signals.append(
+                        f"🔻 **VENDS {s}** — Trend vient de basculer négatif (momentum {t_val:.3f})\n"
+                        f"Prix actuel : {price:,.0f} ({ratio:.1f}×base) — Tu as {held:.6f} ≈ **{held_val:,} coins**\n"
+                        f"`!vendre_crypto {s} all`"
+                    )
+
+            # Opportunité valeur : prix très bas + trend qui remonte
+            if ratio < 0.65 and t_val > 0.01 and held == 0:
+                signals.append(
+                    f"💎 **SOUS-ÉVALUÉ {s}** — Prix à {ratio:.2f}×base ({price:,.0f}) avec trend positif ({t_val:.3f})\n"
+                    f"Rare opportunité valeur. Achète maintenant : `!acheter_crypto {s} <montant>`"
+                )
+
+            # Sommet dangereux : prix > 2.5×base et trend qui faiblit
+            if ratio > 2.5 and held > 0 and t_val < 0.03:
+                signals.append(
+                    f"⛰️ **SOMMET {s}** — Prix à {ratio:.1f}×base ({price:,.0f}), gravity très forte\n"
+                    f"Trend faiblit ({t_val:.3f}) — prépare-toi à vendre. Tu as ≈ **{held_val:,} coins**\n"
+                    f"Vends si le trend passe sous 0 : `!vendre_crypto {s} all`"
+                )
+
+        # Sauvegarder les trends pour détecter les croisements au prochain tick
+        for s in CRYPTO_SYMBOLS:
+            _trader_prev_trends[s] = crypto_trends.get(s, 0)
+
         if signals:
             try:
-                await _trader_user.send(
-                    "**🎯 Signaux crypto**\n" + "\n".join(signals)
-                )
+                await _trader_user.send("**🎯 Signal trading**\n\n" + "\n\n".join(signals))
             except discord.HTTPException:
                 pass
 
