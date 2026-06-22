@@ -417,6 +417,7 @@ def load_data():
                 birthdays        = data.get('birthdays', {})
                 crypto_alerts    = data.get('crypto_alerts', {})
                 tournament_elo   = data.get('tournament_elo', {})
+                tournaments      = data.get('tournaments', {})
                 locations        = data.get('locations', {})
                 businesses       = data.get('businesses', {})
                 ADMIN_LOG_CHANNEL_ID = data.get('admin_log_channel_id', 0)
@@ -539,6 +540,7 @@ def save_data():
     data_to_save['birthdays']        = birthdays
     data_to_save['crypto_alerts']    = crypto_alerts
     data_to_save['tournament_elo']   = tournament_elo
+    data_to_save['tournaments']      = tournaments
     data_to_save['locations']        = locations
     data_to_save['businesses']       = businesses
     data_to_save['admin_log_channel_id'] = ADMIN_LOG_CHANNEL_ID
@@ -642,6 +644,28 @@ async def check_mutes():
 async def on_ready():
     logging.warning("Connecté en tant que %s — DATA_FILE=%s — fichier_existe=%s", bot.user, DATA_FILE, os.path.exists(DATA_FILE))
     load_data()
+    # Re-enregistre les views de tournoi pour que les boutons fonctionnent après restart
+    _registered_join_ids = set()
+    for gid, t in tournaments.items():
+        ts = t.get('team_size', 1)
+        board_id = t.get('board_message_id')
+        if t.get('status') == 'registering':
+            view = TournamentJoinView(gid, ts)
+            if board_id:
+                bot.add_view(view, message_id=board_id)
+            elif gid not in _registered_join_ids:
+                bot.add_view(view)
+                _registered_join_ids.add(gid)
+        elif t.get('status') == 'active' and t.get('rounds'):
+            cur = t.get('current_round', 0)
+            if cur < len(t['rounds']):
+                for m in t['rounds'][cur]:
+                    if m['p2'] is not None and m['winner'] is None:
+                        p1 = _t_participant(t, m['p1'])
+                        p2 = _t_participant(t, m['p2'])
+                        if p1 and p2:
+                            bot.add_view(MatchView(gid, m['match_id'], p1['name'], p2['name'],
+                                                   p1['captain'], p2['captain'], m['p1'], m['p2']))
     if not check_mutes.is_running():
         check_mutes.start()
     if not update_crypto_prices.is_running():
@@ -845,7 +869,7 @@ def _build_help_categories(ctx):
                  "`!fastfood` — Fast Food 🍔 *(débloque après épicerie 8/8 + améliorée)*\n"
                  "`!restaurant` (`!resto`) — Restaurant 🍽️ *(débloque après fast food 10/10 + amélioré)*\n"
                  "Chaque commerce : embaucher, collecter, améliorer — via boutons\n"
-                 "Le restaurant a un système de ⭐ **Réputation** : 2 collectes/24h = +⭐, oublier 24h = retour à 0⭐\n"
+                 "Le restaurant a un système de ⭐ **Réputation** : collecte toutes les 12h–24h = +1 prog, 4 progs = +⭐, oublier 24h = retour à 0⭐\n"
                  "Achetez les commerces via `!shop` (items 8, 9, 10)"))
     cats.append(("shop", "🛒 Magasin & Tickets",
                  "Items et inventaire",
@@ -864,6 +888,8 @@ def _build_help_categories(ctx):
                  "Résultat : **les 2 capitaines** valident le même vainqueur\n"
                  "*(Admin)* `!win <n°>` (`!victoire`) — Trancher un match\n"
                  "*(Admin)* `!prix_tournoi <montant>` — Définir la récompense\n"
+                 "*(Admin)* `!tournoi_ajouter @membre [équipe]` — Ajouter un joueur\n"
+                 "*(Admin)* `!tournoi_retirer @membre` — Retirer un joueur\n"
                  "`!draft <1v1|2v2|3v3|4v4|5v5> @cap2` — Phase de ban Brawl Stars"))
 
     if has_manage_messages or has_ban_members:
@@ -897,6 +923,7 @@ def _build_help_categories(ctx):
                      "`!ouvrir_course` (`!oc`) / `!lancer_course` (`!lc`) — Courses\n"
                      "`!ouverture_tournoi` (`!bracket`) — Lancer le tournoi\n"
                      "`!annuler_tournoi` — Annuler le tournoi en cours\n"
+                     "`!tournoi_ajouter @m [équipe]` / `!tournoi_retirer @m` — Gérer les inscrits\n"
                      "`!set_admin_log #salon` (`!admin_log`) — Logs admin\n"
                      "`!lock` / `!unlock` — Verrouiller un salon"))
 
@@ -3712,8 +3739,10 @@ def _biz_embed(author_id, biz_key):
     if upgraded and biz.get('upgrade_bonus'):
         desc += f"🔧 **{biz['name']} améliorée** (+{int(biz['upgrade_bonus']*100)}% production)\n"
     if rep is not None:
-        stars = '⭐' * rep + '☆' * (5 - rep)
-        desc += f"🌟 **Réputation :** {stars} (×{biz['rep_mult'][rep]:.2f})\n"
+        stars    = '⭐' * rep + '☆' * (5 - rep)
+        prog     = b.get('rep_progress', 0)
+        prog_bar = "🟡" * prog + "⚫" * (4 - prog)
+        desc += f"🌟 **Réputation :** {stars} (×{biz['rep_mult'][rep]:.2f}) · {prog_bar} {prog}/4\n"
     desc += f"\n{hire_line}\nUtilisez les boutons ci-dessous."
 
     return discord.Embed(title=f"{biz['emoji']} Votre {biz['name']}", color=biz['color'], description=desc)
@@ -6203,7 +6232,8 @@ class TournamentJoinView(discord.ui.View):
         embed = _build_tournament_embed(t, gid)
         embed.add_field(
             name="⚙️ Admin",
-            value="`!prix_tournoi <montant>` · `!ouverture_tournoi`",
+            value=("`!prix_tournoi <montant>` · `!ouverture_tournoi`\n"
+                   "`!tournoi_ajouter @m [équipe]` · `!tournoi_retirer @m`"),
             inline=False
         )
         # Édite le message du tableau (et pas un éventuel message éphémère)
@@ -6235,6 +6265,7 @@ class TournamentJoinView(discord.ui.View):
             'name': interaction.user.display_name,
             'members': [uid],
         })
+        save_data()
         await self._refresh_board(interaction, t, gid)
         await interaction.response.send_message(
             f"✅ **{interaction.user.display_name}** a rejoint le tournoi ! "
@@ -6257,10 +6288,11 @@ class TournamentJoinView(discord.ui.View):
             'name': f"Équipe {interaction.user.display_name}",
             'members': [uid],
         })
+        save_data()
         await self._refresh_board(interaction, t, gid)
         await interaction.response.send_message(
             f"✅ **{interaction.user.display_name}** a créé une équipe "
-            f"(capitaine). Il manque **{self.team_size - 1}** joueur(s)."
+            f"(capitaine). Il manque **{t['team_size'] - 1}** joueur(s)."
         )
 
     async def _join_team(self, interaction: discord.Interaction):
@@ -6320,6 +6352,7 @@ class _JoinTeamSelectView(discord.ui.View):
             return await interaction.response.send_message(
                 "❌ Cette équipe est introuvable ou déjà complète.", ephemeral=True)
         p.setdefault('members', [p['captain']]).append(uid)
+        save_data()
         ts        = _team_size(t)
         remaining = ts - len(_p_members(p))
         full_txt  = "✅ Équipe complète !" if remaining <= 0 else f"Il manque **{remaining}** joueur(s)."
@@ -6486,7 +6519,8 @@ async def cmd_tournoi(ctx, mode: str = None):
         name="⚙️ Configuration (Admin)",
         value=(
             "`!prix_tournoi <montant>` — Définir le prix\n"
-            "`!ouverture_tournoi` — Lancer et générer le tableau"
+            "`!ouverture_tournoi` — Lancer et générer le tableau\n"
+            "`!tournoi_ajouter @m [équipe]` · `!tournoi_retirer @m` — Gérer les inscrits"
         ),
         inline=False
     )
@@ -6640,7 +6674,65 @@ async def cmd_annuler_tournoi(ctx):
     if gid not in tournaments:
         return await ctx.send("❌ Aucun tournoi en cours.")
     del tournaments[gid]
+    save_data()
     await ctx.send("✅ Le tournoi a été annulé.")
+
+@bot.command(name="tournoi_retirer", aliases=["t_retirer", "tournoi_kick"])
+@commands.has_permissions(administrator=True)
+async def cmd_tournoi_retirer(ctx, membre: discord.Member):
+    gid = str(ctx.guild.id)
+    t = tournaments.get(gid)
+    if not t:
+        return await ctx.send("❌ Aucun tournoi en cours.")
+    if t['status'] != 'registering':
+        return await ctx.send("❌ Impossible de modifier les équipes une fois le tournoi lancé.")
+    uid = membre.id
+    for p in t['participants']:
+        if uid in _p_members(p):
+            members = list(_p_members(p))
+            if len(members) == 1:
+                t['participants'].remove(p)
+                save_data()
+                return await ctx.send(f"✅ **{membre.display_name}** retiré — équipe **{p['name']}** supprimée.")
+            members.remove(uid)
+            p['members'] = members
+            if p['captain'] == uid:
+                p['captain'] = members[0]
+            save_data()
+            return await ctx.send(f"✅ **{membre.display_name}** retiré de l'équipe **{p['name']}** ({len(members)}/{_team_size(t)}).")
+    await ctx.send(f"❌ **{membre.display_name}** n'est pas inscrit au tournoi.")
+
+
+@bot.command(name="tournoi_ajouter", aliases=["t_ajouter", "tournoi_add"])
+@commands.has_permissions(administrator=True)
+async def cmd_tournoi_ajouter(ctx, membre: discord.Member, *, team_name: str = None):
+    gid = str(ctx.guild.id)
+    t = tournaments.get(gid)
+    if not t:
+        return await ctx.send("❌ Aucun tournoi en cours.")
+    if t['status'] != 'registering':
+        return await ctx.send("❌ Impossible de modifier les équipes une fois le tournoi lancé.")
+    uid = membre.id
+    if _already_registered(t, uid):
+        return await ctx.send(f"❌ **{membre.display_name}** est déjà inscrit au tournoi.")
+    ts = _team_size(t)
+    if ts == 1:
+        idx = len(t['participants'])
+        t['participants'].append({'idx': idx, 'captain': uid, 'name': membre.display_name, 'members': [uid]})
+        save_data()
+        return await ctx.send(f"✅ **{membre.display_name}** ajouté au tournoi !")
+    if not team_name:
+        noms = ', '.join(f"**{p['name']}**" for p in t['participants']) or 'Aucune équipe'
+        return await ctx.send(f"❌ Précisez le nom de l'équipe.\n`!tournoi_ajouter @membre <nom_equipe>`\nÉquipes : {noms}")
+    target = next((p for p in t['participants'] if p['name'].lower() == team_name.lower()), None)
+    if not target:
+        return await ctx.send(f"❌ Équipe **{team_name}** introuvable.")
+    if _team_full(t, target):
+        return await ctx.send(f"❌ L'équipe **{target['name']}** est déjà complète ({ts}/{ts}).")
+    target['members'].append(uid)
+    save_data()
+    await ctx.send(f"✅ **{membre.display_name}** ajouté à **{target['name']}** ({len(target['members'])}/{ts}).")
+
 
 @bot.command(name="punition", aliases=["pun", "punir"])
 @commands.has_permissions(administrator=True)
@@ -6966,8 +7058,10 @@ async def cmd_profil(ctx, member: discord.Member = None):
             upg_str = " 🔧" if upg else ""
             rep_str = ""
             if biz_key == 'restaurant':
-                rep = user_biz.get('reputation', 0)
-                rep_str = f" · {'⭐' * rep if rep else '☆ 0⭐'}"
+                rep      = user_biz.get('reputation', 0)
+                prog     = user_biz.get('rep_progress', 0)
+                prog_bar = "🟡" * prog + "⚫" * (4 - prog)
+                rep_str  = f" · {'⭐' * rep if rep else '☆ 0⭐'} {prog_bar}"
             biz_lines.append(
                 f"{biz_def['emoji']} **{biz_def['name']}**{upg_str} — {w}/{max_w} emp · {rate:,.0f}/h · {pending:,} en attente{rep_str}"
             )
@@ -7639,16 +7733,17 @@ class BusinessView(discord.ui.View):
             last_col = b.get('last_collect')
             if last_col:
                 h_since = (datetime.now() - datetime.fromisoformat(last_col)).total_seconds() / 3600
-                if h_since <= 24:
+                if h_since > 24:
+                    b['reputation']   = 0
+                    b['rep_progress'] = 0
+                elif h_since >= 12:
                     prog = b.get('rep_progress', 0) + 1
-                    if prog >= 2:
+                    if prog >= 4:
                         b['reputation']   = min(5, b.get('reputation', 0) + 1)
                         b['rep_progress'] = 0
                     else:
                         b['rep_progress'] = prog
-                else:
-                    b['reputation']   = 0
-                    b['rep_progress'] = 0
+                # < 12h : argent collecté mais pas de progression rep
             b['last_collect'] = datetime.now().isoformat()
         coins[self.author_id] += pending
         b['last'] = datetime.now().isoformat()
@@ -7688,21 +7783,25 @@ class BusinessView(discord.ui.View):
         prog = b.get('rep_progress', 0)
         if last_col:
             h_since = (datetime.now() - datetime.fromisoformat(last_col)).total_seconds() / 3600
-            if h_since <= 24:
-                trend = f"📈 En progression *(collecte {2 - prog}× encore dans les 24h pour +⭐)*"
+            if h_since > 24:
+                trend = "💀 **Réputation perdue** — tu es repassé à 0⭐ !"
+            elif h_since >= 12:
+                trend = f"✅ Collecte valide maintenant *(encore {4 - prog} prog pour +⭐)*"
             else:
-                trend = "💀 **Réputation en danger** — sans collecte sous 24h tu repasses à 0⭐ !"
+                h_left = 12 - h_since
+                trend = f"⏳ Prochaine collecte valide dans **{int(h_left)}h {int((h_left % 1) * 60)}min** *(trop récente)*"
         else:
             trend = "📈 Première collecte = début de progression"
-        prog_bar = "🟡" * prog + "⚫" * (2 - prog)
+        prog_bar = "🟡" * prog + "⚫" * (4 - prog)
         await interaction.response.send_message(
             f"🌟 **Réputation** : {stars}\n"
             f"✖️ Multiplicateur : **×{biz['rep_mult'][rep]:.2f}**\n"
-            f"📊 Progression prochaine ⭐ : {prog_bar} ({prog}/2)\n"
+            f"📊 Progression prochaine ⭐ : {prog_bar} ({prog}/4)\n"
             f"{trend}\n\n"
             "**Règles :**\n"
-            "• Collectez **2× dans les 24h** → +⭐\n"
-            "• Sans collecte **24h+** → retour à **0⭐** immédiat\n"
+            "• Collectez toutes les **12h–24h** → +1 progression\n"
+            "• **4 progressions** = +⭐\n"
+            "• Sans collecte **+24h** → retour à **0⭐** immédiat\n"
             "• ⭐⭐⭐⭐⭐ = **×1.70** de production", ephemeral=True)
 
     async def _refresh(self, interaction: discord.Interaction):
