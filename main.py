@@ -340,7 +340,7 @@ def load_data():
     global crypto_prices, price_history, crypto_trends, crypto_holdings, safes, factories, jobs_data, owned_items
     global theft_cooldowns, miner_cooldowns, hacker_cooldowns, risque_cooldowns, rob_cooldowns, steal_immunity
     global race_bets, race_drivers_live, race_accepting
-    global teams, user_team, disabled_cmds, cmd_role_perms
+    global teams, user_team, disabled_cmds, cmd_role_perms, tournaments
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
