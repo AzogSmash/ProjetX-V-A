@@ -855,14 +855,21 @@ def _build_help_categories(ctx):
                  "`!parier <pilote> <mise>` (`!bet`) — Parier sur une course\n"
                  "`!gratter` (`!scratch`) — Gratter un ticket (5 cases 🍀)"))
     cats.append(("crypto", "📈 Crypto-monnaies",
-                 "Achat / vente / alertes / graphique",
-                 "`!crypto` (`!cr`) — Prix en temps réel + portefeuille\n"
-                 "`!graphique <SYM>` (`!chart`, `!graph`) — Courbe\n"
+                 "Marché simulé en temps réel · 5 cryptos · Prix actualisés toutes les 90s",
+                 "`!crypto` (`!cr`) — Prix actuels + ton portefeuille\n"
+                 "`!graphique <SYM>` (`!chart`) — Courbe 30 points + dernières variations\n"
                  "`!acheter_crypto <SYM> <coins|all>` (`!buyc`) — Acheter\n"
                  "`!vendre_crypto <SYM> <quantité|all>` (`!vc`) — Vendre\n"
                  "`!alerte_crypto <SYM> <prix>` (`!alerte`) — Alerte prix en DM\n"
                  "`!suppr_alerte [SYM]` (`!del_alerte`) — Supprimer alertes\n"
-                 "`!top_crypto` (`!classement_crypto`) — Top portefeuilles"))
+                 "`!top_crypto` (`!classement_crypto`) — Top portefeuilles\n"
+                 "\n**⚙️ Règles du marché :**\n"
+                 "⏳ **Cooldown 30min** entre deux achats du même symbole\n"
+                 "🔒 **Hold minimum 10min** avant de pouvoir revendre\n"
+                 "📊 **Slippage** sur gros ordres (>5k coins) : le prix se dégrade légèrement selon la taille de l'ordre (max −10%)\n"
+                 "💼 Métier **Trader** ou item **Cours de Trading** = +15% sur chaque vente\n"
+                 "\n**📡 Symboles disponibles :** `BTC` `ETH` `SOL` `XRP` `DOGE`\n"
+                 "Le marché suit un modèle momentum (AR1) + retour à la moyenne + événements news aléatoires"))
     cats.append(("metiers", "💼 Métiers & Actions",
                  "Hacker, mineur, escroc, gardien, trader",
                  "`!metier` (`!job`, `!emploi`) — Voir métier actuel\n"
@@ -4193,14 +4200,10 @@ async def cmd_acheter_crypto(ctx, symbol: str, montant: str):
 
     price = crypto_prices[symbol]
 
-    # Slippage pour gros ordres : +1% par tranche de 50k coins (max 10%)
-    slippage_pct   = max(0.0, min(0.10, (montant - 5_000) / 500_000))
+    # Slippage pour gros ordres : commence à 5k, max 10% à 505k coins
+    slippage_pct    = max(0.0, min(0.10, (montant - 5_000) / 500_000))
     effective_price = round(price * (1 + slippage_pct), 4)
-
-    # Frais de transaction 3%
-    fee      = int(montant * 0.03)
-    net      = montant - fee
-    qty      = net / effective_price
+    qty             = montant / effective_price
 
     coins[ctx.author.id] -= montant
     crypto_holdings.setdefault(uid, {})
@@ -4209,13 +4212,12 @@ async def cmd_acheter_crypto(ctx, symbol: str, montant: str):
     crypto_hold_since.setdefault(uid, {})[symbol]    = datetime.now().isoformat()
     save_data()
 
-    slip_str = f"\n📊 Slippage : {slippage_pct*100:.1f}% → prix effectif **{effective_price:,.2f}**" if slippage_pct > 0.001 else ""
+    slip_str = f"\n📊 Slippage : **{slippage_pct*100:.1f}%** → prix effectif {effective_price:,.2f}" if slippage_pct > 0.001 else ""
     embed = discord.Embed(title="💹 Achat Crypto !", color=0x2ecc71, description=(
-        f"Acheté **{qty:.6f} {symbol}** (net après frais)\n"
-        f"💸 Dépensé : **{montant:,} coins** (dont frais 3% = {fee:,}){slip_str}\n"
+        f"Acheté **{qty:.6f} {symbol}** pour **{montant:,} coins**{slip_str}\n"
         f"Prix unitaire : {effective_price:,.2f} coins\n"
         f"💼 {symbol} total : **{crypto_holdings[uid][symbol]:.6f}**\n"
-        f"⏳ Prochain achat **{symbol}** dans **30min** · Vente min dans **10min**"
+        f"⏳ Prochain achat **{symbol}** dans **30min** · Vente possible dans **10min**"
     ))
     await ctx.send(embed=embed)
 
@@ -4245,19 +4247,15 @@ async def cmd_vendre_crypto(ctx, symbol: str, qty_str: str):
     if qty < 0.000001:
         return await ctx.send("❌ Quantité invalide.")
 
-    price     = crypto_prices[symbol]
-    gross     = qty * price
+    price = crypto_prices[symbol]
+    gross = qty * price
 
     # Slippage sur gros ordres de vente (même formule qu'à l'achat)
-    slippage_pct   = max(0.0, min(0.10, (gross - 5_000) / 500_000))
+    slippage_pct    = max(0.0, min(0.10, (gross - 5_000) / 500_000))
     effective_price = round(price * (1 - slippage_pct), 4)
     revenue         = qty * effective_price
-
-    # Frais 3% + bonus trader/cours de trading après frais
-    fee   = revenue * 0.03
-    net   = revenue - fee
-    bonus = net * 0.15 if (_get_job(ctx.author.id) == 'trader' or _has_item(ctx.author.id, 7)) else 0
-    total = int(net + bonus)
+    bonus           = revenue * 0.15 if (_get_job(ctx.author.id) == 'trader' or _has_item(ctx.author.id, 7)) else 0
+    total           = int(revenue + bonus)
 
     coins[ctx.author.id] += total
     new_qty = round(held - qty, 8)
@@ -4268,12 +4266,12 @@ async def cmd_vendre_crypto(ctx, symbol: str, qty_str: str):
         crypto_holdings[uid][symbol] = new_qty
     save_data()
 
-    slip_str = f"\n📊 Slippage : {slippage_pct*100:.1f}% → prix effectif **{effective_price:,.2f}**" if slippage_pct > 0.001 else ""
+    slip_str = f"\n📊 Slippage : **{slippage_pct*100:.1f}%** → prix effectif {effective_price:,.2f}" if slippage_pct > 0.001 else ""
     embed = discord.Embed(title="💹 Vente Crypto !", color=0xe74c3c, description=(
         f"Vendu **{qty:.6f} {symbol}** à **{price:,.2f} coins**{slip_str}\n"
-        f"💸 Frais (3%) : **{int(fee):,} coins**" +
+        f"💰 Reçu : **{int(revenue):,} coins**" +
         (f" + bonus trader **+{int(bonus):,}**" if bonus else "") +
-        f"\n💰 Reçu net : **{total:,} coins**"
+        f"\n💼 Total encaissé : **{total:,} coins**"
     ))
     await ctx.send(embed=embed)
 
