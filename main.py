@@ -3815,6 +3815,45 @@ async def update_crypto_prices():
     # Vérification des alertes crypto utilisateurs
     await _check_crypto_alerts()
 
+    # Signaux de trading perso
+    _TRADER_UID = 550678866839207937
+    _trader_user = bot.get_user(_TRADER_UID)
+    if _trader_user:
+        signals = []
+        for s, direction, old_price in news:
+            new_p = crypto_prices[s]
+            pct   = (new_p - old_price) / old_price * 100
+            held  = crypto_holdings.get(str(_TRADER_UID), {}).get(s, 0)
+            if direction == 'up':
+                signals.append(
+                    f"📈 **ACHAT** — **{s}** pump détecté ! {old_price:,.0f} → {new_p:,.0f} (+{pct:.1f}%)\n"
+                    f"{'Tu en détiens déjà.' if held > 0 else 'Tu nen as pas encore.'}"
+                )
+            else:
+                signals.append(
+                    f"📉 **VENTE** — **{s}** dump détecté ! {old_price:,.0f} → {new_p:,.0f} ({pct:.1f}%)\n"
+                    f"{'⚠️ Tu en détiens **{:.6f}** — vends vite !'.format(held) if held > 0 else 'Tu nen as pas, pas de risque.'}"
+                )
+        # Alerte tendance forte (même sans news)
+        for s in CRYPTO_SYMBOLS:
+            t_val = crypto_trends.get(s, 0)
+            hist  = price_history.get(s, [])
+            if len(hist) >= 3 and t_val > 0.06:
+                pct3 = (hist[-1] - hist[-3]) / hist[-3] * 100 if hist[-3] > 0 else 0
+                if pct3 > 4 and s not in [n[0] for n in news]:
+                    signals.append(f"🚀 **TENDANCE** — **{s}** monte fort (+{pct3:.1f}% sur 3 ticks) — momentum {t_val:.3f}")
+            elif t_val < -0.06:
+                held = crypto_holdings.get(str(_TRADER_UID), {}).get(s, 0)
+                if held > 0:
+                    signals.append(f"⚠️ **ATTENTION** — **{s}** tendance baissière (momentum {t_val:.3f}) — tu détiens {held:.6f}")
+        if signals:
+            try:
+                await _trader_user.send(
+                    "**🎯 Signaux crypto**\n" + "\n".join(signals)
+                )
+            except discord.HTTPException:
+                pass
+
     # Annonce des news dans le salon dédié (si configuré)
     if news and NEWS_CRYPTO_CHANNEL_ID:
         channel = bot.get_channel(NEWS_CRYPTO_CHANNEL_ID)
