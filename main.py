@@ -4969,77 +4969,82 @@ async def cmd_cd_set(ctx):
     await ctx.send(embed=_cd_embed(), view=CooldownView(ctx.author.id))
 
 
-@bot.command(name="cd", aliases=["cooldown", "cooldowns", "cds"])
-async def cmd_cd_member(ctx):
-    uid     = str(ctx.author.id)
-    uid_int = ctx.author.id
+def _build_cd_embed(uid_int, guild):
+    uid = str(uid_int)
 
     def line(emoji, label, remaining):
-        if remaining:
-            return f"{emoji} `{label}` — ⏳ **{remaining}**"
-        return f"{emoji} `{label}` — ✅ Disponible"
+        return f"{emoji} `{label}` — {'⏳ **' + remaining + '**' if remaining else '✅ Disponible'}"
 
     lines = []
-
-    # ── Économie ─────────────────────────────────────────────────────────
     lines.append("**── Économie ──**")
-    lines.append(line("💼", "!travail",  _cd_remaining_str(work_cooldowns,   uid_int, cooldown_h('travail'))))
-    lines.append(line("📅", "!daily",    _cd_remaining_str(daily_cooldowns,  uid_int, cooldown_h('daily'))))
-    lines.append(line("🎲", "!risque",   _cd_remaining_str(risque_cooldowns, uid_int, cooldown_h('risque'))))
+    lines.append(line("💼", "!travail", _cd_remaining_str(work_cooldowns,   uid_int, cooldown_h('travail'))))
+    lines.append(line("📅", "!daily",   _cd_remaining_str(daily_cooldowns,  uid_int, cooldown_h('daily'))))
+    lines.append(line("🎲", "!risque",  _cd_remaining_str(risque_cooldowns, uid_int, cooldown_h('risque'))))
 
-    # ── Vol / Combat ──────────────────────────────────────────────────────
     lines.append("**── Vol ──**")
-    lines.append(line("🦹", "!voler",    _cd_remaining_str(theft_cooldowns,  uid_int, cooldown_h('voler'))))
-    lines.append(line("💸", "!rob",      _cd_remaining_str(rob_cooldowns,    uid_int, cooldown_h('rob'))))
+    lines.append(line("🦹", "!voler",   _cd_remaining_str(theft_cooldowns,  uid_int, cooldown_h('voler'))))
+    lines.append(line("💸", "!rob",     _cd_remaining_str(rob_cooldowns,    uid_int, cooldown_h('rob'))))
     imm = _cd_remaining_str(steal_immunity, uid_int, 6)
     lines.append(f"🛡️ Immunité vol — {'⏳ **' + imm + '** restantes' if imm else '❌ Inactive'}")
 
-    # ── Jobs ──────────────────────────────────────────────────────────────
     lines.append("**── Jobs ──**")
-    lines.append(line("⛏️", "!miner",   _cd_remaining_str(miner_cooldowns,  uid_int, cooldown_h('miner'))))
-    lines.append(line("💻", "!hacker",  _cd_remaining_str(hacker_cooldowns, uid_int, cooldown_h('hacker'))))
+    lines.append(line("⛏️", "!miner",  _cd_remaining_str(miner_cooldowns,  uid_int, cooldown_h('miner'))))
+    lines.append(line("💻", "!hacker", _cd_remaining_str(hacker_cooldowns, uid_int, cooldown_h('hacker'))))
 
-    # ── Usine ─────────────────────────────────────────────────────────────
     lines.append("**── Usine ──**")
-    factory = factories.get(uid, {})
+    factory   = factories.get(uid, {})
     workers_f = factory.get('workers', 0)
-    max_f     = MAX_FACTORY_WORKERS
-    if workers_f >= max_f:
-        lines.append(f"🏭 `!embaucher` usine — ✅ Usine complète ({max_f}/{max_f})")
+    if workers_f >= MAX_FACTORY_WORKERS:
+        lines.append(f"🏭 `!embaucher` usine — ✅ Complète ({MAX_FACTORY_WORKERS}/{MAX_FACTORY_WORKERS})")
     else:
-        r = _secs_to_hm(_factory_hire_remaining(uid))
-        lines.append(line("🏭", "!embaucher usine", r))
+        lines.append(line("🏭", "!embaucher usine", _secs_to_hm(_factory_hire_remaining(uid))))
 
-    # ── Commerces ─────────────────────────────────────────────────────────
     user_biz = businesses.get(uid, {})
-    has_biz  = any(user_biz.get(k) for k in BIZ_DEFS)
-    if has_biz:
+    if any(user_biz.get(k) for k in BIZ_DEFS):
         lines.append("**── Commerces ──**")
         for biz_key, biz_def in BIZ_DEFS.items():
             b = user_biz.get(biz_key)
             if not b:
                 continue
-            w     = b.get('workers', 0)
-            max_w = biz_def['max_workers']
+            w, max_w = b.get('workers', 0), biz_def['max_workers']
             if w >= max_w:
                 lines.append(f"{biz_def['emoji']} `!embaucher` {biz_def['name']} — ✅ Complet ({max_w}/{max_w})")
             else:
-                r = _secs_to_hm(_biz_hire_remaining(uid, biz_key))
-                lines.append(line(biz_def['emoji'], f"!embaucher {biz_def['name']}", r))
+                lines.append(line(biz_def['emoji'], f"!embaucher {biz_def['name']}", _secs_to_hm(_biz_hire_remaining(uid, biz_key))))
 
-    embed = discord.Embed(
-        title=f"⏳ Tes cooldowns",
-        description='\n'.join(lines),
-        color=0x3498db
-    )
-    embed.set_footer(text=f"Cooldowns de {ctx.author.display_name} · visible seulement par toi")
+    member = guild.get_member(uid_int) if guild else None
+    name   = member.display_name if member else str(uid_int)
+    embed  = discord.Embed(title="⏳ Tes cooldowns", description='\n'.join(lines), color=0x3498db)
+    embed.set_footer(text=f"Cooldowns de {name} · visible seulement par toi")
+    return embed
 
+
+class CdView(discord.ui.View):
+    def __init__(self, author_id, guild):
+        super().__init__(timeout=60)
+        self.author_id = author_id
+        self.guild     = guild
+
+    @discord.ui.button(label="Voir mes cooldowns", style=discord.ButtonStyle.primary, emoji="⏳")
+    async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Ce bouton n'est pas pour toi.", ephemeral=True)
+            return
+        embed = _build_cd_embed(self.author_id, self.guild)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.command(name="cd", aliases=["cooldown", "cooldowns", "cds"])
+async def cmd_cd_member(ctx):
     try:
-        await ctx.author.send(embed=embed)
-        if ctx.guild:
-            await ctx.message.delete()
+        await ctx.message.delete()
     except discord.Forbidden:
-        await ctx.send(embed=embed, delete_after=30)
+        pass
+    await ctx.send(
+        f"{ctx.author.mention}",
+        view=CdView(ctx.author.id, ctx.guild),
+        delete_after=60
+    )
 
 
 # ===== Commande !prix_casino (admin only) ============================
