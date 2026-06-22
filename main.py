@@ -6535,6 +6535,7 @@ async def cmd_tournoi(ctx, mode: str = None):
     embed.add_field(name="📋 Inscriptions", value=join_txt, inline=False)
     board = await ctx.send(embed=embed, view=TournamentJoinView(gid, team_size))
     t['board_message_id'] = board.id
+    save_data()
 
 
 @bot.command(name="prix_tournoi", aliases=["set_prize", "prize_tournoi"])
