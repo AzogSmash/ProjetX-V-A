@@ -704,7 +704,7 @@ COMMAND_USAGE = {
     'gdt':           '`!gdt` *(Admin)* — Gérer la compétition inter-clubs (ouvrir/fermer/récompenser)',
     'gestion':       '`!gestion` *(Owner/Admin)* — Activer/désactiver n\'importe quelle commande',
     'permission':    '`!permission` *(Owner)* — Restreindre une commande à certains rôles Discord',
-    'cooldown':      '`!cooldown` ou `!cd` *(Owner/Admin)* — Modifier les cooldowns des commandes',
+    'cooldown':      '`!cd_set` ou `!cooldown_set` *(Owner/Admin)* — Modifier les cooldowns des commandes',
     'cd':            '`!cd` — Voir/modifier les cooldowns',
     'acheter':       '`!acheter <n°>` — Numéro de l\'item affiché dans `!shop`\nEx : `!acheter 1`',
     'parier':        '`!parier <n°pilote> <mise|all>`\nVoir les pilotes avec `!course`\nEx : `!parier 3 500` · `!parier 1 all`',
@@ -776,6 +776,7 @@ def _build_help_categories(ctx):
                  "Commandes générales",
                  "`!aide` — Ce menu\n"
                  "`!profil` (`!profile`, `!stats`) — Voir sa fiche complète\n"
+                 "`!cd` (`!cooldown`) — Voir tous tes cooldowns en cours *(privé)*\n"
                  "`!anniversaire JJ/MM` (`!anniv`) — Enregistrer son anniversaire\n"
                  "`!stats_serveur` (`!serveur`) — Vue globale du serveur"))
     cats.append(("eco", "🪙 Économie de base",
@@ -876,7 +877,7 @@ def _build_help_categories(ctx):
                      "`!removecoins @membre <n>` (`!rmc`) — Retirer des coins\n"
                      "`!prix_casino` (`!prixcasino`) — Prix shop/usine + mises min/max\n"
                      "`!gestion` (`!gest`, `!admin`) — Activer/désactiver des commandes\n"
-                     "`!cooldown` (`!cd`) — Modifier les cooldowns\n"
+                     "`!cd_set` (`!cooldown_set`) — Modifier les cooldowns\n"
                      "`!ouvrir_course` (`!oc`) / `!lancer_course` (`!lc`) — Courses\n"
                      "`!ouverture_tournoi` (`!bracket`) — Lancer le tournoi\n"
                      "`!annuler_tournoi` — Annuler le tournoi en cours\n"
@@ -3531,6 +3532,30 @@ def _cd_ok(cd_dict: dict, uid, hours: float):
     cd_dict[key] = now.isoformat()
     return True, ""
 
+def _cd_remaining_str(cd_dict: dict, uid, hours: float) -> str:
+    """Read-only: retourne 'Xh Ymin' si en cooldown, '' si disponible."""
+    key = str(uid)
+    if key not in cd_dict:
+        return ''
+    try:
+        last = datetime.fromisoformat(cd_dict[key])
+    except (ValueError, TypeError):
+        return ''
+    wait = last + timedelta(hours=hours) - datetime.now()
+    if wait.total_seconds() <= 0:
+        return ''
+    h, rem = divmod(int(wait.total_seconds()), 3600)
+    m = rem // 60
+    return f"{h}h {m}min"
+
+def _secs_to_hm(secs: float) -> str:
+    """Convertit des secondes en 'Xh Ymin', ou '' si <= 0."""
+    if secs <= 0:
+        return ''
+    h, rem = divmod(int(secs), 3600)
+    m = rem // 60
+    return f"{h}h {m}min"
+
 def _factory_rate(workers: int, upgraded: bool) -> float:
     """Taux horaire total : 50+100+...+(workers×50) = 50×n×(n+1)/2"""
     base = 50 * workers * (workers + 1) / 2
@@ -4859,7 +4884,7 @@ async def cmd_permission(ctx):
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# ── !cooldown / !cd : modifier les cooldowns (Admin & Owner) ────────────
+# ── !cd_set / !cooldown_set : modifier les cooldowns (Admin & Owner) ────
 # ═════════════════════════════════════════════════════════════════════════
 
 class CooldownModal(discord.ui.Modal):
@@ -4937,11 +4962,84 @@ class CooldownView(discord.ui.View):
         await interaction.response.send_modal(CooldownModal(cmd))
 
 
-@bot.command(name="cooldown", aliases=["cd"])
-async def cmd_cooldown(ctx):
+@bot.command(name="cd_set", aliases=["cooldown_set"])
+async def cmd_cd_set(ctx):
     if not (ctx.author.guild_permissions.administrator or is_bot_owner(ctx.author)):
         return await ctx.send("❌ Réservé aux administrateurs ou au créateur du bot.")
     await ctx.send(embed=_cd_embed(), view=CooldownView(ctx.author.id))
+
+
+@bot.command(name="cd", aliases=["cooldown", "cooldowns", "cds"])
+async def cmd_cd_member(ctx):
+    uid     = str(ctx.author.id)
+    uid_int = ctx.author.id
+
+    def line(emoji, label, remaining):
+        if remaining:
+            return f"{emoji} `{label}` — ⏳ **{remaining}**"
+        return f"{emoji} `{label}` — ✅ Disponible"
+
+    lines = []
+
+    # ── Économie ─────────────────────────────────────────────────────────
+    lines.append("**── Économie ──**")
+    lines.append(line("💼", "!travail",  _cd_remaining_str(work_cooldowns,   uid_int, cooldown_h('travail'))))
+    lines.append(line("📅", "!daily",    _cd_remaining_str(daily_cooldowns,  uid_int, cooldown_h('daily'))))
+    lines.append(line("🎲", "!risque",   _cd_remaining_str(risque_cooldowns, uid_int, cooldown_h('risque'))))
+
+    # ── Vol / Combat ──────────────────────────────────────────────────────
+    lines.append("**── Vol ──**")
+    lines.append(line("🦹", "!voler",    _cd_remaining_str(theft_cooldowns,  uid_int, cooldown_h('voler'))))
+    lines.append(line("💸", "!rob",      _cd_remaining_str(rob_cooldowns,    uid_int, cooldown_h('rob'))))
+    imm = _cd_remaining_str(steal_immunity, uid_int, 6)
+    lines.append(f"🛡️ Immunité vol — {'⏳ **' + imm + '** restantes' if imm else '❌ Inactive'}")
+
+    # ── Jobs ──────────────────────────────────────────────────────────────
+    lines.append("**── Jobs ──**")
+    lines.append(line("⛏️", "!miner",   _cd_remaining_str(miner_cooldowns,  uid_int, cooldown_h('miner'))))
+    lines.append(line("💻", "!hacker",  _cd_remaining_str(hacker_cooldowns, uid_int, cooldown_h('hacker'))))
+
+    # ── Usine ─────────────────────────────────────────────────────────────
+    lines.append("**── Usine ──**")
+    factory = factories.get(uid, {})
+    workers_f = factory.get('workers', 0)
+    max_f     = MAX_FACTORY_WORKERS
+    if workers_f >= max_f:
+        lines.append(f"🏭 `!embaucher` usine — ✅ Usine complète ({max_f}/{max_f})")
+    else:
+        r = _secs_to_hm(_factory_hire_remaining(uid))
+        lines.append(line("🏭", "!embaucher usine", r))
+
+    # ── Commerces ─────────────────────────────────────────────────────────
+    user_biz = businesses.get(uid, {})
+    has_biz  = any(user_biz.get(k) for k in BIZ_DEFS)
+    if has_biz:
+        lines.append("**── Commerces ──**")
+        for biz_key, biz_def in BIZ_DEFS.items():
+            b = user_biz.get(biz_key)
+            if not b:
+                continue
+            w     = b.get('workers', 0)
+            max_w = biz_def['max_workers']
+            if w >= max_w:
+                lines.append(f"{biz_def['emoji']} `!embaucher` {biz_def['name']} — ✅ Complet ({max_w}/{max_w})")
+            else:
+                r = _secs_to_hm(_biz_hire_remaining(uid, biz_key))
+                lines.append(line(biz_def['emoji'], f"!embaucher {biz_def['name']}", r))
+
+    embed = discord.Embed(
+        title=f"⏳ Tes cooldowns",
+        description='\n'.join(lines),
+        color=0x3498db
+    )
+    embed.set_footer(text=f"Cooldowns de {ctx.author.display_name} · visible seulement par toi")
+
+    try:
+        await ctx.author.send(embed=embed)
+        if ctx.guild:
+            await ctx.message.delete()
+    except discord.Forbidden:
+        await ctx.send(embed=embed, delete_after=30)
 
 
 # ===== Commande !prix_casino (admin only) ============================
