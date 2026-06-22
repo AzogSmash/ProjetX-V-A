@@ -444,6 +444,22 @@ def load_data():
                 if _migrated:
                     save_data()
 
+                # Migration : reset tickets (items 4 et 5) + remboursement au prix d'achat
+                _ticket_migrated = False
+                for _uid, _items in owned_items.items():
+                    _nb4 = _items.get('4', 0)
+                    _nb5 = _items.get('5', 0)
+                    if _nb4 > 0 or _nb5 > 0:
+                        _refund = _nb4 * 200 + _nb5 * 5000
+                        coins[int(_uid)] += _refund
+                        _items.pop('4', None)
+                        _items.pop('5', None)
+                        logging.warning("Migration tickets : %s — %d tickets + %d packs remboursés (%d coins)", _uid, _nb4, _nb5, _refund)
+                        _ticket_migrated = True
+                if _ticket_migrated:
+                    ticket_purchases.clear()
+                    save_data()
+
             except json.JSONDecodeError as e:
                 logging.warning("ERREUR JSON dans %s : %s — données réinitialisées", DATA_FILE, e)
                 warns = {}
