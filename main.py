@@ -845,7 +845,7 @@ def _build_help_categories(ctx):
                  "`!fastfood` — Fast Food 🍔 *(débloque après épicerie 8/8 + améliorée)*\n"
                  "`!restaurant` (`!resto`) — Restaurant 🍽️ *(débloque après fast food 10/10 + amélioré)*\n"
                  "Chaque commerce : embaucher, collecter, améliorer — via boutons\n"
-                 "Le restaurant a un système de ⭐ **Réputation** (collectez régulièrement !)\n"
+                 "Le restaurant a un système de ⭐ **Réputation** : 2 collectes/24h = +⭐, oublier 24h = retour à 0⭐\n"
                  "Achetez les commerces via `!shop` (items 8, 9, 10)"))
     cats.append(("shop", "🛒 Magasin & Tickets",
                  "Items et inventaire",
