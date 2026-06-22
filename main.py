@@ -4104,9 +4104,10 @@ async def cmd_graphique(ctx, symbol: str = None):
     trend      = "📈" if change_pct >= 0 else "📉"
     color      = 0x2ecc71 if change_pct >= 0 else 0xe74c3c
     sign       = "+" if change_pct >= 0 else ""
-    # Dernières variations entre chaque point
+    # 5 dernières variations (les plus récentes = fin de l'historique)
     deltas = []
-    for i in range(1, min(6, len(history))):
+    start = max(1, len(history) - 5)
+    for i in range(start, len(history)):
         d = ((history[i] - history[i-1]) / history[i-1]) * 100
         deltas.append(f"{'🟢' if d >= 0 else '🔴'} {'+' if d >= 0 else ''}{d:.2f}%")
     embed = discord.Embed(
