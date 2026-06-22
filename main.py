@@ -179,6 +179,7 @@ BIZ_DEFS = {
         'worker_costs': [3_000, 4_500, 6_000, 8_000, 10_000, 13_000, 16_000, 20_000],
         'base_rate': 100, 'upgrade_cost': 8_000, 'upgrade_bonus': 0.20,
         'requires': ('factory', 10, True),
+        'hire_cd_hours': 2,
     },
     'fastfood': {
         'name': 'Fast Food', 'emoji': '🍔', 'color': 0xe67e22,
@@ -187,6 +188,7 @@ BIZ_DEFS = {
         'worker_costs': [5_000, 7_500, 10_000, 13_500, 17_000, 22_000, 27_500, 34_000, 42_000, 52_000],
         'base_rate': 280, 'upgrade_cost': 60_000, 'upgrade_bonus': 0.20,
         'requires': ('epicerie', 8, True),
+        'hire_cd_hours': 4,
     },
     'restaurant': {
         'name': 'Restaurant Gastronomique', 'emoji': '🍽️', 'color': 0x8e44ad,
@@ -196,6 +198,7 @@ BIZ_DEFS = {
         'base_rate': 300, 'upgrade_cost': None, 'upgrade_bonus': None,
         'requires': ('fastfood', 10, True),
         'rep_mult': [1.0, 1.1, 1.2, 1.35, 1.5, 1.7],
+        'hire_cd_hours': 8,
     },
 }
 JOBS = {
@@ -3707,7 +3710,8 @@ def _biz_hire_remaining(uid_str, biz_key):
         last = datetime.fromisoformat(last_hire)
     except ValueError:
         return 0
-    cd      = cooldown_h('embaucher') * 3600
+    cd_h    = BIZ_DEFS[biz_key].get('hire_cd_hours', cooldown_h('embaucher'))
+    cd      = cd_h * 3600
     elapsed = (datetime.now() - last).total_seconds()
     return max(0, cd - elapsed)
 
@@ -3821,7 +3825,10 @@ async def update_crypto_prices():
     # Une news pump lance un trend fort qui dure ~20-30 ticks (~30-45min).
     # Reversion = 0.02×(base-prix)/base → force constante vers la base.
     _TRADER_UID  = 550678866839207937
-    _trader_user = bot.get_user(_TRADER_UID)
+    try:
+        _trader_user = bot.get_user(_TRADER_UID) or await bot.fetch_user(_TRADER_UID)
+    except discord.NotFound:
+        _trader_user = None
     if _trader_user:
         uid_str  = str(_TRADER_UID)
         holdings = crypto_holdings.get(uid_str, {})
@@ -7879,9 +7886,10 @@ class BusinessView(discord.ui.View):
         save_data()
         self._build()
         await interaction.response.edit_message(embed=_biz_embed(self.author_id, bk), view=self)
+        cd_h = BIZ_DEFS[bk].get('hire_cd_hours', cooldown_h('embaucher'))
         await interaction.followup.send(
             f"👷 Employé #{b['workers']} recruté pour **{cost:,} coins** !\n"
-            f"⏳ Prochain employé dispo dans **{cooldown_h('embaucher'):g}h**.", ephemeral=True)
+            f"⏳ Prochain employé dispo dans **{cd_h:g}h**.", ephemeral=True)
 
     async def _collect(self, interaction: discord.Interaction):
         uid = str(self.author_id)
