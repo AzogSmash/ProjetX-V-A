@@ -284,6 +284,7 @@ casino_config = {
     'min_bets':      {},  # str(game) -> int
     'max_bets':      {},  # str(game) -> int
     'cooldowns':     {},  # str(cmd) -> heures (override DEFAULT_COOLDOWNS_H)
+    'biz_overrides': {},  # biz_key -> {'base_rate': int, 'open_cost': int, 'upgrade_cost': int}
 }
 
 
@@ -426,6 +427,7 @@ def load_data():
                     casino_config['min_bets']      = loaded_cfg.get('min_bets', {}) or {}
                     casino_config['max_bets']      = loaded_cfg.get('max_bets', {}) or {}
                     casino_config['cooldowns']     = loaded_cfg.get('cooldowns', {}) or {}
+                    casino_config['biz_overrides'] = loaded_cfg.get('biz_overrides', {}) or {}
 
                 logging.warning("Données chargées avec succès depuis %s", DATA_FILE)
 
@@ -3567,6 +3569,11 @@ def _factory_earnings(uid_str: str) -> int:
     earn      = rate * hours
     return int(min(earn, rate * 168))  # cap 1 semaine
 
+def _biz_def(biz_key, field):
+    """Retourne la valeur de config d'un commerce, avec override admin si présent."""
+    override = casino_config.get('biz_overrides', {}).get(biz_key, {})
+    return override.get(field, BIZ_DEFS[biz_key][field])
+
 def _biz_unlock_status(uid_str, biz_key):
     """Retourne (unlocked: bool, raison: str). raison = '' si OK."""
     biz = BIZ_DEFS[biz_key]
@@ -3595,7 +3602,7 @@ def _biz_unlock_status(uid_str, biz_key):
 
 def _biz_rate(biz_key, workers, upgraded, reputation=0):
     biz = BIZ_DEFS[biz_key]
-    base = biz['base_rate'] * workers * (workers + 1) / 2
+    base = _biz_def(biz_key, 'base_rate') * workers * (workers + 1) / 2
     if upgraded and biz.get('upgrade_bonus'):
         base *= 1 + biz['upgrade_bonus']
     if biz_key == 'restaurant' and reputation > 0:
@@ -3617,7 +3624,7 @@ def _biz_earnings(uid_str, biz_key):
 
 def _biz_cost_next(biz_key, current_workers):
     biz = BIZ_DEFS[biz_key]
-    costs = biz['worker_costs']
+    costs = _biz_def(biz_key, 'worker_costs')
     if current_workers >= biz['max_workers'] or current_workers >= len(costs):
         return None
     return costs[current_workers]
@@ -4992,6 +4999,39 @@ class PrixUsineModal(discord.ui.Modal, title="🏭 Modifier le prix d'un employ�
         await interaction.response.send_message(msg, ephemeral=True)
 
 
+class PrixBizModal(discord.ui.Modal, title="🏢 Modifier un commerce"):
+    biz_input   = discord.ui.TextInput(label="Commerce (epicerie / fastfood / restaurant)", placeholder="Ex : epicerie", required=True, max_length=12)
+    champ_input = discord.ui.TextInput(label="Paramètre (baserate / opencost / upgrade)", placeholder="Ex : baserate", required=True, max_length=12)
+    valeur_input = discord.ui.TextInput(label="Nouvelle valeur (0 = valeur par défaut)", placeholder="Ex : 150 ou 0", required=True, max_length=15)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        biz_key = str(self.biz_input.value).strip().lower()
+        champ   = str(self.champ_input.value).strip().lower()
+        if biz_key not in BIZ_DEFS:
+            return await interaction.response.send_message("❌ Commerce inconnu. Utilisez : epicerie, fastfood ou restaurant.", ephemeral=True)
+        try:
+            val = int(str(self.valeur_input.value).strip())
+        except ValueError:
+            return await interaction.response.send_message("❌ Valeur invalide.", ephemeral=True)
+        if val < 0:
+            return await interaction.response.send_message("❌ La valeur ne peut pas être négative.", ephemeral=True)
+        field_map = {'baserate': 'base_rate', 'opencost': 'open_cost', 'upgrade': 'upgrade_cost'}
+        if champ not in field_map:
+            return await interaction.response.send_message("❌ Paramètre inconnu. Utilisez : baserate, opencost ou upgrade.", ephemeral=True)
+        field = field_map[champ]
+        overrides = casino_config.setdefault('biz_overrides', {}).setdefault(biz_key, {})
+        biz_def = BIZ_DEFS[biz_key]
+        if val == 0:
+            overrides.pop(field, None)
+            default = biz_def.get(field)
+            msg = f"✅ **{biz_def['emoji']} {biz_def['name']}** — `{field}` réinitialisé à **{default}** (défaut)."
+        else:
+            overrides[field] = val
+            msg = f"✅ **{biz_def['emoji']} {biz_def['name']}** — `{field}` réglé à **{val:,}**."
+        save_data()
+        await interaction.response.send_message(msg, ephemeral=True)
+
+
 class PrixMiseModal(discord.ui.Modal, title="🎰 Modifier les limites de mise"):
     game_input = discord.ui.TextInput(
         label="Jeu (slots/coinflip/roulette/bj/duel/mines/poker/course)",
@@ -5072,6 +5112,19 @@ def _prix_casino_embed():
     if not bet_lines:
         bet_lines.append("*Aucune limite configurée (par défaut)*")
     embed.add_field(name="🎰 Limites de mise", value='\n'.join(bet_lines)[:1024], inline=False)
+    # Section commerces
+    biz_lines = []
+    for biz_key, biz_def in BIZ_DEFS.items():
+        ov        = casino_config.get('biz_overrides', {}).get(biz_key, {})
+        base_rate = ov.get('base_rate',    biz_def['base_rate'])
+        open_cost = ov.get('open_cost',    biz_def['open_cost'])
+        upg_cost  = ov.get('upgrade_cost', biz_def.get('upgrade_cost'))
+        custom    = " 🔧" if ov else ""
+        upg_str   = f" · upgrade {upg_cost:,}" if upg_cost else ""
+        biz_lines.append(
+            f"{biz_def['emoji']} **{biz_def['name']}**{custom} — ouverture {open_cost:,} · rate {base_rate}{upg_str}"
+        )
+    embed.add_field(name="🏢 Commerces", value='\n'.join(biz_lines), inline=False)
     embed.set_footer(text="🔧 = valeur personnalisée")
     return embed
 
@@ -5098,6 +5151,10 @@ class PrixCasinoView(discord.ui.View):
     @discord.ui.button(label="Limites de Mise", style=discord.ButtonStyle.primary, emoji="🎰")
     async def bet_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(PrixMiseModal())
+
+    @discord.ui.button(label="Prix Commerces", style=discord.ButtonStyle.primary, emoji="🏢")
+    async def biz_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PrixBizModal())
 
     @discord.ui.button(label="Actualiser", style=discord.ButtonStyle.secondary, emoji="🔄")
     async def refresh_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -6775,7 +6832,28 @@ async def cmd_profil(ctx, member: discord.Member = None):
     embed.add_field(name="🔥 Streak Daily", value=f"{streak} jour{'s' if streak != 1 else ''}", inline=True)
     embed.add_field(name="🏆 ELO Tournoi", value=str(elo), inline=True)
     embed.add_field(name="💼 Métier", value=job_str, inline=True)
-    embed.add_field(name="🏭 Usine", value=f"{workers} ouvrier{'s' if workers != 1 else ''}", inline=True)
+    factory_rate = _factory_rate(workers, factories.get(uid, {}).get('upgraded', False) or _has_item(uid_int, 6))
+    factory_pending = _factory_earnings(uid)
+    embed.add_field(name="🏭 Usine", value=f"{workers} ouvrier{'s' if workers != 1 else ''} · {factory_rate:,.0f}/h · {factory_pending:,} en attente", inline=False)
+    biz_lines = []
+    for biz_key, biz_def in BIZ_DEFS.items():
+        user_biz = businesses.get(uid, {}).get(biz_key)
+        if user_biz:
+            w       = user_biz.get('workers', 0)
+            max_w   = biz_def['max_workers']
+            upg     = user_biz.get('upgraded', False)
+            pending = _biz_earnings(uid, biz_key)
+            rate    = _biz_rate(biz_key, w, upg, user_biz.get('reputation', 0))
+            upg_str = " 🔧" if upg else ""
+            rep_str = ""
+            if biz_key == 'restaurant':
+                rep = user_biz.get('reputation', 0)
+                rep_str = f" · {'⭐' * rep if rep else '☆ 0⭐'}"
+            biz_lines.append(
+                f"{biz_def['emoji']} **{biz_def['name']}**{upg_str} — {w}/{max_w} emp · {rate:,.0f}/h · {pending:,} en attente{rep_str}"
+            )
+    if biz_lines:
+        embed.add_field(name="🏢 Commerces", value='\n'.join(biz_lines), inline=False)
     if imm_str:
         embed.add_field(name="🛡️ Protection", value=imm_str, inline=False)
     if item_lines:
