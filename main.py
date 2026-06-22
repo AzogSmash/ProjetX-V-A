@@ -5092,6 +5092,55 @@ async def cmd_cd_member(ctx):
     )
 
 
+class _CiblesView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=60)
+        self.author_id = author_id
+        btn = discord.ui.Button(label="🎯 Afficher", style=discord.ButtonStyle.danger)
+        btn.callback = self._show
+        self.add_item(btn)
+
+    async def _show(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌", ephemeral=True)
+        now = datetime.now()
+        rows = []
+        for uid_int, cash in coins.items():
+            if cash <= 0:
+                continue
+            uid_str = str(uid_int)
+            imm_str = _cd_remaining_str(steal_immunity, uid_int, 6)
+            nb_bouclier = owned_items.get(uid_str, {}).get('3', 0)
+            job = _get_job(uid_int)
+            member = interaction.guild.get_member(uid_int)
+            name = member.display_name if member else f"#{uid_int}"
+            rows.append((cash, name, imm_str, nb_bouclier, job))
+        rows.sort(key=lambda x: -x[0])
+        lines = []
+        for i, (cash, name, imm, bouclier, job) in enumerate(rows[:30], 1):
+            prot = []
+            if imm:            prot.append(f"⏳{imm}")
+            if bouclier > 0:   prot.append(f"🛡️×{bouclier}")
+            if job == 'gardien': prot.append("⚔️")
+            prot_str = " ".join(prot) if prot else "✅"
+            job_str = f" *{job}*" if job and job != 'gardien' else ""
+            lines.append(f"`{i}.` **{name}** — {cash:,} 💰 · {prot_str}{job_str}")
+        desc = '\n'.join(lines) if lines else "Aucun joueur avec du cash."
+        embed = discord.Embed(title="🎯 Cibles", description=desc, color=0xe74c3c)
+        embed.set_footer(text="✅=libre · ⏳=immunité !voler · 🛡️=bouclier · ⚔️=gardien")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.command(name="cibles", hidden=True)
+@commands.has_permissions(administrator=True)
+async def cmd_cibles(ctx):
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+    await ctx.send(view=_CiblesView(ctx.author.id), delete_after=60)
+
+
 # ===== Commande !prix_casino (admin only) ============================
 
 class PrixShopModal(discord.ui.Modal, title="🛒 Modifier le prix d'un item"):
