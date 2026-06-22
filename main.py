@@ -6723,10 +6723,14 @@ async def cmd_tournoi_ajouter(ctx, membre: discord.Member, *, team_name: str = N
         return await ctx.send(f"✅ **{membre.display_name}** ajouté au tournoi !")
     if not team_name:
         noms = ', '.join(f"**{p['name']}**" for p in t['participants']) or 'Aucune équipe'
-        return await ctx.send(f"❌ Précisez le nom de l'équipe.\n`!tournoi_ajouter @membre <nom_equipe>`\nÉquipes : {noms}")
+        return await ctx.send(f"❌ Précisez le nom de l'équipe.\n`!tournoi_ajouter @membre <nom_equipe>`\nÉquipes actuelles : {noms}")
     target = next((p for p in t['participants'] if p['name'].lower() == team_name.lower()), None)
     if not target:
-        return await ctx.send(f"❌ Équipe **{team_name}** introuvable.")
+        # Équipe inexistante → la créer avec ce membre comme capitaine
+        idx = len(t['participants'])
+        t['participants'].append({'idx': idx, 'captain': uid, 'name': team_name, 'members': [uid]})
+        save_data()
+        return await ctx.send(f"✅ Équipe **{team_name}** créée avec **{membre.display_name}** comme capitaine (1/{ts}).")
     if _team_full(t, target):
         return await ctx.send(f"❌ L'équipe **{target['name']}** est déjà complète ({ts}/{ts}).")
     target['members'].append(uid)
