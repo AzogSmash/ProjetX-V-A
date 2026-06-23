@@ -3942,12 +3942,12 @@ async def update_crypto_prices():
             target   = round(new_p * (1 + min(t_val * 6, 0.30)), 2)
 
             if direction == 'up':
-                mise = min(int(trader_bal * 0.35), 30_000) if ratio < 1.5 else min(int(trader_bal * 0.15), 10_000)
+                mise = min(int(trader_bal * 0.35), 30_000) if ratio < 1.3 else min(int(trader_bal * 0.15), 10_000)
                 if held > 0:
                     signals.append(
                         f"🚨 **PUMP {s}** (+{pct:.1f}%) — Prix : **{new_p:,.0f}** ({ratio:.1f}×base)\n"
                         f"Tu en as ({held:.6f} ≈ {held_val:,} coins). "
-                        f"{'Rajoute ' + str(mise) + ' coins — potentiel encore bon.' if ratio < 1.5 else 'Prix élevé, conserve sans rajouter.'}\n"
+                        f"{'Rajoute ' + str(mise) + ' coins — potentiel encore bon.' if ratio < 1.3 else 'Prix élevé, conserve sans rajouter.'}\n"
                         f"🎯 Cible : **{target:,.0f}** · Vends sur signal 🔻."
                     )
                 else:
@@ -3955,7 +3955,7 @@ async def update_crypto_prices():
                         f"🚨 **PUMP {s}** (+{pct:.1f}%) — Prix : **{new_p:,.0f}** ({ratio:.1f}×base)\n"
                         f"➡️ `!acheter_crypto {s} {mise}` ← mise suggérée\n"
                         f"🎯 Cible : **{target:,.0f}** (~+{min(t_val*6,0.30)*100:.0f}% estimé)\n"
-                        f"⚠️ Frais 3% à chaque sens — vends quand je dis 🔻."
+                        f"Vends sur signal 🔻."
                     )
             else:
                 if held > 0:
@@ -3967,7 +3967,7 @@ async def update_crypto_prices():
                 else:
                     signals.append(
                         f"📉 **DUMP {s}** ({pct:.1f}%) — Prix : **{new_p:,.0f}**\n"
-                        f"Tu n'en as pas. Attends le fond (~30min), rachète si ratio < 0.8."
+                        f"Tu n'en as pas. Attends le fond (~30min), rachète si ratio < 0.70."
                     )
 
         # --- Analyse hors news ---
@@ -3997,7 +3997,7 @@ async def update_crypto_prices():
                 )
 
             # ⚡ PRÉ-PUMP : 3 ticks positifs consécutifs, prix pas trop haut — CD 10min
-            if consec == 3 and ratio < 1.4 and t_val > 0.015 and _cd_ok_signal('pre_pump', 600):
+            if consec == 3 and ratio < 1.3 and t_val > 0.015 and _cd_ok_signal('pre_pump', 600):
                 mise   = min(int(trader_bal * 0.20), 15_000)
                 target = round(price * (1 + t_val * 5), 2)
                 signals.append(
@@ -4008,21 +4008,21 @@ async def update_crypto_prices():
                 )
                 _trader_signal_sent.setdefault(s, {})['pre_pump'] = now.isoformat()
 
-            # 💎 SOUS-ÉVALUÉ : prix < 65% base + trend positif + pas en position — CD 30min
-            if ratio < 0.65 and t_val > 0.01 and held == 0 and _cd_ok_signal('sous_evalue', 1800):
+            # 💎 SOUS-ÉVALUÉ : prix < 75% base + trend positif + pas en position — CD 30min
+            if ratio < 0.75 and t_val > 0.01 and held == 0 and _cd_ok_signal('sous_evalue', 1800):
                 mise   = min(int(trader_bal * 0.30), 20_000)
-                target = round(base * 0.85, 2)
+                target = round(base * 0.95, 2)
                 signals.append(
                     f"💎 **SOUS-ÉVALUÉ {s}** — Prix à {ratio:.2f}×base ({price:,.0f})\n"
                     f"➡️ `!acheter_crypto {s} {mise}` · 🎯 Cible : **{target:,.0f}** (retour vers base)\n"
-                    f"Vends sur signal 🔻 ou quand ratio > 0.85."
+                    f"Vends sur signal 🔻 ou quand ratio > 0.90."
                 )
                 _trader_signal_sent.setdefault(s, {})['sous_evalue'] = now.isoformat()
 
-            # ⛰️ SOMMET : prix > 2.5×base + trend faiblit + en position — CD 30min
-            if ratio > 2.5 and held > 0 and t_val < 0.03 and _cd_ok_signal('sommet', 1800):
+            # ⛰️ SOMMET : prix > 1.7×base + trend faiblit + en position — CD 30min
+            if ratio > 1.7 and held > 0 and t_val < 0.03 and _cd_ok_signal('sommet', 1800):
                 signals.append(
-                    f"⛰️ **SOMMET {s}** — Prix à {ratio:.1f}×base ({price:,.0f}), reversion forte\n"
+                    f"⛰️ **SOMMET {s}** — Prix à {ratio:.1f}×base ({price:,.0f}), proche du plafond\n"
                     f"Trend faiblit ({t_val:.3f}) · Tu as ≈ **{held_val:,} coins**\n"
                     f"Vends si trend < 0 → `!vendre_crypto {s} all`"
                 )
