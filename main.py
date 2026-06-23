@@ -242,7 +242,7 @@ miner_cooldowns  = {}   # str(uid) -> ISO
 hacker_cooldowns = {}   # str(uid) -> ISO
 risque_cooldowns = {}   # str(uid) -> ISO  (cooldown 3h)
 rob_cooldowns    = {}   # str(uid) -> ISO  (cooldown 12h)
-steal_immunity   = {}   # str(uid) -> ISO  (immunité 6h après avoir été volé via !voler)
+steal_immunity   = {}   # str(uid) -> ISO expiration (3h bouclier/antivirus, 6h vol/hack réussi)
 race_bets        = {}   # str(uid) -> {'driver': int, 'amount': int}
 race_drivers_live = [dict(d) for d in RACE_DRIVERS_BASE]
 race_accepting    = False
@@ -3627,6 +3627,29 @@ def _cd_remaining_str(cd_dict: dict, uid, hours: float) -> str:
     m = rem // 60
     return f"{h}h {m}min"
 
+def _set_imm(uid, hours: float):
+    """Pose une immunité vol/hack qui expire dans `hours` heures."""
+    steal_immunity[str(uid)] = (datetime.now() + timedelta(hours=hours)).isoformat()
+
+def _imm_ok(uid):
+    """(can_be_attacked, wait_str). Lit steal_immunity comme expiration directe."""
+    exp_iso = steal_immunity.get(str(uid))
+    if not exp_iso:
+        return True, ""
+    try:
+        rem = (datetime.fromisoformat(exp_iso) - datetime.now()).total_seconds()
+    except (ValueError, TypeError):
+        return True, ""
+    if rem <= 0:
+        return True, ""
+    h, m = int(rem // 3600), int((rem % 3600) // 60)
+    return False, f"**{h}h {m}min**"
+
+def _imm_remaining_str(uid) -> str:
+    """Retourne 'Xh Ymin' si immunité active, '' sinon."""
+    ok, wait = _imm_ok(uid)
+    return "" if ok else wait.strip("*")
+
 def _secs_to_hm(secs: float) -> str:
     """Convertit des secondes en 'Xh Ymin', ou '' si <= 0."""
     if secs <= 0:
@@ -4465,10 +4488,10 @@ async def cmd_hacker(ctx, cible: discord.Member):
         return await ctx.send(f"⏳ {ctx.author.mention}, système refroidi dans {wait}.")
     uid_t  = str(cible.id)
 
-    # Immunité 6h après hack subi
-    imm_ok, imm_wait = _cd_ok(steal_immunity, cible.id, 6)
+    # Immunité après hack subi
+    imm_ok, imm_wait = _imm_ok(cible.id)
     if not imm_ok:
-        return await ctx.send(f"🛡️ {cible.mention} est immunisé contre le hack pendant encore **{imm_wait}**.")
+        return await ctx.send(f"🛡️ {cible.mention} est immunisé contre le hack pendant encore {imm_wait}.")
 
     # Antivirus : bloque le hack, se consomme, pose l'immunité 6h
     antivirus = owned_items.get(uid_t, {}).get('11', 0)
@@ -4476,16 +4499,16 @@ async def cmd_hacker(ctx, cible: discord.Member):
         owned_items[uid_t]['11'] = antivirus - 1
         if owned_items[uid_t]['11'] == 0:
             del owned_items[uid_t]['11']
-        steal_immunity[uid_t] = datetime.now().isoformat()
+        _set_imm(uid_t, 3)
         hacker_cooldowns[ctx.author.id] = datetime.now().isoformat()
         save_data()
         await ctx.send(embed=discord.Embed(
             title="💊 Hack bloqué !",
-            description=f"🛡️ {cible.mention} possède un **Antivirus** — l'attaque a été neutralisée et l'antivirus consommé.\n🛡️ Immunité de **6h** accordée.",
+            description=f"🛡️ {cible.mention} possède un **Antivirus** — l'attaque a été neutralisée et l'antivirus consommé.\n🛡️ Immunité de **3h** accordée.",
             color=0xe74c3c
         ))
         try:
-            await cible.send(f"💊 **Antivirus activé !** {ctx.author.mention} a tenté de vous hacker — votre antivirus l'a bloqué et a été consommé. Vous êtes immunisé 6h.")
+            await cible.send(f"💊 **Antivirus activé !** {ctx.author.mention} a tenté de vous hacker — votre antivirus l'a bloqué et a été consommé. Vous êtes immunisé 3h.")
         except discord.HTTPException:
             pass
         return
@@ -4503,7 +4526,7 @@ async def cmd_hacker(ctx, cible: discord.Member):
         crypto_holdings.setdefault(uid_a, {})
         crypto_holdings[uid_a][symbol]    = round(crypto_holdings[uid_a].get(symbol, 0) + stolen_qty, 8)
         val = int(stolen_qty * crypto_prices.get(symbol, 0))
-        steal_immunity[uid_t] = datetime.now().isoformat()
+        _set_imm(uid_t, 6)
         save_data()
         embed = discord.Embed(title="💻 Hack réussi !", color=0x2ecc71,
             description=f"🔓 Volé **{stolen_qty:.6f} {symbol}** à {cible.mention}\nValeur ≈ **{val:,} coins**\n🛡️ {cible.mention} est immunisé **6h**.")
@@ -4975,15 +4998,16 @@ async def cmd_voler(ctx, cible: discord.Member):
     safe_cible = safes.get(str(cible.id), 0)
     if safe_cible < 300:
         return await ctx.send(f"❌ Le coffre de {cible.mention} est trop pauvre (min 300 coins dans le coffre).")
-    # Vérifier immunité 6h
-    imm_ok, imm_wait = _cd_ok(steal_immunity, cible.id, 6)
+    # Vérifier immunité
+    imm_ok, imm_wait = _imm_ok(cible.id)
     if not imm_ok:
-        return await ctx.send(f"🛡️ {cible.mention} est protégé pendant encore **{imm_wait}** (immunité après vol subi).")
-    # Vérifier bouclier
+        return await ctx.send(f"🛡️ {cible.mention} est protégé pendant encore {imm_wait} (immunité après vol subi).")
+    # Vérifier bouclier → bloque + immunité 3h
     if _has_item(cible.id, 3):
         _use_item(cible.id, 3)
+        _set_imm(cible.id, 3)
         save_data()
-        return await ctx.send(f"🛡️ {cible.mention} possède un **Bouclier Anti-Vol** ! Le vol a été bloqué. (bouclier utilisé)")
+        return await ctx.send(f"🛡️ {cible.mention} possède un **Bouclier Anti-Vol** ! Le vol a été bloqué. (bouclier consommé · immunité 3h)")
     base_rate = 0.55
     if _get_job(ctx.author.id) == 'escroc': base_rate += 0.20
     if random.random() < base_rate:
@@ -4993,8 +5017,7 @@ async def cmd_voler(ctx, cible: discord.Member):
         if _get_job(cible.id) == 'gardien': stolen //= 2
         safes[str(cible.id)] = safe_cible - stolen
         coins[ctx.author.id] += stolen
-        # Poser l'immunité 6h sur la victime
-        steal_immunity[str(cible.id)] = datetime.utcnow().isoformat()
+        _set_imm(cible.id, 6)
         save_data()
         embed = discord.Embed(title="🦹 Vol de coffre réussi !", color=0x2ecc71,
             description=(
@@ -5379,7 +5402,7 @@ def _build_cd_embed(uid_int, guild):
     lines.append("**── Vol ──**")
     lines.append(line("🦹", "!voler",   _cd_remaining_str(theft_cooldowns,  uid_int, cooldown_h('voler'))))
     lines.append(line("💸", "!rob",     _cd_remaining_str(rob_cooldowns,    uid_int, cooldown_h('rob'))))
-    imm = _cd_remaining_str(steal_immunity, uid_int, 6)
+    imm = _imm_remaining_str(uid_int)
     lines.append(f"🛡️ Immunité vol — {'⏳ **' + imm + '** restantes' if imm else '❌ Inactive'}")
 
     lines.append("**── Jobs ──**")
@@ -5460,7 +5483,7 @@ async def cmd_cibles(ctx):
         total = cash + coffre + crypto_val
         if total <= 0:
             continue
-        imm_str     = _cd_remaining_str(steal_immunity, uid_int, 6)
+        imm_str     = _imm_remaining_str(uid_int)
         nb_bouclier = owned_items.get(uid_str, {}).get('3', 0)
         job         = _get_job(uid_int)
         member      = ctx.guild.get_member(uid_int)
@@ -7441,8 +7464,8 @@ async def cmd_profil(ctx, member: discord.Member = None):
     job_str = JOBS[job]['name'] if job and job in JOBS else "Aucun"
     factory = factories.get(uid, {})
     workers = factory.get('workers', 0) if factory else 0
-    imm_ok, imm_wait = _cd_ok(steal_immunity, member.id, 6)
-    imm_str = None if imm_ok else f"🛡️ Immunité vol active encore **{imm_wait}**"
+    imm_ok, imm_wait = _imm_ok(member.id)
+    imm_str = None if imm_ok else f"🛡️ Immunité vol active encore {imm_wait}"
 
     embed = discord.Embed(
         title=f"👤 Profil de {member.display_name}",
