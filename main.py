@@ -169,6 +169,7 @@ SHOP_ITEMS = {
     8: {'name': '🏪 Ouvrir Épicerie',    'price': 80_000,  'desc': 'Débloque l\'épicerie · Requiert : Usine 10/10 + améliorée', 'unique': True, 'biz': 'epicerie'},
     9: {'name': '🍔 Ouvrir Fast Food',   'price': 300_000, 'desc': 'Débloque le fast food · Requiert : Épicerie 8/8 + améliorée', 'unique': True, 'biz': 'fastfood'},
    10: {'name': '🍽️ Ouvrir Restaurant', 'price': 800_000, 'desc': 'Débloque le restaurant · Requiert : Fast Food 10/10 + amélioré', 'unique': True, 'biz': 'restaurant'},
+   11: {'name': '💊 Antivirus',         'price': 2_000,   'desc': 'Bloque automatiquement le prochain !hacker subi (consommable)', 'unique': True},
 }
 
 BIZ_DEFS = {
@@ -265,6 +266,7 @@ _trader_consec_pos   = {}   # symbol -> int (ticks consécutifs trend > 0, signa
 _trader_signal_sent  = {}   # symbol -> {type: ISO} — anti-spam sur signaux répétitifs
 crypto_buy_cooldowns = {}   # str(uid) -> {symbol: ISO} — CD 30min entre achats du même symbole
 crypto_hold_since    = {}   # str(uid) -> {symbol: ISO} — timestamp dernier achat (hold min 10min)
+cold_wallets         = {}   # str(uid) -> {symbol: {'qty': float, 'locked_until': ISO}}
 
 # ── Configuration prix / mises (modifiable par !prix_casino) ─────────────
 BOT_OWNER_ID = 1056848438270115900   # happy_gt3 — créateur du bot
@@ -350,7 +352,7 @@ def load_data():
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
-    global crypto_buy_cooldowns, crypto_hold_since
+    global crypto_buy_cooldowns, crypto_hold_since, cold_wallets
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
             try:
@@ -431,6 +433,7 @@ def load_data():
                 businesses           = data.get('businesses', {})
                 crypto_buy_cooldowns = data.get('crypto_buy_cooldowns', {})
                 crypto_hold_since    = data.get('crypto_hold_since', {})
+                cold_wallets         = data.get('cold_wallets', {})
                 ADMIN_LOG_CHANNEL_ID = data.get('admin_log_channel_id', 0)
                 loaded_cfg = data.get('casino_config', {})
                 if isinstance(loaded_cfg, dict):
@@ -556,6 +559,7 @@ def save_data():
     data_to_save['businesses']           = businesses
     data_to_save['crypto_buy_cooldowns'] = crypto_buy_cooldowns
     data_to_save['crypto_hold_since']    = crypto_hold_since
+    data_to_save['cold_wallets']         = cold_wallets
     data_to_save['admin_log_channel_id'] = ADMIN_LOG_CHANNEL_ID
 
     try:
@@ -863,6 +867,9 @@ def _build_help_categories(ctx):
                  "`!alerte_crypto <SYM> <prix>` (`!alerte`) — Alerte prix en DM\n"
                  "`!suppr_alerte [SYM]` (`!del_alerte`) — Supprimer alertes\n"
                  "`!top_crypto` (`!classement_crypto`) — Top portefeuilles\n"
+                 "`!coldwallet` (`!cw`) — Voir votre cold wallet sécurisé\n"
+                 "`!coldwallet <qté> <SYM>` — Déposer (verrouillé 12h, protégé contre `!hacker`)\n"
+                 "`!coldwallet retirer <qté> <SYM>` — Retirer vers portefeuille chaud\n"
                  "\n**⚙️ Règles du marché :**\n"
                  "⏳ **Cooldown 30min** entre deux achats du même symbole\n"
                  "🔒 **Hold minimum 10min** avant de pouvoir revendre\n"
@@ -895,7 +902,16 @@ def _build_help_categories(ctx):
                  "Items et inventaire",
                  "`!shop` (`!boutique`) — Magasin (boutons d'achat)\n"
                  "`!acheter <item_id>` (`!buy`) — Acheter un item\n"
-                 "`!inventaire` (`!inv`) — Voir vos items"))
+                 "`!inventaire` (`!inv`) — Voir vos items\n"
+                 "\n**Items disponibles :**\n"
+                 "1. 🍀 Porte-bonheur — Daily = 650 coins\n"
+                 "2. ⚒️ Équipement Pro — Travail : 50–400 coins\n"
+                 "3. 🛡️ Bouclier Anti-Vol — Bloque le prochain `!voler` subi\n"
+                 "4/5. 🎟️ Ticket à gratter\n"
+                 "6. 🏭 Amélioration Usine — +15% production\n"
+                 "7. 📈 Cours de Trading — +15% gains ventes crypto\n"
+                 "8/9/10. Commerces (Épicerie / Fast Food / Restaurant)\n"
+                 "11. 💊 Antivirus — Bloque automatiquement le prochain `!hacker` subi (consommable)"))
     cats.append(("team", "👥 Clubs / Teams",
                  "Créer ou rejoindre un club de joueurs",
                  "`!team` (`!club`, `!guilde`) — Interface du club\n"
@@ -4122,9 +4138,23 @@ async def cmd_crypto(ctx):
             val = qty * crypto_prices.get(s, 0)
             total += val
             lines.append(f"**{s}** : {qty:.6f} ≈ {val:,.0f} coins")
-        embed.add_field(name="💼 Votre portefeuille",
+        embed.add_field(name="💼 Portefeuille chaud",
             value='\n'.join(lines) + f"\n📊 Total ≈ **{total:,.0f} coins**", inline=False)
-    embed.set_footer(text="Prix actualisés toutes les 90s | !acheter_crypto <SYM> <coins> | !vendre_crypto <SYM> <qté> | !graphique <SYM>")
+    cw = {s: e for s, e in cold_wallets.get(uid, {}).items() if e.get('qty', 0) > 0.000001}
+    if cw:
+        cw_lines = []
+        cw_total = 0
+        now_dt = datetime.now()
+        for s, entry in cw.items():
+            qty = entry['qty']
+            val = qty * crypto_prices.get(s, 0)
+            cw_total += val
+            locked = datetime.fromisoformat(entry['locked_until'])
+            lock_str = f"🔒 {int((locked-now_dt).total_seconds()//3600)}h" if locked > now_dt else "✅"
+            cw_lines.append(f"**{s}** : {qty:.6f} ≈ {val:,.0f} coins {lock_str}")
+        embed.add_field(name="🔐 Cold Wallet (sécurisé)",
+            value='\n'.join(cw_lines) + f"\n📊 Total ≈ **{cw_total:,.0f} coins**", inline=False)
+    embed.set_footer(text="Prix actualisés toutes les 90s | !acheter_crypto <SYM> <coins> | !vendre_crypto <SYM> <qté> | !coldwallet")
     await ctx.send(embed=embed)
 
 @bot.command(name="graphique", aliases=["chart", "courbe", "graph"])
@@ -4339,6 +4369,91 @@ async def cmd_miner(ctx):
     embed.set_footer(text="Revenez dans 1 heure.")
     await ctx.send(embed=embed)
 
+@bot.command(name="coldwallet", aliases=["cold", "cw"])
+async def cmd_coldwallet(ctx, *args):
+    uid = str(ctx.author.id)
+    cw  = cold_wallets.setdefault(uid, {})
+    now = datetime.now()
+
+    # !coldwallet → afficher le contenu
+    if not args:
+        lines = []
+        total = 0
+        for sym, entry in cw.items():
+            qty = entry.get('qty', 0)
+            if qty < 0.000001:
+                continue
+            val      = qty * crypto_prices.get(sym, 0)
+            total   += val
+            locked   = datetime.fromisoformat(entry['locked_until'])
+            if locked > now:
+                rem  = int((locked - now).total_seconds())
+                lock_str = f"🔒 {rem//3600}h {(rem%3600)//60}min"
+            else:
+                lock_str = "✅ Retrait disponible"
+            lines.append(f"**{sym}** : {qty:.6f} ≈ {val:,.0f} coins — {lock_str}")
+        desc = '\n'.join(lines) + f"\n\n💼 Total : **{total:,.0f} coins**" if lines else "Votre cold wallet est vide."
+        embed = discord.Embed(title="🔐 Cold Wallet", color=0x2c3e50, description=desc)
+        embed.set_footer(text="!coldwallet <qté> <SYM> — Déposer | !coldwallet retirer <qté> <SYM> — Retirer")
+        return await ctx.send(embed=embed)
+
+    # !coldwallet retirer <qty> <sym>
+    if args[0].lower() in ('retirer', 'withdraw') and len(args) >= 3:
+        try:
+            qty_req = float(args[1])
+        except ValueError:
+            return await ctx.send("❌ Quantité invalide.")
+        sym = args[2].upper()
+        if sym not in CRYPTO_SYMBOLS:
+            return await ctx.send(f"❌ Symbole invalide. Disponibles : {', '.join(CRYPTO_SYMBOLS)}")
+        entry = cw.get(sym)
+        if not entry or entry.get('qty', 0) < 0.000001:
+            return await ctx.send(f"❌ Vous n'avez pas de **{sym}** en cold wallet.")
+        locked = datetime.fromisoformat(entry['locked_until'])
+        if locked > now:
+            rem = int((locked - now).total_seconds())
+            return await ctx.send(f"🔒 **{sym}** encore verrouillé — retrait disponible dans **{rem//3600}h {(rem%3600)//60}min**.")
+        qty_req = min(qty_req, entry['qty'])
+        entry['qty'] = round(entry['qty'] - qty_req, 8)
+        if entry['qty'] < 0.000001:
+            del cw[sym]
+        crypto_holdings.setdefault(uid, {})
+        crypto_holdings[uid][sym] = round(crypto_holdings[uid].get(sym, 0) + qty_req, 8)
+        save_data()
+        return await ctx.send(embed=discord.Embed(
+            title="🔓 Retrait Cold Wallet",
+            description=f"**{qty_req:.6f} {sym}** transféré vers votre portefeuille chaud.\n💼 Disponible à la vente.",
+            color=0x2ecc71
+        ))
+
+    # !coldwallet <qty> <sym> → déposer
+    if len(args) >= 2:
+        try:
+            qty_req = float(args[0])
+        except ValueError:
+            return await ctx.send("❌ Quantité invalide.")
+        sym = args[1].upper()
+        if sym not in CRYPTO_SYMBOLS:
+            return await ctx.send(f"❌ Symbole invalide. Disponibles : {', '.join(CRYPTO_SYMBOLS)}")
+        held = crypto_holdings.get(uid, {}).get(sym, 0)
+        if held < 0.000001:
+            return await ctx.send(f"❌ Vous ne possédez pas de **{sym}** dans votre portefeuille.")
+        qty_req = min(qty_req, held)
+        crypto_holdings[uid][sym] = round(held - qty_req, 8)
+        if crypto_holdings[uid][sym] < 0.000001:
+            del crypto_holdings[uid][sym]
+        existing_qty = cw.get(sym, {}).get('qty', 0)
+        cw[sym] = {'qty': round(existing_qty + qty_req, 8), 'locked_until': (now + timedelta(hours=12)).isoformat()}
+        save_data()
+        return await ctx.send(embed=discord.Embed(
+            title="🔐 Dépôt Cold Wallet",
+            description=f"**{qty_req:.6f} {sym}** sécurisé en cold wallet.\n🔒 Retrait disponible dans **12h** — impossible à hacker d'ici là.",
+            color=0x2c3e50
+        ))
+
+    await ctx.send("❌ Usage : `!coldwallet` · `!coldwallet <qté> <SYM>` · `!coldwallet retirer <qté> <SYM>`")
+
+
 @bot.command(name="hacker", aliases=["hack"])
 async def cmd_hacker(ctx, cible: discord.Member):
     if _get_job(ctx.author.id) != 'hacker':
@@ -4349,6 +4464,26 @@ async def cmd_hacker(ctx, cible: discord.Member):
     if not ok:
         return await ctx.send(f"⏳ {ctx.author.mention}, système refroidi dans {wait}.")
     uid_t  = str(cible.id)
+
+    # Antivirus : bloque le hack et se consomme
+    antivirus = owned_items.get(uid_t, {}).get('11', 0)
+    if antivirus > 0:
+        owned_items[uid_t]['11'] = antivirus - 1
+        if owned_items[uid_t]['11'] == 0:
+            del owned_items[uid_t]['11']
+        hacker_cooldowns[ctx.author.id] = datetime.now().isoformat()
+        save_data()
+        await ctx.send(embed=discord.Embed(
+            title="💊 Hack bloqué !",
+            description=f"🛡️ {cible.mention} possède un **Antivirus** — l'attaque a été neutralisée et l'antivirus consommé.",
+            color=0xe74c3c
+        ))
+        try:
+            await cible.send(f"💊 **Antivirus activé !** {ctx.author.mention} a tenté de vous hacker — votre antivirus l'a bloqué et a été consommé.")
+        except discord.HTTPException:
+            pass
+        return
+
     owned  = {s: q for s, q in crypto_holdings.get(uid_t, {}).items() if q > 0.000001}
     if not owned:
         return await ctx.send(f"❌ {cible.mention} ne possède aucune crypto à voler !")
