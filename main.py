@@ -4465,21 +4465,27 @@ async def cmd_hacker(ctx, cible: discord.Member):
         return await ctx.send(f"⏳ {ctx.author.mention}, système refroidi dans {wait}.")
     uid_t  = str(cible.id)
 
-    # Antivirus : bloque le hack et se consomme
+    # Immunité 6h après hack subi
+    imm_ok, imm_wait = _cd_ok(steal_immunity, cible.id, 6)
+    if not imm_ok:
+        return await ctx.send(f"🛡️ {cible.mention} est immunisé contre le hack pendant encore **{imm_wait}**.")
+
+    # Antivirus : bloque le hack, se consomme, pose l'immunité 6h
     antivirus = owned_items.get(uid_t, {}).get('11', 0)
     if antivirus > 0:
         owned_items[uid_t]['11'] = antivirus - 1
         if owned_items[uid_t]['11'] == 0:
             del owned_items[uid_t]['11']
+        steal_immunity[uid_t] = datetime.now().isoformat()
         hacker_cooldowns[ctx.author.id] = datetime.now().isoformat()
         save_data()
         await ctx.send(embed=discord.Embed(
             title="💊 Hack bloqué !",
-            description=f"🛡️ {cible.mention} possède un **Antivirus** — l'attaque a été neutralisée et l'antivirus consommé.",
+            description=f"🛡️ {cible.mention} possède un **Antivirus** — l'attaque a été neutralisée et l'antivirus consommé.\n🛡️ Immunité de **6h** accordée.",
             color=0xe74c3c
         ))
         try:
-            await cible.send(f"💊 **Antivirus activé !** {ctx.author.mention} a tenté de vous hacker — votre antivirus l'a bloqué et a été consommé.")
+            await cible.send(f"💊 **Antivirus activé !** {ctx.author.mention} a tenté de vous hacker — votre antivirus l'a bloqué et a été consommé. Vous êtes immunisé 6h.")
         except discord.HTTPException:
             pass
         return
@@ -4497,9 +4503,10 @@ async def cmd_hacker(ctx, cible: discord.Member):
         crypto_holdings.setdefault(uid_a, {})
         crypto_holdings[uid_a][symbol]    = round(crypto_holdings[uid_a].get(symbol, 0) + stolen_qty, 8)
         val = int(stolen_qty * crypto_prices.get(symbol, 0))
+        steal_immunity[uid_t] = datetime.now().isoformat()
         save_data()
         embed = discord.Embed(title="💻 Hack réussi !", color=0x2ecc71,
-            description=f"🔓 Volé **{stolen_qty:.6f} {symbol}** à {cible.mention}\nValeur ≈ **{val:,} coins**")
+            description=f"🔓 Volé **{stolen_qty:.6f} {symbol}** à {cible.mention}\nValeur ≈ **{val:,} coins**\n🛡️ {cible.mention} est immunisé **6h**.")
     else:
         fine = min(random.randint(200, 600), coins[ctx.author.id])
         coins[ctx.author.id] -= fine
