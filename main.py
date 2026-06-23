@@ -3904,6 +3904,26 @@ async def update_crypto_prices():
         hist.append(new_price)
         if len(hist) > 30:
             price_history[s] = hist[-30:]
+
+    # Décroissance cold wallets déverrouillés : -5%/h (≈ 0.125% par tick de 90s)
+    _COLD_DECAY = 0.00125
+    _now_decay = datetime.now()
+    for _uid, _wallet in list(cold_wallets.items()):
+        for _sym in list(_wallet.keys()):
+            _new_batches = []
+            for _b in _wallet[_sym]:
+                _qty = _b.get('qty', 0)
+                if _qty < 0.000001:
+                    continue
+                if datetime.fromisoformat(_b['locked_until']) < _now_decay:
+                    _qty = round(_qty * (1 - _COLD_DECAY), 8)
+                if _qty > 0.000001:
+                    _new_batches.append({'qty': _qty, 'locked_until': _b['locked_until']})
+            if _new_batches:
+                _wallet[_sym] = _new_batches
+            elif _sym in _wallet:
+                del _wallet[_sym]
+
     save_data()
 
     # Vérification des alertes crypto utilisateurs
@@ -4334,7 +4354,11 @@ async def cmd_acheter_crypto(ctx, symbol: str, montant: str):
     qty = montant / price
 
     # Avertissement : slippage qui s'appliquerait si revente immédiate
-    sell_slip_pct = max(0.0, min(0.10, (montant - 5_000) / 500_000))
+    _slip_base = max(0.0, (montant - 5_000) / 500_000)
+    if montant > 400_000:
+        sell_slip_pct = min(0.35, _slip_base + (montant - 400_000) / 600_000 * 0.25)
+    else:
+        sell_slip_pct = min(0.10, _slip_base)
     if sell_slip_pct >= 0.01:
         coins_perdus = int(montant * sell_slip_pct)
         await ctx.send(
@@ -4390,8 +4414,12 @@ async def cmd_vendre_crypto(ctx, symbol: str, qty_str: str):
     price = crypto_prices[symbol]
     gross = qty * price
 
-    # Slippage sur gros ordres de vente (même formule qu'à l'achat)
-    slippage_pct    = max(0.0, min(0.10, (gross - 5_000) / 500_000))
+    # Slippage progressif : 0→10% jusqu'à 400k, puis 10→35% au-delà
+    _slip_base = max(0.0, (gross - 5_000) / 500_000)
+    if gross > 400_000:
+        slippage_pct = min(0.35, _slip_base + (gross - 400_000) / 600_000 * 0.25)
+    else:
+        slippage_pct = min(0.10, _slip_base)
     effective_price = round(price * (1 - slippage_pct), 4)
 
     # Avertissement slippage AVANT la vente si significatif
