@@ -46,7 +46,7 @@ active_bj = {}          # (guild_id, user_id) -> BlackjackGame
 poker_games = {}        # guild_id -> PokerGame
 
 # ── Systèmes avancés ──────────────────────────────────────────────────
-CRYPTO_BASE = {'BTC': 45000, 'ETH': 3000, 'DOGE': 15, 'SOL': 12000, 'XRP': 60}
+CRYPTO_BASE = {'BTC': 45000, 'ETH': 3000, 'DOGE': 10, 'SOL': 12000, 'XRP': 60}
 CRYPTO_DISPLAY = {
     'BTC': 'Bitcoin 🟠', 'ETH': 'Ethereum 🔷',
     'DOGE': 'Dogecoin 🐕', 'SOL': 'Solana 🟣', 'XRP': 'Ripple 🔵'
@@ -230,8 +230,8 @@ price_history    = {}   # str(symbol) -> [float, ...]  (30 derniers points)
 crypto_trends    = {}   # str(symbol) -> float  (tendance/momentum courant)
 # Volatilité propre à chaque crypto (écart-type du bruit par tick)
 CRYPTO_VOL   = {'BTC': 0.010, 'ETH': 0.014, 'SOL': 0.018, 'XRP': 0.022, 'DOGE': 0.025}
-CRYPTO_FLOOR = {'BTC': 0.60, 'ETH': 0.60, 'SOL': 0.60, 'XRP': 0.60, 'DOGE': 0.33}
-CRYPTO_CEIL  = {'BTC': 2.00, 'ETH': 2.00, 'SOL': 2.00, 'XRP': 2.00, 'DOGE': 1.00}
+CRYPTO_FLOOR = {'BTC': 0.60, 'ETH': 0.60, 'SOL': 0.60, 'XRP': 0.60, 'DOGE': 0.50}
+CRYPTO_CEIL  = {'BTC': 2.00, 'ETH': 2.00, 'SOL': 2.00, 'XRP': 2.00, 'DOGE': 1.50}
 crypto_holdings  = {}   # str(uid) -> {symbol: float}
 safes            = {}   # str(uid) -> int
 factories        = {}   # str(uid) -> {'workers': int, 'last': ISO, 'upgraded': bool}
