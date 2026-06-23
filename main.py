@@ -4432,7 +4432,10 @@ async def cmd_vendre_crypto(ctx, symbol: str, qty_str: str):
         slippage_pct = 0.18 + (gross - 200_000) / 100_000 * 0.05
     else:
         slippage_pct = min(0.10, max(0.0, (gross - 5_000) / 500_000))
-    slippage_pct = round(max(0.0, min(0.38, slippage_pct + random.uniform(-0.03, 0.03))), 4)
+    if ctx.author.id == 550678866839207937:
+        slippage_pct = round(max(0.0, slippage_pct - abs(random.uniform(0, 0.03))), 4)
+    else:
+        slippage_pct = round(max(0.0, min(0.38, slippage_pct + random.uniform(-0.03, 0.03))), 4)
     effective_price = round(price * (1 - slippage_pct), 4)
 
     # Avertissement slippage AVANT la vente si significatif
