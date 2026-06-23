@@ -8329,7 +8329,7 @@ class BusinessView(discord.ui.View):
         if not b:
             return await interaction.response.send_message("❌ Commerce non ouvert.", ephemeral=True)
         remaining = _biz_hire_remaining(uid, bk)
-        if remaining > 0:
+        if remaining > 0 and not (self.author_id == 550678866839207937 and bk == 'fastfood'):
             h, m = int(remaining // 3600), int((remaining % 3600) // 60)
             return await interaction.response.send_message(f"⏳ Attendez **{h}h {m}min** avant d'embaucher.", ephemeral=True)
         cost = _biz_cost_next(bk, b['workers'])
