@@ -2899,11 +2899,13 @@ class BlackjackView(discord.ui.View):
 
     @discord.ui.button(label="Abandonner", style=discord.ButtonStyle.secondary, emoji="🏳️")
     async def quit_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Forfait : la mise est perdue, comme un "lose"
         game = self.game
+        uid  = self.author_id
+        half = game.bet // 2
+        coins[uid] += half
         active_bj.pop(self.key, None); save_data()
         await self._finish(interaction, "🃏 Blackjack — Abandon", 0x95a5a6,
-                           f"🏳️ **Abandon.** (-{game.bet:,} coins)")
+                           f"🏳️ **Abandon.** +{half:,} coins remboursés (moitié de la mise)")
 
     async def on_timeout(self):
         if self.key in active_bj:
