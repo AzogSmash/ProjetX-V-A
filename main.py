@@ -229,7 +229,7 @@ crypto_prices    = dict(CRYPTO_BASE)
 price_history    = {}   # str(symbol) -> [float, ...]  (30 derniers points)
 crypto_trends    = {}   # str(symbol) -> float  (tendance/momentum courant)
 # Volatilité propre à chaque crypto (écart-type du bruit par tick)
-CRYPTO_VOL = {'BTC': 0.012, 'ETH': 0.018, 'SOL': 0.025, 'XRP': 0.030, 'DOGE': 0.045}
+CRYPTO_VOL = {'BTC': 0.010, 'ETH': 0.014, 'SOL': 0.018, 'XRP': 0.022, 'DOGE': 0.025}
 crypto_holdings  = {}   # str(uid) -> {symbol: float}
 safes            = {}   # str(uid) -> int
 factories        = {}   # str(uid) -> {'workers': int, 'last': ISO, 'upgraded': bool}
@@ -401,6 +401,10 @@ def load_data():
                 daily_cooldowns  = data.get('daily_cooldowns', {})
                 work_cooldowns   = data.get('work_cooldowns', {})
                 crypto_prices    = data.get('crypto_prices', dict(CRYPTO_BASE))
+                # Clamp les prix dans la nouvelle fourchette au redémarrage
+                for _s, _b in CRYPTO_BASE.items():
+                    if _s in crypto_prices:
+                        crypto_prices[_s] = round(max(_b * 0.60, min(_b * 2.0, crypto_prices[_s])), 2)
                 price_history    = data.get('price_history', {})
                 crypto_trends    = data.get('crypto_trends', {})
                 crypto_holdings  = data.get('crypto_holdings', {})
@@ -3871,30 +3875,28 @@ async def update_crypto_prices():
         base  = CRYPTO_BASE[s]
         vol   = CRYPTO_VOL.get(s, 0.02)
 
-        # 1) Tendance persistante (momentum) — processus AR(1) :
-        #    une hausse/baisse a tendance à se prolonger sur plusieurs ticks.
-        trend = crypto_trends.get(s, 0.0) * 0.85 + random.gauss(0, vol * 0.5)
+        # 1) Momentum AR(1) — décroissance plus rapide pour éviter les dérives nocturnes
+        trend = crypto_trends.get(s, 0.0) * 0.70 + random.gauss(0, vol * 0.4)
 
-        # 2) Évènement "news" rare et irrégulier (~0.2% par crypto par tick,
-        #    soit en moyenne une news toutes les ~2-3h, à intervalles aléatoires) :
-        #    choc marqué qui lance une vraie tendance haussière ou baissière.
+        # 2) News rares (~0.2% par tick) — choc réduit à 2.5x vol au lieu de 4x
         if random.random() < 0.002:
-            shock  = random.gauss(0, vol * 4)
+            shock  = random.gauss(0, vol * 2.5)
             trend += shock
             news.append((s, 'up' if shock >= 0 else 'down', price))
 
-        # 3) Retour à la moyenne : le prix est doucement ramené vers sa base,
-        #    d'autant plus fort qu'il s'en est éloigné.
-        reversion = 0.02 * (base - price) / base
+        # 3) Retour à la moyenne renforcé : 6% par tick + accélération si prix loin de la base
+        deviation = (price - base) / base  # >0 = au-dessus, <0 = en dessous
+        reversion = -0.06 * deviation - 0.04 * deviation * abs(deviation)
 
-        # 4) Bruit de marché aléatoire de faible amplitude.
+        # 4) Bruit de marché
         noise = random.gauss(0, vol)
 
-        change    = trend + reversion + noise
+        # 5) Hard cap sur le changement par tick : ±8% max
+        change    = max(-0.08, min(0.08, trend + reversion + noise))
         new_price = price * (1 + change)
 
-        # Bornes : on évite 0 et les valeurs absurdes (entre 20% et 500% de la base).
-        new_price = round(max(base * 0.2, min(base * 5, new_price)), 2)
+        # Bornes resserrées : 60%–200% de la base (x3.3 max depuis le plancher)
+        new_price = round(max(base * 0.60, min(base * 2.0, new_price)), 2)
 
         crypto_prices[s] = new_price
         crypto_trends[s] = trend
