@@ -3930,6 +3930,15 @@ async def update_crypto_prices():
             else:
                 _trader_consec_pos[s] = 0
 
+        PRICE_CEIL  = 2.0   # plafond = base × 2.0
+        PRICE_FLOOR = 0.60  # plancher = base × 0.60
+
+        def _pos_pct(r):
+            return round((r - PRICE_FLOOR) / (PRICE_CEIL - PRICE_FLOOR) * 100)
+
+        def _cap_tgt(t, b):
+            return min(round(t, 2), round(b * 1.95, 2))
+
         # --- Signaux NEWS ---
         for s, direction, old_price in news:
             new_p    = crypto_prices[s]
@@ -3939,35 +3948,48 @@ async def update_crypto_prices():
             pct      = (new_p - old_price) / old_price * 100
             ratio    = new_p / base
             t_val    = crypto_trends.get(s, 0)
-            target   = round(new_p * (1 + min(t_val * 6, 0.30)), 2)
+            target   = _cap_tgt(new_p * (1 + min(t_val * 8, 0.25)), base)
+            pp       = _pos_pct(ratio)
 
             if direction == 'up':
-                mise = min(int(trader_bal * 0.35), 30_000) if ratio < 1.3 else min(int(trader_bal * 0.15), 10_000)
-                if held > 0:
-                    signals.append(
-                        f"🚨 **PUMP {s}** (+{pct:.1f}%) — Prix : **{new_p:,.0f}** ({ratio:.1f}×base)\n"
-                        f"Tu en as ({held:.6f} ≈ {held_val:,} coins). "
-                        f"{'Rajoute ' + str(mise) + ' coins — potentiel encore bon.' if ratio < 1.3 else 'Prix élevé, conserve sans rajouter.'}\n"
-                        f"🎯 Cible : **{target:,.0f}** · Vends sur signal 🔻."
-                    )
+                if ratio >= 1.5:
+                    if held > 0:
+                        signals.append(
+                            f"🚨 **PUMP {s}** (+{pct:.1f}%) — {new_p:,.0f} coins ({ratio:.2f}×base · {pp}% du plafond)\n"
+                            f"Zone haute ! Tu as ≈ **{held_val:,} coins**. Prépare ta sortie.\n"
+                            f"Plafond marché : {base*2:,.0f} · Vends dès que trend < 0 → `!vendre_crypto {s} all`"
+                        )
+                    else:
+                        signals.append(
+                            f"🚨 **PUMP {s}** (+{pct:.1f}%) — {new_p:,.0f} coins ({ratio:.2f}×base · {pp}% du plafond)\n"
+                            f"⚠️ Zone haute — **n'entre pas**, retournement probable proche du plafond ({base*2:,.0f})."
+                        )
                 else:
-                    signals.append(
-                        f"🚨 **PUMP {s}** (+{pct:.1f}%) — Prix : **{new_p:,.0f}** ({ratio:.1f}×base)\n"
-                        f"➡️ `!acheter_crypto {s} {mise}` ← mise suggérée\n"
-                        f"🎯 Cible : **{target:,.0f}** (~+{min(t_val*6,0.30)*100:.0f}% estimé)\n"
-                        f"Vends sur signal 🔻."
-                    )
+                    mise = min(int(trader_bal * 0.35), 30_000) if ratio < 1.1 else min(int(trader_bal * 0.20), 15_000)
+                    if held > 0:
+                        signals.append(
+                            f"🚨 **PUMP {s}** (+{pct:.1f}%) — {new_p:,.0f} coins ({ratio:.2f}×base · {pp}% du plafond)\n"
+                            f"Tu en as ({held:.6f} ≈ {held_val:,} coins). "
+                            f"{'Rajoute ' + str(mise) + ' coins — marge encore bonne.' if ratio < 1.1 else 'Conserve, potentiel modéré.'}\n"
+                            f"🎯 Cible : **{target:,.0f}** · Plafond : {base*2:,.0f}"
+                        )
+                    else:
+                        signals.append(
+                            f"🚨 **PUMP {s}** (+{pct:.1f}%) — {new_p:,.0f} coins ({ratio:.2f}×base · {pp}% du plafond)\n"
+                            f"➡️ `!acheter_crypto {s} {mise}` · 🎯 Cible : **{target:,.0f}** · Plafond : {base*2:,.0f}\n"
+                            f"Vends sur signal 🔻."
+                        )
             else:
                 if held > 0:
                     signals.append(
-                        f"💀 **DUMP {s}** ({pct:.1f}%) — Prix : **{new_p:,.0f}**\n"
+                        f"💀 **DUMP {s}** ({pct:.1f}%) — {new_p:,.0f} coins ({pp}% du plafond)\n"
                         f"⚠️ Tu détiens {held:.6f} ≈ **{held_val:,} coins** — **vends MAINTENANT** !\n"
                         f"`!vendre_crypto {s} all`"
                     )
                 else:
                     signals.append(
-                        f"📉 **DUMP {s}** ({pct:.1f}%) — Prix : **{new_p:,.0f}**\n"
-                        f"Tu n'en as pas. Attends le fond (~30min), rachète si ratio < 0.70."
+                        f"📉 **DUMP {s}** ({pct:.1f}%) — {new_p:,.0f} coins ({pp}% du plafond)\n"
+                        f"Tu n'en as pas. Plancher : {base*0.6:,.0f}. Rachète si ratio < 0.72 + trend remonte."
                     )
 
         # --- Analyse hors news ---
@@ -3983,6 +4005,7 @@ async def update_crypto_prices():
             prev_t   = _trader_prev_trends.get(s, 0)
             consec   = _trader_consec_pos.get(s, 0)
             sent     = _trader_signal_sent.get(s, {})
+            pp       = _pos_pct(ratio)
 
             def _cd_ok_signal(key, seconds):
                 last = sent.get(key)
@@ -3992,39 +4015,49 @@ async def update_crypto_prices():
             if held > 0 and t_val < -0.02 and prev_t >= 0:
                 signals.append(
                     f"🔻 **VENDS {s}** — Trend bascule négatif ({t_val:.3f})\n"
-                    f"Prix : {price:,.0f} ({ratio:.1f}×base) · Tu as ≈ **{held_val:,} coins**\n"
+                    f"Prix : {price:,.0f} ({ratio:.2f}×base · {pp}% du plafond) · Tu as ≈ **{held_val:,} coins**\n"
                     f"`!vendre_crypto {s} all`"
                 )
 
-            # ⚡ PRÉ-PUMP : 3 ticks positifs consécutifs, prix pas trop haut — CD 10min
+            # ⚡ PRÉ-PUMP : 3 ticks positifs, prix < 65% du chemin vers plafond — CD 10min
             if consec == 3 and ratio < 1.3 and t_val > 0.015 and _cd_ok_signal('pre_pump', 600):
                 mise   = min(int(trader_bal * 0.20), 15_000)
-                target = round(price * (1 + t_val * 5), 2)
+                target = _cap_tgt(price * (1 + t_val * 8), base)
                 signals.append(
-                    f"⚡ **MOMENTUM {s}** — Trend positif depuis 3 ticks (force {t_val:.3f})\n"
-                    f"Prix : {price:,.0f} ({ratio:.2f}×base) · Momentum en construction !\n"
+                    f"⚡ **PRÉ-PUMP {s}** — {consec} ticks positifs (force {t_val:.3f})\n"
+                    f"Prix : {price:,.0f} ({ratio:.2f}×base · {pp}% du plafond) · Plafond : {base*2:,.0f}\n"
                     f"➡️ `!acheter_crypto {s} {mise}` · 🎯 Cible : **{target:,.0f}**\n"
-                    f"Entre avant que ça accélère. Vends sur signal 🔻."
+                    f"Vends sur signal 🔻."
                 )
                 _trader_signal_sent.setdefault(s, {})['pre_pump'] = now.isoformat()
 
-            # 💎 SOUS-ÉVALUÉ : prix < 75% base + trend positif + pas en position — CD 30min
-            if ratio < 0.75 and t_val > 0.01 and held == 0 and _cd_ok_signal('sous_evalue', 1800):
+            # 💎 SOUS-ÉVALUÉ : prix < 75% base + trend positif + pas en position — CD 20min
+            if ratio < 0.75 and t_val > 0.01 and held == 0 and _cd_ok_signal('sous_evalue', 1200):
                 mise   = min(int(trader_bal * 0.30), 20_000)
-                target = round(base * 0.95, 2)
+                target = round(base, 2)
                 signals.append(
-                    f"💎 **SOUS-ÉVALUÉ {s}** — Prix à {ratio:.2f}×base ({price:,.0f})\n"
-                    f"➡️ `!acheter_crypto {s} {mise}` · 🎯 Cible : **{target:,.0f}** (retour vers base)\n"
-                    f"Vends sur signal 🔻 ou quand ratio > 0.90."
+                    f"💎 **SOUS-ÉVALUÉ {s}** — {pp}% du plafond · {price:,.0f} coins ({ratio:.2f}×base)\n"
+                    f"Fourchette : {base*0.6:,.0f} (plancher) → {base:,.0f} (base) → {base*2:,.0f} (plafond)\n"
+                    f"➡️ `!acheter_crypto {s} {mise}` · 🎯 Cible : **{target:,.0f}** (+{(target/price-1)*100:.0f}%)\n"
+                    f"Vends sur signal 🔻 ou quand ratio > 0.92."
                 )
                 _trader_signal_sent.setdefault(s, {})['sous_evalue'] = now.isoformat()
 
-            # ⛰️ SOMMET : prix > 1.7×base + trend faiblit + en position — CD 30min
-            if ratio > 1.7 and held > 0 and t_val < 0.03 and _cd_ok_signal('sommet', 1800):
+            # 🔔 ZONE DE VENTE : 75%+ du chemin vers plafond + en position — CD 20min
+            if ratio > 1.5 and held > 0 and t_val > -0.01 and _cd_ok_signal('zone_vente', 1200):
                 signals.append(
-                    f"⛰️ **SOMMET {s}** — Prix à {ratio:.1f}×base ({price:,.0f}), proche du plafond\n"
-                    f"Trend faiblit ({t_val:.3f}) · Tu as ≈ **{held_val:,} coins**\n"
-                    f"Vends si trend < 0 → `!vendre_crypto {s} all`"
+                    f"🔔 **ZONE DE VENTE {s}** — {pp}% du plafond · {price:,.0f} ({ratio:.2f}×base)\n"
+                    f"Tu as ≈ **{held_val:,} coins**. Plafond : {base*2:,.0f}.\n"
+                    f"Prépare ta sortie — vends dès que trend < 0 → `!vendre_crypto {s} all`"
+                )
+                _trader_signal_sent.setdefault(s, {})['zone_vente'] = now.isoformat()
+
+            # ⛰️ SOMMET : 87%+ du chemin + trend faiblit + en position — CD 20min
+            if ratio > 1.75 and held > 0 and t_val < 0.03 and _cd_ok_signal('sommet', 1200):
+                signals.append(
+                    f"⛰️ **SOMMET {s}** — {pp}% du plafond · {price:,.0f} ({ratio:.2f}×base)\n"
+                    f"Trend faiblit ({t_val:.3f}) · Tu as ≈ **{held_val:,} coins** · Plafond : {base*2:,.0f}\n"
+                    f"**Vends maintenant** → `!vendre_crypto {s} all`"
                 )
                 _trader_signal_sent.setdefault(s, {})['sommet'] = now.isoformat()
 
@@ -4209,7 +4242,13 @@ async def cmd_crypto(ctx):
             val = total_qty * crypto_prices.get(s, 0)
             cw_total += val
             unlocked_qty = sum(b['qty'] for b in batches if datetime.fromisoformat(b['locked_until']) <= now_dt)
-            lock_str = "✅" if unlocked_qty >= total_qty - 0.000001 else f"🔒 {unlocked_qty:.6f}✅ / {total_qty - unlocked_qty:.6f}🔒"
+            locked_qty = total_qty - unlocked_qty
+            if unlocked_qty < 0.000001:
+                lock_str = f"🔒 tout verrouillé"
+            elif locked_qty < 0.000001:
+                lock_str = "✅ tout disponible"
+            else:
+                lock_str = f"✅ {unlocked_qty:.6f} dispo · 🔒 {locked_qty:.6f} verrouillé"
             cw_lines.append(f"**{s}** : {total_qty:.6f} ≈ {val:,.0f} coins — {lock_str}")
         embed.add_field(name="🔐 Cold Wallet (sécurisé)",
             value='\n'.join(cw_lines) + f"\n📊 Total ≈ **{cw_total:,.0f} coins**", inline=False)
