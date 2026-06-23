@@ -267,6 +267,7 @@ _trader_signal_sent  = {}   # symbol -> {type: ISO} — anti-spam sur signaux r�
 crypto_buy_cooldowns = {}   # str(uid) -> {symbol: ISO} — CD 30min entre achats du même symbole
 crypto_hold_since    = {}   # str(uid) -> {symbol: ISO} — timestamp dernier achat (hold min 10min)
 cold_wallets         = {}   # str(uid) -> {symbol: {'qty': float, 'locked_until': ISO}}
+crypto_market_frozen = True  # si True, achats et ventes crypto désactivés
 
 # ── Configuration prix / mises (modifiable par !prix_casino) ─────────────
 BOT_OWNER_ID = 1056848438270115900   # happy_gt3 — créateur du bot
@@ -4258,6 +4259,8 @@ async def cmd_graphique(ctx, symbol: str = None):
 
 @bot.command(name="acheter_crypto", aliases=["buyc", "achat_crypto"])
 async def cmd_acheter_crypto(ctx, symbol: str, montant: str):
+    if crypto_market_frozen:
+        return await ctx.send("🔒 Le marché crypto est temporairement suspendu. Revenez plus tard !")
     symbol = symbol.upper()
     if symbol not in CRYPTO_SYMBOLS:
         return await ctx.send(f"❌ Symbole invalide. Disponibles : {', '.join(CRYPTO_SYMBOLS)}")
@@ -4317,6 +4320,8 @@ async def cmd_acheter_crypto(ctx, symbol: str, montant: str):
 
 @bot.command(name="vendre_crypto", aliases=["vc", "sellc"])
 async def cmd_vendre_crypto(ctx, symbol: str, qty_str: str):
+    if crypto_market_frozen:
+        return await ctx.send("🔒 Le marché crypto est temporairement suspendu. Revenez plus tard !")
     symbol = symbol.upper()
     if symbol not in CRYPTO_SYMBOLS:
         return await ctx.send(f"❌ Symbole invalide. Disponibles : {', '.join(CRYPTO_SYMBOLS)}")
@@ -6481,6 +6486,16 @@ async def cmd_lancer_course(ctx):
     save_data()
     await ctx.send(embed=embed)
 
+
+# ── Admin — marché crypto ─────────────────────────────────────────────────
+
+@bot.command(name="freeze_crypto", aliases=["crypto_freeze", "market_freeze"])
+@commands.has_permissions(administrator=True)
+async def cmd_freeze_crypto(ctx):
+    global crypto_market_frozen
+    crypto_market_frozen = not crypto_market_frozen
+    state = "🔒 **suspendu**" if crypto_market_frozen else "✅ **rouvert**"
+    await ctx.send(f"Marché crypto {state}.")
 
 # ── Admin — gestion des coins ─────────────────────────────────────────────
 
