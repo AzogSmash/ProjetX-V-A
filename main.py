@@ -4354,11 +4354,16 @@ async def cmd_acheter_crypto(ctx, symbol: str, montant: str):
     qty = montant / price
 
     # Avertissement : slippage qui s'appliquerait si revente immédiate
-    _slip_base = max(0.0, (montant - 5_000) / 500_000)
-    if montant > 400_000:
-        sell_slip_pct = min(0.35, _slip_base + (montant - 400_000) / 600_000 * 0.25)
+    if montant >= 500_000:
+        sell_slip_pct = 0.35
+    elif montant >= 400_000:
+        sell_slip_pct = 0.28 + (montant - 400_000) / 100_000 * 0.07
+    elif montant >= 300_000:
+        sell_slip_pct = 0.23 + (montant - 300_000) / 100_000 * 0.05
+    elif montant >= 200_000:
+        sell_slip_pct = 0.18 + (montant - 200_000) / 100_000 * 0.05
     else:
-        sell_slip_pct = min(0.10, _slip_base)
+        sell_slip_pct = min(0.10, max(0.0, (montant - 5_000) / 500_000))
     if sell_slip_pct >= 0.01:
         coins_perdus = int(montant * sell_slip_pct)
         await ctx.send(
@@ -4414,12 +4419,17 @@ async def cmd_vendre_crypto(ctx, symbol: str, qty_str: str):
     price = crypto_prices[symbol]
     gross = qty * price
 
-    # Slippage progressif : 0→10% jusqu'à 400k, puis 10→35% au-delà
-    _slip_base = max(0.0, (gross - 5_000) / 500_000)
-    if gross > 400_000:
-        slippage_pct = min(0.35, _slip_base + (gross - 400_000) / 600_000 * 0.25)
+    # Slippage progressif : 0→10% sous 200k, puis 18→35% au-delà
+    if gross >= 500_000:
+        slippage_pct = 0.35
+    elif gross >= 400_000:
+        slippage_pct = 0.28 + (gross - 400_000) / 100_000 * 0.07
+    elif gross >= 300_000:
+        slippage_pct = 0.23 + (gross - 300_000) / 100_000 * 0.05
+    elif gross >= 200_000:
+        slippage_pct = 0.18 + (gross - 200_000) / 100_000 * 0.05
     else:
-        slippage_pct = min(0.10, _slip_base)
+        slippage_pct = min(0.10, max(0.0, (gross - 5_000) / 500_000))
     effective_price = round(price * (1 - slippage_pct), 4)
 
     # Avertissement slippage AVANT la vente si significatif
