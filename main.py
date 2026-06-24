@@ -3976,9 +3976,9 @@ async def update_crypto_prices():
             # Potentiel ×N depuis le prix actuel jusqu'au plafond
             pot_x    = round(ceil_p / price, 2) if price > 0 else 0
 
-            def _cd_ok_signal(key, seconds):
-                last = sent.get(key)
-                return not last or (now - datetime.fromisoformat(last)).total_seconds() > seconds
+            # Retournements de tendance — un signal par creux/sommet, pas par tick
+            trend_crossed_up   = prev_t < -0.005 and t_val > 0.005   # creux local : trend repasse positif
+            trend_crossed_down = prev_t > 0.005  and t_val < -0.005  # sommet local : trend repasse négatif
 
             # 💀 DUMP NEWS urgent — uniquement si en position
             for s2, direction, old_price in news:
@@ -3991,40 +3991,38 @@ async def update_crypto_prices():
                     f"`!vendre_crypto {s} all`"
                 )
 
-            # 🔻 VENDS — trend bascule négatif fort (pas de CD, critique)
-            if held > 0 and t_val < -0.02 and prev_t >= 0:
-                signals.append(
-                    f"🔻 **VENDS {s}** — trend négatif ({t_val:.3f})\n"
-                    f"Prix : {price:,.0f} · Tu as ≈ **{held_val:,} coins**\n"
-                    f"`!vendre_crypto {s} all`"
-                )
+            # Signaux baissiers — uniquement au retournement négatif (sommet local)
+            if trend_crossed_down and held > 0:
+                ratio_pos = (ratio - fl) / max(cl - fl, 0.001)  # 0=plancher, 1=plafond
+                if ratio_pos >= 0.65:
+                    signals.append(
+                        f"⛰️ **SOMMET {s}** — {price:,.0f} coins ({ratio:.2f}×base)\n"
+                        f"Trend vient de basculer négatif · Tu as ≈ **{held_val:,} coins**\n"
+                        f"**Vends maintenant** → `!vendre_crypto {s} all`"
+                    )
+                else:
+                    signals.append(
+                        f"🔻 **VENDS {s}** — trend bascule négatif ({t_val:.3f})\n"
+                        f"Prix : {price:,.0f} · Tu as ≈ **{held_val:,} coins**\n"
+                        f"`!vendre_crypto {s} all`"
+                    )
 
-            # ⛰️ SOMMET — prix > 90% du chemin vers plafond + trend faiblit — CD 30min
-            if ratio > (fl + (cl - fl) * 0.88) and held > 0 and t_val < 0.02 and _cd_ok_signal('sommet', 1800):
-                signals.append(
-                    f"⛰️ **SOMMET {s}** — {price:,.0f} coins ({ratio:.2f}×base · {pot_x:.1f}× vers plafond)\n"
-                    f"Trend faiblit ({t_val:.3f}) · Tu as ≈ **{held_val:,} coins**\n"
-                    f"**Vends maintenant** → `!vendre_crypto {s} all`"
-                )
-                _trader_signal_sent.setdefault(s, {})['sommet'] = now.isoformat()
-
-            # 💎 OPPORTUNITÉ ×2 — sans CD, signal à chaque tick tant que le prix reste bas
-            if pot_x >= 2.0 and pot_x < 3.0:
-                action = f"Tu en as déjà ≈ **{held_val:,} coins**." if held > 0 else f"➡️ `!acheter_crypto {s} <montant>`"
-                signals.append(
-                    f"💎 **OPPORTUNITÉ ×{pot_x:.1f} {s}** — {price:,.0f} coins\n"
-                    f"Plancher : {floor_p:,.0f} · Plafond : {ceil_p:,.0f} · Potentiel : **×{pot_x:.1f}**\n"
-                    f"{action}"
-                )
-
-            # 🔥 EXCEPTIONNEL ×3 — sans CD, signal à chaque tick
-            if pot_x >= 3.0:
-                action = f"Tu en as déjà ≈ **{held_val:,} coins** — **rajoute**." if held > 0 else f"➡️ `!acheter_crypto {s} <montant>`"
-                signals.append(
-                    f"🔥 **EXCEPTIONNEL ×{pot_x:.1f} {s}** — {price:,.0f} coins\n"
-                    f"Plancher : {floor_p:,.0f} · Plafond : {ceil_p:,.0f} · Potentiel : **×{pot_x:.1f}**\n"
-                    f"{action} — C'est maintenant ou jamais."
-                )
+            # Signaux haussiers — uniquement au retournement positif (creux local)
+            if trend_crossed_up:
+                if pot_x >= 3.0:
+                    action = f"Tu en as déjà ≈ **{held_val:,} coins** — **rajoute**." if held > 0 else f"➡️ `!acheter_crypto {s} <montant>`"
+                    signals.append(
+                        f"🔥 **CREUX LOCAL ×{pot_x:.1f} {s}** — {price:,.0f} coins\n"
+                        f"Plancher : {floor_p:,.0f} · Plafond : {ceil_p:,.0f} · Potentiel : **×{pot_x:.1f}**\n"
+                        f"{action} — Le trend vient de repartir à la hausse."
+                    )
+                elif pot_x >= 2.0:
+                    action = f"Tu en as déjà ≈ **{held_val:,} coins**." if held > 0 else f"➡️ `!acheter_crypto {s} <montant>`"
+                    signals.append(
+                        f"💎 **CREUX LOCAL ×{pot_x:.1f} {s}** — {price:,.0f} coins\n"
+                        f"Plancher : {floor_p:,.0f} · Plafond : {ceil_p:,.0f} · Potentiel : **×{pot_x:.1f}**\n"
+                        f"{action}"
+                    )
 
         # Mise à jour trends précédents
         for s in CRYPTO_SYMBOLS:
