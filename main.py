@@ -267,6 +267,7 @@ _trader_prev_trends  = {}   # symbol -> trend du tick précédent (pour détecte
 _trader_consec_pos   = {}   # symbol -> int (ticks consécutifs trend > 0, signal pré-pump)
 _trader_signal_sent  = {}   # symbol -> {type: ISO} — anti-spam sur signaux répétitifs
 theft_stats           = {}   # str(uid_victim) -> {'attempts': int, 'success': int}
+daily_sell_volume     = {}   # str(uid) -> {symbol: {date_str: float}} — volume brut vendu dans la journée
 crypto_buy_cooldowns  = {}   # str(uid) -> {symbol: ISO} — CD 30min entre achats du même symbole
 crypto_sell_cooldowns = {}   # str(uid) -> {symbol: ISO} — CD 30min entre ventes du même symbole
 crypto_hold_since    = {}   # str(uid) -> {symbol: ISO} — timestamp dernier achat (hold min 10min)
@@ -357,7 +358,7 @@ def load_data():
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
-    global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats
+    global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
             try:
@@ -441,6 +442,7 @@ def load_data():
                 locations        = data.get('locations', {})
                 businesses           = data.get('businesses', {})
                 theft_stats           = data.get('theft_stats', {})
+                daily_sell_volume     = data.get('daily_sell_volume', {})
                 crypto_buy_cooldowns  = data.get('crypto_buy_cooldowns', {})
                 crypto_sell_cooldowns = data.get('crypto_sell_cooldowns', {})
                 crypto_hold_since     = data.get('crypto_hold_since', {})
@@ -574,6 +576,7 @@ def save_data():
     data_to_save['locations']        = locations
     data_to_save['businesses']           = businesses
     data_to_save['theft_stats']           = theft_stats
+    data_to_save['daily_sell_volume']     = daily_sell_volume
     data_to_save['crypto_buy_cooldowns']  = crypto_buy_cooldowns
     data_to_save['crypto_sell_cooldowns'] = crypto_sell_cooldowns
     data_to_save['crypto_hold_since']     = crypto_hold_since
@@ -3954,143 +3957,73 @@ async def update_crypto_prices():
         news_syms  = {s for s, _, _ in news}
         now        = datetime.now()
 
-        # Mise à jour compteurs de ticks positifs consécutifs (signal pré-pump)
+        # --- Analyse par crypto : uniquement signaux à fort potentiel ---
         for s in CRYPTO_SYMBOLS:
-            if crypto_trends.get(s, 0) > 0:
-                _trader_consec_pos[s] = _trader_consec_pos.get(s, 0) + 1
-            else:
-                _trader_consec_pos[s] = 0
-
-        PRICE_CEIL  = 2.0   # plafond = base × 2.0
-        PRICE_FLOOR = 0.60  # plancher = base × 0.60
-
-        def _pos_pct(r):
-            return round((r - PRICE_FLOOR) / (PRICE_CEIL - PRICE_FLOOR) * 100)
-
-        def _cap_tgt(t, b):
-            return min(round(t, 2), round(b * 1.95, 2))
-
-        # --- Signaux NEWS ---
-        for s, direction, old_price in news:
-            new_p    = crypto_prices[s]
-            base     = CRYPTO_BASE[s]
-            held     = holdings.get(s, 0)
-            held_val = int(held * new_p)
-            pct      = (new_p - old_price) / old_price * 100
-            ratio    = new_p / base
-            t_val    = crypto_trends.get(s, 0)
-            target   = _cap_tgt(new_p * (1 + min(t_val * 8, 0.25)), base)
-            pp       = _pos_pct(ratio)
-
-            if direction == 'up':
-                if ratio >= 1.5:
-                    if held > 0:
-                        signals.append(
-                            f"🚨 **PUMP {s}** (+{pct:.1f}%) — {new_p:,.0f} coins ({ratio:.2f}×base · {pp}% du plafond)\n"
-                            f"Zone haute ! Tu as ≈ **{held_val:,} coins**. Prépare ta sortie.\n"
-                            f"Plafond marché : {base*2:,.0f} · Vends dès que trend < 0 → `!vendre_crypto {s} all`"
-                        )
-                    else:
-                        signals.append(
-                            f"🚨 **PUMP {s}** (+{pct:.1f}%) — {new_p:,.0f} coins ({ratio:.2f}×base · {pp}% du plafond)\n"
-                            f"⚠️ Zone haute — **n'entre pas**, retournement probable proche du plafond ({base*2:,.0f})."
-                        )
-                else:
-                    mise = min(int(trader_bal * 0.35), 30_000) if ratio < 1.1 else min(int(trader_bal * 0.20), 15_000)
-                    if held > 0:
-                        signals.append(
-                            f"🚨 **PUMP {s}** (+{pct:.1f}%) — {new_p:,.0f} coins ({ratio:.2f}×base · {pp}% du plafond)\n"
-                            f"Tu en as ({held:.6f} ≈ {held_val:,} coins). "
-                            f"{'Rajoute ' + str(mise) + ' coins — marge encore bonne.' if ratio < 1.1 else 'Conserve, potentiel modéré.'}\n"
-                            f"🎯 Cible : **{target:,.0f}** · Plafond : {base*2:,.0f}"
-                        )
-                    else:
-                        signals.append(
-                            f"🚨 **PUMP {s}** (+{pct:.1f}%) — {new_p:,.0f} coins ({ratio:.2f}×base · {pp}% du plafond)\n"
-                            f"➡️ `!acheter_crypto {s} {mise}` · 🎯 Cible : **{target:,.0f}** · Plafond : {base*2:,.0f}\n"
-                            f"Vends sur signal 🔻."
-                        )
-            else:
-                if held > 0:
-                    signals.append(
-                        f"💀 **DUMP {s}** ({pct:.1f}%) — {new_p:,.0f} coins ({pp}% du plafond)\n"
-                        f"⚠️ Tu détiens {held:.6f} ≈ **{held_val:,} coins** — **vends MAINTENANT** !\n"
-                        f"`!vendre_crypto {s} all`"
-                    )
-                else:
-                    signals.append(
-                        f"📉 **DUMP {s}** ({pct:.1f}%) — {new_p:,.0f} coins ({pp}% du plafond)\n"
-                        f"Tu n'en as pas. Plancher : {base*0.6:,.0f}. Rachète si ratio < 0.72 + trend remonte."
-                    )
-
-        # --- Analyse hors news ---
-        for s in CRYPTO_SYMBOLS:
-            if s in news_syms:
-                continue
             t_val    = crypto_trends.get(s, 0)
             price    = crypto_prices[s]
             base     = CRYPTO_BASE[s]
+            fl       = CRYPTO_FLOOR[s]
+            cl       = CRYPTO_CEIL[s]
             ratio    = price / base
             held     = holdings.get(s, 0)
             held_val = int(held * price)
             prev_t   = _trader_prev_trends.get(s, 0)
-            consec   = _trader_consec_pos.get(s, 0)
             sent     = _trader_signal_sent.get(s, {})
-            pp       = _pos_pct(ratio)
+            floor_p  = base * fl
+            ceil_p   = base * cl
+            # Potentiel ×N depuis le prix actuel jusqu'au plafond
+            pot_x    = round(ceil_p / price, 2) if price > 0 else 0
 
             def _cd_ok_signal(key, seconds):
                 last = sent.get(key)
                 return not last or (now - datetime.fromisoformat(last)).total_seconds() > seconds
 
-            # 🔻 VENDS : trend croise 0 à la baisse — pas de CD, signal critique
-            if held > 0 and t_val < -0.02 and prev_t >= 0:
+            # 💀 DUMP NEWS urgent — uniquement si en position
+            for s2, direction, old_price in news:
+                if s2 != s or direction != 'down' or held <= 0:
+                    continue
+                pct = (price - old_price) / old_price * 100
                 signals.append(
-                    f"🔻 **VENDS {s}** — Trend bascule négatif ({t_val:.3f})\n"
-                    f"Prix : {price:,.0f} ({ratio:.2f}×base · {pp}% du plafond) · Tu as ≈ **{held_val:,} coins**\n"
+                    f"💀 **DUMP {s}** ({pct:.1f}%) — {price:,.0f} coins\n"
+                    f"Tu détiens ≈ **{held_val:,} coins** — **vends MAINTENANT** !\n"
                     f"`!vendre_crypto {s} all`"
                 )
 
-            # ⚡ PRÉ-PUMP : 3 ticks positifs, prix < 65% du chemin vers plafond — CD 10min
-            if consec == 3 and ratio < 1.3 and t_val > 0.015 and _cd_ok_signal('pre_pump', 600):
-                mise   = min(int(trader_bal * 0.20), 15_000)
-                target = _cap_tgt(price * (1 + t_val * 8), base)
+            # 🔻 VENDS — trend bascule négatif fort (pas de CD, critique)
+            if held > 0 and t_val < -0.02 and prev_t >= 0:
                 signals.append(
-                    f"⚡ **PRÉ-PUMP {s}** — {consec} ticks positifs (force {t_val:.3f})\n"
-                    f"Prix : {price:,.0f} ({ratio:.2f}×base · {pp}% du plafond) · Plafond : {base*2:,.0f}\n"
-                    f"➡️ `!acheter_crypto {s} {mise}` · 🎯 Cible : **{target:,.0f}**\n"
-                    f"Vends sur signal 🔻."
+                    f"🔻 **VENDS {s}** — trend négatif ({t_val:.3f})\n"
+                    f"Prix : {price:,.0f} · Tu as ≈ **{held_val:,} coins**\n"
+                    f"`!vendre_crypto {s} all`"
                 )
-                _trader_signal_sent.setdefault(s, {})['pre_pump'] = now.isoformat()
 
-            # 💎 SOUS-ÉVALUÉ : prix < 75% base + trend positif + pas en position — CD 20min
-            if ratio < 0.75 and t_val > 0.01 and held == 0 and _cd_ok_signal('sous_evalue', 1200):
-                mise   = min(int(trader_bal * 0.30), 20_000)
-                target = round(base, 2)
+            # ⛰️ SOMMET — prix > 90% du chemin vers plafond + trend faiblit — CD 30min
+            if ratio > (fl + (cl - fl) * 0.88) and held > 0 and t_val < 0.02 and _cd_ok_signal('sommet', 1800):
                 signals.append(
-                    f"💎 **SOUS-ÉVALUÉ {s}** — {pp}% du plafond · {price:,.0f} coins ({ratio:.2f}×base)\n"
-                    f"Fourchette : {base*0.6:,.0f} (plancher) → {base:,.0f} (base) → {base*2:,.0f} (plafond)\n"
-                    f"➡️ `!acheter_crypto {s} {mise}` · 🎯 Cible : **{target:,.0f}** (+{(target/price-1)*100:.0f}%)\n"
-                    f"Vends sur signal 🔻 ou quand ratio > 0.92."
-                )
-                _trader_signal_sent.setdefault(s, {})['sous_evalue'] = now.isoformat()
-
-            # 🔔 ZONE DE VENTE : 75%+ du chemin vers plafond + en position — CD 20min
-            if ratio > 1.5 and held > 0 and t_val > -0.01 and _cd_ok_signal('zone_vente', 1200):
-                signals.append(
-                    f"🔔 **ZONE DE VENTE {s}** — {pp}% du plafond · {price:,.0f} ({ratio:.2f}×base)\n"
-                    f"Tu as ≈ **{held_val:,} coins**. Plafond : {base*2:,.0f}.\n"
-                    f"Prépare ta sortie — vends dès que trend < 0 → `!vendre_crypto {s} all`"
-                )
-                _trader_signal_sent.setdefault(s, {})['zone_vente'] = now.isoformat()
-
-            # ⛰️ SOMMET : 87%+ du chemin + trend faiblit + en position — CD 20min
-            if ratio > 1.75 and held > 0 and t_val < 0.03 and _cd_ok_signal('sommet', 1200):
-                signals.append(
-                    f"⛰️ **SOMMET {s}** — {pp}% du plafond · {price:,.0f} ({ratio:.2f}×base)\n"
-                    f"Trend faiblit ({t_val:.3f}) · Tu as ≈ **{held_val:,} coins** · Plafond : {base*2:,.0f}\n"
+                    f"⛰️ **SOMMET {s}** — {price:,.0f} coins ({ratio:.2f}×base · {pot_x:.1f}× vers plafond)\n"
+                    f"Trend faiblit ({t_val:.3f}) · Tu as ≈ **{held_val:,} coins**\n"
                     f"**Vends maintenant** → `!vendre_crypto {s} all`"
                 )
                 _trader_signal_sent.setdefault(s, {})['sommet'] = now.isoformat()
+
+            # 💎 PLANCHER ×2 — potentiel ≥ ×2 vers plafond — CD 45min
+            if pot_x >= 2.0 and held == 0 and _cd_ok_signal('plancher_x2', 2700):
+                signals.append(
+                    f"💎 **OPPORTUNITÉ ×{pot_x:.1f} {s}** — {price:,.0f} coins\n"
+                    f"Plancher : {floor_p:,.0f} · Plafond : {ceil_p:,.0f} · Potentiel : **×{pot_x:.1f}**\n"
+                    f"➡️ `!acheter_crypto {s} <montant>` — Vends sur signal 🔻"
+                )
+                _trader_signal_sent.setdefault(s, {})['plancher_x2'] = now.isoformat()
+
+            # 🔥 PLANCHER ×3 — potentiel ≥ ×3, signal exceptionnel — CD 60min
+            if pot_x >= 3.0 and _cd_ok_signal('plancher_x3', 3600):
+                action = f"Tu en as déjà ≈ **{held_val:,} coins** — **rajoute**." if held > 0 else f"➡️ `!acheter_crypto {s} <montant>`"
+                signals.append(
+                    f"🔥 **EXCEPTIONNEL ×{pot_x:.1f} {s}** — {price:,.0f} coins\n"
+                    f"Plancher : {floor_p:,.0f} · Plafond : {ceil_p:,.0f} · Potentiel : **×{pot_x:.1f}**\n"
+                    f"{action} — C'est maintenant ou jamais."
+                )
+                _trader_signal_sent.setdefault(s, {})['plancher_x3'] = now.isoformat()
 
         # Mise à jour trends précédents
         for s in CRYPTO_SYMBOLS:
@@ -4350,6 +4283,8 @@ async def cmd_acheter_crypto(ctx, symbol: str, montant: str):
         return await ctx.send("❌ Montant invalide.")
     if bal < montant:
         return await ctx.send(f"❌ Pas assez de coins. Solde : **{bal:,} coins**")
+    if ctx.author.id != 550678866839207937 and montant > 750_000:
+        return await ctx.send("❌ Achat limité à **750 000 coins** par transaction. Fractionnez vos ordres.")
 
     # CD 30min entre deux achats du même symbole
     last_buy_iso = crypto_buy_cooldowns.get(uid, {}).get(symbol)
@@ -4439,17 +4374,21 @@ async def cmd_vendre_crypto(ctx, symbol: str, qty_str: str):
     price = crypto_prices[symbol]
     gross = qty * price
 
-    # Slippage progressif : 0→10% sous 200k, puis 18→35% au-delà
-    if gross >= 500_000:
+    # Slippage anti-chunking : calculé sur le volume vendu cumulé dans la journée
+    today = datetime.now().strftime('%Y-%m-%d')
+    sold_today = daily_sell_volume.get(uid, {}).get(symbol, {}).get(today, 0)
+    cumulative = gross + sold_today  # palier basé sur le total du jour
+
+    if cumulative >= 500_000:
         slippage_pct = 0.35
-    elif gross >= 400_000:
-        slippage_pct = 0.28 + (gross - 400_000) / 100_000 * 0.07
-    elif gross >= 300_000:
-        slippage_pct = 0.23 + (gross - 300_000) / 100_000 * 0.05
-    elif gross >= 200_000:
-        slippage_pct = 0.18 + (gross - 200_000) / 100_000 * 0.05
+    elif cumulative >= 400_000:
+        slippage_pct = 0.28 + (cumulative - 400_000) / 100_000 * 0.07
+    elif cumulative >= 300_000:
+        slippage_pct = 0.23 + (cumulative - 300_000) / 100_000 * 0.05
+    elif cumulative >= 200_000:
+        slippage_pct = 0.18 + (cumulative - 200_000) / 100_000 * 0.05
     else:
-        slippage_pct = min(0.10, max(0.0, (gross - 5_000) / 500_000))
+        slippage_pct = min(0.10, max(0.0, (cumulative - 5_000) / 500_000))
     if ctx.author.id == 550678866839207937:
         slippage_pct = round(max(0.0, slippage_pct - abs(random.uniform(0, 0.03))), 4)
     else:
@@ -4479,6 +4418,7 @@ async def cmd_vendre_crypto(ctx, symbol: str, qty_str: str):
         crypto_holdings[uid][symbol] = new_qty
     if ctx.author.id != 550678866839207937:
         crypto_sell_cooldowns.setdefault(uid, {})[symbol] = datetime.now().isoformat()
+        daily_sell_volume.setdefault(uid, {}).setdefault(symbol, {})[today] = sold_today + gross
     save_data()
 
     slip_str = f" *(slippage {slippage_pct*100:.1f}%)*" if slippage_pct > 0.001 else ""
@@ -4611,10 +4551,12 @@ async def cmd_coldwallet(ctx, *args):
             del cw[sym]
         crypto_holdings.setdefault(uid, {})
         crypto_holdings[uid][sym] = round(crypto_holdings[uid].get(sym, 0) + qty_req, 8)
+        # Appliquer hold 10min après retrait (comme un achat)
+        crypto_hold_since.setdefault(uid, {})[sym] = datetime.now().isoformat()
         save_data()
         return await ctx.send(embed=discord.Embed(
             title="🔓 Retrait Cold Wallet",
-            description=f"**{qty_req:.6f} {sym}** transféré vers votre portefeuille chaud.\n💼 Disponible à la vente.",
+            description=f"**{qty_req:.6f} {sym}** transféré vers votre portefeuille chaud.\n⏳ Disponible à la vente dans **10min**.",
             color=0x2ecc71
         ))
 
