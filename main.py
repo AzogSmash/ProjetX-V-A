@@ -272,7 +272,7 @@ crypto_buy_cooldowns  = {}   # str(uid) -> {symbol: ISO} — CD 30min entre acha
 crypto_sell_cooldowns = {}   # str(uid) -> {symbol: ISO} — CD 30min entre ventes du même symbole
 crypto_hold_since    = {}   # str(uid) -> {symbol: ISO} — timestamp dernier achat (hold min 10min)
 cold_wallets         = {}   # str(uid) -> {symbol: {'qty': float, 'locked_until': ISO}}
-crypto_market_frozen = True  # si True, achats et ventes crypto désactivés
+crypto_market_frozen = False  # si True, achats et ventes crypto désactivés
 
 # ── Configuration prix / mises (modifiable par !prix_casino) ─────────────
 BOT_OWNER_ID = 1056848438270115900   # happy_gt3 — créateur du bot
@@ -358,7 +358,7 @@ def load_data():
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
-    global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume
+    global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
             try:
@@ -443,6 +443,7 @@ def load_data():
                 businesses           = data.get('businesses', {})
                 theft_stats           = data.get('theft_stats', {})
                 daily_sell_volume     = data.get('daily_sell_volume', {})
+                crypto_market_frozen  = data.get('crypto_market_frozen', False)
                 crypto_buy_cooldowns  = data.get('crypto_buy_cooldowns', {})
                 crypto_sell_cooldowns = data.get('crypto_sell_cooldowns', {})
                 crypto_hold_since     = data.get('crypto_hold_since', {})
@@ -577,6 +578,7 @@ def save_data():
     data_to_save['businesses']           = businesses
     data_to_save['theft_stats']           = theft_stats
     data_to_save['daily_sell_volume']     = daily_sell_volume
+    data_to_save['crypto_market_frozen']  = crypto_market_frozen
     data_to_save['crypto_buy_cooldowns']  = crypto_buy_cooldowns
     data_to_save['crypto_sell_cooldowns'] = crypto_sell_cooldowns
     data_to_save['crypto_hold_since']     = crypto_hold_since
