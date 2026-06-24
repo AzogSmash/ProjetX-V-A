@@ -4006,24 +4006,23 @@ async def update_crypto_prices():
                 )
                 _trader_signal_sent.setdefault(s, {})['sommet'] = now.isoformat()
 
-            # 💎 PLANCHER ×2 — potentiel ≥ ×2 vers plafond — CD 45min
-            if pot_x >= 2.0 and held == 0 and _cd_ok_signal('plancher_x2', 2700):
+            # 💎 OPPORTUNITÉ ×2 — sans CD, signal à chaque tick tant que le prix reste bas
+            if pot_x >= 2.0 and pot_x < 3.0:
+                action = f"Tu en as déjà ≈ **{held_val:,} coins**." if held > 0 else f"➡️ `!acheter_crypto {s} <montant>`"
                 signals.append(
                     f"💎 **OPPORTUNITÉ ×{pot_x:.1f} {s}** — {price:,.0f} coins\n"
                     f"Plancher : {floor_p:,.0f} · Plafond : {ceil_p:,.0f} · Potentiel : **×{pot_x:.1f}**\n"
-                    f"➡️ `!acheter_crypto {s} <montant>` — Vends sur signal 🔻"
+                    f"{action}"
                 )
-                _trader_signal_sent.setdefault(s, {})['plancher_x2'] = now.isoformat()
 
-            # 🔥 PLANCHER ×3 — potentiel ≥ ×3, signal exceptionnel — CD 60min
-            if pot_x >= 3.0 and _cd_ok_signal('plancher_x3', 3600):
+            # 🔥 EXCEPTIONNEL ×3 — sans CD, signal à chaque tick
+            if pot_x >= 3.0:
                 action = f"Tu en as déjà ≈ **{held_val:,} coins** — **rajoute**." if held > 0 else f"➡️ `!acheter_crypto {s} <montant>`"
                 signals.append(
                     f"🔥 **EXCEPTIONNEL ×{pot_x:.1f} {s}** — {price:,.0f} coins\n"
                     f"Plancher : {floor_p:,.0f} · Plafond : {ceil_p:,.0f} · Potentiel : **×{pot_x:.1f}**\n"
                     f"{action} — C'est maintenant ou jamais."
                 )
-                _trader_signal_sent.setdefault(s, {})['plancher_x3'] = now.isoformat()
 
         # Mise à jour trends précédents
         for s in CRYPTO_SYMBOLS:
