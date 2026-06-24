@@ -266,7 +266,8 @@ draft_sessions       = {}   # channel_id -> session dict (phase de ban Brawl Sta
 _trader_prev_trends  = {}   # symbol -> trend du tick précédent (pour détecter les croisements)
 _trader_consec_pos   = {}   # symbol -> int (ticks consécutifs trend > 0, signal pré-pump)
 _trader_signal_sent  = {}   # symbol -> {type: ISO} — anti-spam sur signaux répétitifs
-crypto_buy_cooldowns = {}   # str(uid) -> {symbol: ISO} — CD 30min entre achats du même symbole
+crypto_buy_cooldowns  = {}   # str(uid) -> {symbol: ISO} — CD 30min entre achats du même symbole
+crypto_sell_cooldowns = {}   # str(uid) -> {symbol: ISO} — CD 30min entre ventes du même symbole
 crypto_hold_since    = {}   # str(uid) -> {symbol: ISO} — timestamp dernier achat (hold min 10min)
 cold_wallets         = {}   # str(uid) -> {symbol: {'qty': float, 'locked_until': ISO}}
 crypto_market_frozen = True  # si True, achats et ventes crypto désactivés
@@ -355,7 +356,7 @@ def load_data():
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
-    global crypto_buy_cooldowns, crypto_hold_since, cold_wallets
+    global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
             try:
@@ -438,8 +439,9 @@ def load_data():
                 tournaments      = data.get('tournaments', {})
                 locations        = data.get('locations', {})
                 businesses           = data.get('businesses', {})
-                crypto_buy_cooldowns = data.get('crypto_buy_cooldowns', {})
-                crypto_hold_since    = data.get('crypto_hold_since', {})
+                crypto_buy_cooldowns  = data.get('crypto_buy_cooldowns', {})
+                crypto_sell_cooldowns = data.get('crypto_sell_cooldowns', {})
+                crypto_hold_since     = data.get('crypto_hold_since', {})
                 cold_wallets         = data.get('cold_wallets', {})
                 # Migration: ancien format {sym: {'qty':x,'locked_until':y}} → nouveau {sym: [batch,...]}
                 for _uid, _wallet in cold_wallets.items():
@@ -569,8 +571,9 @@ def save_data():
     data_to_save['tournaments']      = tournaments
     data_to_save['locations']        = locations
     data_to_save['businesses']           = businesses
-    data_to_save['crypto_buy_cooldowns'] = crypto_buy_cooldowns
-    data_to_save['crypto_hold_since']    = crypto_hold_since
+    data_to_save['crypto_buy_cooldowns']  = crypto_buy_cooldowns
+    data_to_save['crypto_sell_cooldowns'] = crypto_sell_cooldowns
+    data_to_save['crypto_hold_since']     = crypto_hold_since
     data_to_save['cold_wallets']         = cold_wallets
     data_to_save['admin_log_channel_id'] = ADMIN_LOG_CHANNEL_ID
 
@@ -4413,6 +4416,15 @@ async def cmd_vendre_crypto(ctx, symbol: str, qty_str: str):
             rem = int(600 - elapsed)
             return await ctx.send(f"⏳ Position trop récente ! Attendez encore **{rem//60}min {rem%60}s** avant de vendre **{symbol}**.")
 
+    # Cooldown 30min entre deux ventes du même symbole (anti-chunking)
+    if ctx.author.id != 550678866839207937:
+        last_sell_iso = crypto_sell_cooldowns.get(uid, {}).get(symbol)
+        if last_sell_iso:
+            elapsed_sell = (datetime.now() - datetime.fromisoformat(last_sell_iso)).total_seconds()
+            if elapsed_sell < 1800:
+                rem_sell = int(1800 - elapsed_sell)
+                return await ctx.send(f"⏳ Cooldown vente **{symbol}** : encore **{rem_sell//60}min {rem_sell%60}s** avant de revendre.")
+
     try:
         qty = held if qty_str.lower() in ('all', 'tout') else float(qty_str)
     except ValueError:
@@ -4462,6 +4474,8 @@ async def cmd_vendre_crypto(ctx, symbol: str, qty_str: str):
         crypto_hold_since.get(uid, {}).pop(symbol, None)
     else:
         crypto_holdings[uid][symbol] = new_qty
+    if ctx.author.id != 550678866839207937:
+        crypto_sell_cooldowns.setdefault(uid, {})[symbol] = datetime.now().isoformat()
     save_data()
 
     slip_str = f" *(slippage {slippage_pct*100:.1f}%)*" if slippage_pct > 0.001 else ""
@@ -8337,7 +8351,7 @@ class BusinessView(discord.ui.View):
         if not b:
             return await interaction.response.send_message("❌ Commerce non ouvert.", ephemeral=True)
         remaining = _biz_hire_remaining(uid, bk)
-        if remaining > 0 and not (self.author_id == 550678866839207937 and bk == 'fastfood'):
+        if remaining > 0 and not (self.author_id == 550678866839207937 and bk == 'restaurant'):
             h, m = int(remaining // 3600), int((remaining % 3600) // 60)
             return await interaction.response.send_message(f"⏳ Attendez **{h}h {m}min** avant d'embaucher.", ephemeral=True)
         cost = _biz_cost_next(bk, b['workers'])
