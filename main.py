@@ -266,6 +266,7 @@ draft_sessions       = {}   # channel_id -> session dict (phase de ban Brawl Sta
 _trader_prev_trends  = {}   # symbol -> trend du tick précédent (pour détecter les croisements)
 _trader_consec_pos   = {}   # symbol -> int (ticks consécutifs trend > 0, signal pré-pump)
 _trader_signal_sent  = {}   # symbol -> {type: ISO} — anti-spam sur signaux répétitifs
+theft_stats           = {}   # str(uid_victim) -> {'attempts': int, 'success': int}
 crypto_buy_cooldowns  = {}   # str(uid) -> {symbol: ISO} — CD 30min entre achats du même symbole
 crypto_sell_cooldowns = {}   # str(uid) -> {symbol: ISO} — CD 30min entre ventes du même symbole
 crypto_hold_since    = {}   # str(uid) -> {symbol: ISO} — timestamp dernier achat (hold min 10min)
@@ -356,7 +357,7 @@ def load_data():
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
-    global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets
+    global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
             try:
@@ -439,6 +440,7 @@ def load_data():
                 tournaments      = data.get('tournaments', {})
                 locations        = data.get('locations', {})
                 businesses           = data.get('businesses', {})
+                theft_stats           = data.get('theft_stats', {})
                 crypto_buy_cooldowns  = data.get('crypto_buy_cooldowns', {})
                 crypto_sell_cooldowns = data.get('crypto_sell_cooldowns', {})
                 crypto_hold_since     = data.get('crypto_hold_since', {})
@@ -571,6 +573,7 @@ def save_data():
     data_to_save['tournaments']      = tournaments
     data_to_save['locations']        = locations
     data_to_save['businesses']           = businesses
+    data_to_save['theft_stats']           = theft_stats
     data_to_save['crypto_buy_cooldowns']  = crypto_buy_cooldowns
     data_to_save['crypto_sell_cooldowns'] = crypto_sell_cooldowns
     data_to_save['crypto_hold_since']     = crypto_hold_since
@@ -4647,6 +4650,16 @@ async def cmd_coldwallet(ctx, *args):
     await ctx.send("❌ Usage : `!coldwallet` · `!coldwallet <qté> <SYM>` · `!coldwallet retirer <qté> <SYM>`")
 
 
+def _theft_record(victim_id: int, success: bool):
+    """Incrémente les stats de tentative/réussite de vol sur une victime."""
+    key = str(victim_id)
+    if key not in theft_stats:
+        theft_stats[key] = {'attempts': 0, 'success': 0}
+    theft_stats[key]['attempts'] += 1
+    if success:
+        theft_stats[key]['success'] += 1
+
+
 @bot.command(name="hacker", aliases=["hack"])
 async def cmd_hacker(ctx, cible: discord.Member):
     if _get_job(ctx.author.id) != 'hacker':
@@ -4671,6 +4684,7 @@ async def cmd_hacker(ctx, cible: discord.Member):
             del owned_items[uid_t]['11']
         _set_imm(uid_t, 3)
         hacker_cooldowns[ctx.author.id] = datetime.now().isoformat()
+        _theft_record(cible.id, False)
         save_data()
         await ctx.send(embed=discord.Embed(
             title="💊 Hack bloqué !",
@@ -4697,12 +4711,14 @@ async def cmd_hacker(ctx, cible: discord.Member):
         crypto_holdings[uid_a][symbol]    = round(crypto_holdings[uid_a].get(symbol, 0) + stolen_qty, 8)
         val = int(stolen_qty * crypto_prices.get(symbol, 0))
         _set_imm(uid_t, 6)
+        _theft_record(cible.id, True)
         save_data()
         embed = discord.Embed(title="💻 Hack réussi !", color=0x2ecc71,
             description=f"🔓 Volé **{stolen_qty:.6f} {symbol}** à {cible.mention}\nValeur ≈ **{val:,} coins**\n🛡️ {cible.mention} est immunisé **6h**.")
     else:
         fine = min(random.randint(200, 600), coins[ctx.author.id])
         coins[ctx.author.id] -= fine
+        _theft_record(cible.id, False)
         save_data()
         embed = discord.Embed(title="💻 Hack échoué !", color=0xe74c3c,
             description=f"🚨 Vous vous êtes fait repérer ! Amende : **-{fine:,} coins**")
@@ -5176,6 +5192,7 @@ async def cmd_voler(ctx, cible: discord.Member):
     if _has_item(cible.id, 3):
         _use_item(cible.id, 3)
         _set_imm(cible.id, 3)
+        _theft_record(cible.id, False)
         save_data()
         return await ctx.send(f"🛡️ {cible.mention} possède un **Bouclier Anti-Vol** ! Le vol a été bloqué. (bouclier consommé · immunité 3h)")
     base_rate = 0.55
@@ -5188,6 +5205,7 @@ async def cmd_voler(ctx, cible: discord.Member):
         safes[str(cible.id)] = safe_cible - stolen
         coins[ctx.author.id] += stolen
         _set_imm(cible.id, 6)
+        _theft_record(cible.id, True)
         save_data()
         embed = discord.Embed(title="🦹 Vol de coffre réussi !", color=0x2ecc71,
             description=(
@@ -5197,6 +5215,7 @@ async def cmd_voler(ctx, cible: discord.Member):
     else:
         fine = min(random.randint(100, 350), coins[ctx.author.id])
         coins[ctx.author.id] -= fine
+        _theft_record(cible.id, False)
         save_data()
         embed = discord.Embed(title="🚨 Vol raté !", color=0xe74c3c,
             description=f"Vous vous êtes fait attraper en train de crocheter le coffre ! Amende : **-{fine:,} coins**\n💰 Solde : **{coins[ctx.author.id]:,} coins**")
@@ -5223,6 +5242,7 @@ async def cmd_rob(ctx, cible: discord.Member):
         stolen = max(20, stolen)
         coins[ctx.author.id] += stolen
         coins[cible.id]      -= stolen
+        _theft_record(cible.id, True)
         save_data()
         escroc_bonus = " *(+20% escroc)*" if _get_job(ctx.author.id) == 'escroc' else ""
         embed = discord.Embed(title="🦹 Rob réussi !", color=0x2ecc71,
@@ -5235,6 +5255,7 @@ async def cmd_rob(ctx, cible: discord.Member):
         loss = random.randint(0, 300)
         loss = min(loss, coins[ctx.author.id])
         coins[ctx.author.id] -= loss
+        _theft_record(cible.id, False)
         save_data()
         embed = discord.Embed(title="🚨 Rob raté !", color=0xe74c3c,
             description=(
@@ -5242,6 +5263,43 @@ async def cmd_rob(ctx, cible: discord.Member):
                 f"💰 Solde : **{coins[ctx.author.id]:,} coins**\n"
                 f"⏳ Prochain rob dans **{cd_hours:g}h**."
             ))
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="top_voles", aliases=["classement_vol"])
+async def cmd_top_voles(ctx):
+    """Classement des membres les plus ciblés par les vols/hacks/robs."""
+    if not theft_stats:
+        return await ctx.send("📊 Aucune tentative de vol enregistrée pour l'instant.")
+
+    sorted_victims = sorted(theft_stats.items(), key=lambda x: x[1]['attempts'], reverse=True)
+
+    lines = []
+    medals = ['🥇', '🥈', '🥉']
+    for i, (uid_str, stats) in enumerate(sorted_victims[:10]):
+        attempts = stats.get('attempts', 0)
+        success  = stats.get('success', 0)
+        failed   = attempts - success
+        rate     = f"{success/attempts*100:.0f}%" if attempts > 0 else "0%"
+
+        try:
+            member = ctx.guild.get_member(int(uid_str)) or await ctx.guild.fetch_member(int(uid_str))
+            name = member.display_name
+        except Exception:
+            name = f"Utilisateur {uid_str[:6]}…"
+
+        rank = medals[i] if i < 3 else f"`#{i+1}`"
+        lines.append(
+            f"{rank} **{name}** — {attempts} tentative{'s' if attempts > 1 else ''} · "
+            f"✅ {success} réussie{'s' if success > 1 else ''} · ❌ {failed} ratée{'s' if failed > 1 else ''} · taux {rate}"
+        )
+
+    embed = discord.Embed(
+        title="🎯 Classement des cibles les plus visées",
+        description="\n".join(lines),
+        color=0xe67e22
+    )
+    embed.set_footer(text="Comptabilise : !rob · !voler · !hacker (tentatives bloquées incluses)")
     await ctx.send(embed=embed)
 
 
