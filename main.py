@@ -3889,7 +3889,8 @@ async def update_crypto_prices():
         vol   = CRYPTO_VOL.get(s, 0.02)
 
         # 1) Momentum AR(1)
-        trend = crypto_trends.get(s, 0.0) * 0.88 + random.gauss(0, vol * 0.7)
+        trend = crypto_trends.get(s, 0.0) * 0.82 + random.gauss(0, vol * 0.7)
+        trend = max(-0.035, min(0.035, trend))
 
         # 2) News (~0.4% par tick)
         if random.random() < 0.004:
