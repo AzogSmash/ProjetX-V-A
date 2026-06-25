@@ -7692,8 +7692,9 @@ async def cmd_alerte_crypto(ctx, symbol: str = None, target: str = None):
     current = crypto_prices[symbol]
     direction = forced_dir if forced_dir else ('up' if target_price > current else 'down')
     alerts = crypto_alerts.setdefault(uid, [])
-    if len(alerts) >= 5:
-        return await ctx.send("❌ Maximum 5 alertes actives à la fois.")
+    already = sum(1 for a in alerts if a['symbol'] == symbol)
+    if already >= 2:
+        return await ctx.send(f"❌ Maximum 2 alertes actives par crypto. Supprimez une alerte **{symbol}** avec `!suppr_alerte {symbol}`.")
     alerts.append({'symbol': symbol, 'target': target_price, 'direction': direction})
     save_data()
     sign = "≥" if direction == 'up' else "≤"
