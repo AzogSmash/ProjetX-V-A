@@ -263,9 +263,6 @@ crypto_alerts    = {}   # str(uid) -> [{'symbol': str, 'target': float, 'directi
 tournament_elo   = {}   # str(uid) -> int (score ELO tournoi)
 ADMIN_LOG_CHANNEL_ID = 0  # à configurer via !set_admin_log <channel_id>
 draft_sessions       = {}   # channel_id -> session dict (phase de ban Brawl Stars)
-_trader_prev_trends  = {}   # symbol -> trend du tick précédent (pour détecter les croisements)
-_trader_consec_pos   = {}   # symbol -> int (ticks consécutifs trend > 0, signal pré-pump)
-_trader_signal_sent  = {}   # symbol -> {type: ISO} — anti-spam sur signaux répétitifs
 theft_stats           = {}   # str(uid_victim) -> {'attempts': int, 'success': int}
 daily_sell_volume     = {}   # str(uid) -> {symbol: {date_str: float}} — volume brut vendu dans la journée
 crypto_buy_cooldowns  = {}   # str(uid) -> {symbol: ISO} — CD 30min entre achats du même symbole
@@ -3944,95 +3941,6 @@ async def update_crypto_prices():
 
     # Vérification des alertes crypto utilisateurs
     await _check_crypto_alerts()
-
-    # Signaux de trading perso — modèle AR(1), tick = 90s
-    _TRADER_UID  = 550678866839207937
-    try:
-        _trader_user = bot.get_user(_TRADER_UID) or await bot.fetch_user(_TRADER_UID)
-    except discord.NotFound:
-        _trader_user = None
-    if _trader_user:
-        uid_str    = str(_TRADER_UID)
-        holdings   = crypto_holdings.get(uid_str, {})
-        trader_bal = coins[_TRADER_UID]
-        signals    = []
-        news_syms  = {s for s, _, _ in news}
-        now        = datetime.now()
-
-        # --- Analyse par crypto : uniquement signaux à fort potentiel ---
-        for s in CRYPTO_SYMBOLS:
-            t_val    = crypto_trends.get(s, 0)
-            price    = crypto_prices[s]
-            base     = CRYPTO_BASE[s]
-            fl       = CRYPTO_FLOOR[s]
-            cl       = CRYPTO_CEIL[s]
-            ratio    = price / base
-            held     = holdings.get(s, 0)
-            held_val = int(held * price)
-            prev_t   = _trader_prev_trends.get(s, 0)
-            sent     = _trader_signal_sent.get(s, {})
-            floor_p  = base * fl
-            ceil_p   = base * cl
-            # Potentiel ×N depuis le prix actuel jusqu'au plafond
-            pot_x    = round(ceil_p / price, 2) if price > 0 else 0
-
-            # Retournements de tendance — un signal par creux/sommet, pas par tick
-            trend_crossed_up   = prev_t < -0.005 and t_val > 0.005   # creux local : trend repasse positif
-            trend_crossed_down = prev_t > 0.005  and t_val < -0.005  # sommet local : trend repasse négatif
-
-            # 💀 DUMP NEWS urgent — uniquement si en position
-            for s2, direction, old_price in news:
-                if s2 != s or direction != 'down' or held <= 0:
-                    continue
-                pct = (price - old_price) / old_price * 100
-                signals.append(
-                    f"💀 **DUMP {s}** ({pct:.1f}%) — {price:,.0f} coins\n"
-                    f"Tu détiens ≈ **{held_val:,} coins** — **vends MAINTENANT** !\n"
-                    f"`!vendre_crypto {s} all`"
-                )
-
-            # Signaux baissiers — uniquement au retournement négatif (sommet local)
-            if trend_crossed_down and held > 0:
-                ratio_pos = (ratio - fl) / max(cl - fl, 0.001)  # 0=plancher, 1=plafond
-                if ratio_pos >= 0.65:
-                    signals.append(
-                        f"⛰️ **SOMMET {s}** — {price:,.0f} coins ({ratio:.2f}×base)\n"
-                        f"Trend vient de basculer négatif · Tu as ≈ **{held_val:,} coins**\n"
-                        f"**Vends maintenant** → `!vendre_crypto {s} all`"
-                    )
-                else:
-                    signals.append(
-                        f"🔻 **VENDS {s}** — trend bascule négatif ({t_val:.3f})\n"
-                        f"Prix : {price:,.0f} · Tu as ≈ **{held_val:,} coins**\n"
-                        f"`!vendre_crypto {s} all`"
-                    )
-
-            # Signaux haussiers — uniquement au retournement positif (creux local)
-            if trend_crossed_up:
-                if pot_x >= 3.0:
-                    action = f"Tu en as déjà ≈ **{held_val:,} coins** — **rajoute**." if held > 0 else f"➡️ `!acheter_crypto {s} <montant>`"
-                    signals.append(
-                        f"🔥 **CREUX LOCAL ×{pot_x:.1f} {s}** — {price:,.0f} coins\n"
-                        f"Plancher : {floor_p:,.0f} · Plafond : {ceil_p:,.0f} · Potentiel : **×{pot_x:.1f}**\n"
-                        f"{action} — Le trend vient de repartir à la hausse."
-                    )
-                elif pot_x >= 2.0:
-                    action = f"Tu en as déjà ≈ **{held_val:,} coins**." if held > 0 else f"➡️ `!acheter_crypto {s} <montant>`"
-                    signals.append(
-                        f"💎 **CREUX LOCAL ×{pot_x:.1f} {s}** — {price:,.0f} coins\n"
-                        f"Plancher : {floor_p:,.0f} · Plafond : {ceil_p:,.0f} · Potentiel : **×{pot_x:.1f}**\n"
-                        f"{action}"
-                    )
-
-        # Mise à jour trends précédents
-        for s in CRYPTO_SYMBOLS:
-            _trader_prev_trends[s] = crypto_trends.get(s, 0)
-
-        if signals:
-            try:
-                await _trader_user.send("**🎯 Signal trading**\n\n" + "\n\n".join(signals))
-            except discord.HTTPException:
-                pass
 
     # Annonce des news dans le salon dédié (si configuré)
     if news and NEWS_CRYPTO_CHANNEL_ID:
