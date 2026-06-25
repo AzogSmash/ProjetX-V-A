@@ -2557,10 +2557,10 @@ async def cmd_coins(ctx, member: discord.Member = None):
     target = member or ctx.author
     embed  = discord.Embed(
         title="💰 Solde de Coins",
-        description=f"{target.mention} possède **{coins[target.id]:,} 🪙 coins**.",
+        description=f"**{target.display_name}** possède **{coins[target.id]:,} 🪙 coins**.",
         color=0xf1c40f
     )
-    await ctx.send(embed=embed)
+    await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.command(name="daily", aliases=["d"])
@@ -6039,17 +6039,20 @@ async def cmd_acheter(ctx, item_id: int):
     await ctx.send(msg)
 
 @bot.command(name="inventaire", aliases=["inv"])
-async def cmd_inventaire(ctx):
-    uid   = str(ctx.author.id)
-    items = owned_items.get(uid, {})
-    lines = []
+async def cmd_inventaire(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    uid    = str(target.id)
+    items  = owned_items.get(uid, {})
+    lines  = []
     for iid_str, cnt in items.items():
         iid = int(iid_str)
         if iid in SHOP_ITEMS and cnt > 0:
             lines.append(f"• {SHOP_ITEMS[iid]['name']} ×{cnt}")
-    embed = discord.Embed(title="🎒 Inventaire", color=0x9b59b6,
-        description='\n'.join(lines) if lines else "Votre inventaire est vide. Achetez des objets avec `!shop` !")
-    await ctx.send(embed=embed)
+    title = f"🎒 Inventaire de {target.display_name}" if member else "🎒 Inventaire"
+    empty_msg = f"{target.display_name} n'a aucun objet." if member else "Votre inventaire est vide. Achetez des objets avec `!shop` !"
+    embed = discord.Embed(title=title, color=0x9b59b6,
+        description='\n'.join(lines) if lines else empty_msg)
+    await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
 # ── Ticket à gratter (interactif) ────────────────────────────────────────
@@ -7683,7 +7686,7 @@ async def cmd_profil(ctx, member: discord.Member = None):
         embed.add_field(name="🛡️ Protection", value=imm_str, inline=False)
     if item_lines:
         embed.add_field(name="🎒 Inventaire", value='\n'.join(item_lines), inline=False)
-    await ctx.send(embed=embed)
+    await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
 # ── Anniversaires ────────────────────────────────────────────────────────
