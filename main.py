@@ -4085,6 +4085,7 @@ async def cmd_mines(ctx, mise: str):
 # ── Crypto ───────────────────────────────────────────────────────────────
 
 @bot.command(name="crypto", aliases=["cr", "marche_crypto"])
+@commands.cooldown(1, 60, commands.BucketType.user)
 async def cmd_crypto(ctx):
     embed = discord.Embed(title="📈 Marché Crypto (en coins)", color=0xf39c12)
     for s in CRYPTO_SYMBOLS:
@@ -4125,6 +4126,11 @@ async def cmd_crypto(ctx):
             value='\n'.join(cw_lines) + f"\n📊 Total ≈ **{cw_total:,.0f} coins**", inline=False)
     embed.set_footer(text="Prix actualisés toutes les 90s | !acheter_crypto <SYM> <coins> | !vendre_crypto <SYM> <qté> | !coldwallet")
     await ctx.send(embed=embed)
+
+@cmd_crypto.error
+async def cmd_crypto_error(ctx, error):
+    if isinstance(error, commands.CommandOnCooldown):
+        await ctx.send(f"⏳ Attends encore **{int(error.retry_after)}s** avant de refaire `!cr`.", delete_after=5)
 
 @bot.command(name="graphique", aliases=["chart", "courbe", "graph"])
 async def cmd_graphique(ctx, symbol: str = None):
