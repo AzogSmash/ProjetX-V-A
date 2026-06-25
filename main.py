@@ -229,7 +229,7 @@ crypto_prices    = dict(CRYPTO_BASE)
 price_history    = {}   # str(symbol) -> [float, ...]  (30 derniers points)
 crypto_trends    = {}   # str(symbol) -> float  (tendance/momentum courant)
 # Volatilité propre à chaque crypto (écart-type du bruit par tick)
-CRYPTO_VOL   = {'BTC': 0.010, 'ETH': 0.014, 'SOL': 0.018, 'XRP': 0.022, 'DOGE': 0.025}
+CRYPTO_VOL   = {'BTC': 0.013, 'ETH': 0.018, 'SOL': 0.023, 'XRP': 0.029, 'DOGE': 0.033}
 CRYPTO_FLOOR = {'BTC': 0.60, 'ETH': 0.60, 'SOL': 0.60, 'XRP': 0.60, 'DOGE': 0.45}
 CRYPTO_CEIL  = {'BTC': 2.00, 'ETH': 2.00, 'SOL': 2.00, 'XRP': 2.00, 'DOGE': 1.50}
 crypto_holdings  = {}   # str(uid) -> {symbol: float}
@@ -3888,7 +3888,7 @@ async def update_crypto_prices():
         vol   = CRYPTO_VOL.get(s, 0.02)
 
         # 1) Momentum AR(1)
-        trend = crypto_trends.get(s, 0.0) * 0.75 + random.gauss(0, vol * 0.7)
+        trend = crypto_trends.get(s, 0.0) * 0.88 + random.gauss(0, vol * 0.7)
 
         # 2) News (~0.4% par tick)
         if random.random() < 0.004:
@@ -3898,7 +3898,7 @@ async def update_crypto_prices():
 
         # 3) Retour à la moyenne
         deviation = (price - base) / base
-        reversion = -0.04 * deviation - 0.04 * deviation * abs(deviation)
+        reversion = -0.025 * deviation - 0.025 * deviation * abs(deviation)
 
         # 4) Bruit de marché
         noise = random.gauss(0, vol * 1.5)
