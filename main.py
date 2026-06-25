@@ -5606,28 +5606,43 @@ async def cmd_cibles(ctx):
         member      = ctx.guild.get_member(uid_int)
         name        = member.display_name if member else f"#{uid_int}"
         rows.append((total, cash, coffre, crypto_val, hot_crypto, name, imm_str, nb_bouclier, nb_antivirus, job))
+    def _k(v):
+        if v >= 1_000_000: return f"{v/1_000_000:.1f}M"
+        if v >= 1_000:     return f"{v//1_000}k"
+        return str(int(v))
+
     rows.sort(key=lambda x: -x[0])
     lines = []
     for i, (total, cash, coffre, crypto_val, hot_crypto, name, imm, bouclier, antivirus, job) in enumerate(rows[:30], 1):
-        rob_str = f"💵{cash:,}" if cash >= 200 else f"~~💵{cash:,}~~"
-        if bouclier > 0:
-            voler_str = f"🔒{coffre:,}🛡️"
-        elif imm:
-            voler_str = f"🔒{coffre:,}⏳{imm}"
+        # Cash
+        rob_str = f"💵{_k(cash)}" if cash >= 200 else f"~~💵~~"
+
+        # Coffre
+        if coffre > 0:
+            if bouclier > 0:   coffre_status = "🛡️"
+            elif imm:
+                h = imm.split('h')[0] if 'h' in imm else '?'
+                coffre_status = f"⏳{h}h"
+            else:              coffre_status = "✅"
+            coffre_str = f"🔒{_k(coffre)}{coffre_status}"
         else:
-            voler_str = f"🔒{coffre:,}✅" if coffre > 0 else "🔒—"
+            coffre_str = ""
+
+        # Crypto hackable
         if hot_crypto:
-            syms = ' '.join(f"{s}({qty:.4f})" for s, qty in hot_crypto.items())
-            av_str = "💊" if antivirus > 0 else "🎯"
-            crypto_str = f"{av_str}₿{crypto_val:,} [{syms}]"
+            syms_str = "·".join(hot_crypto.keys())
+            av_icon  = "💊" if antivirus > 0 else "🎯"
+            crypto_str = f"{av_icon}{_k(crypto_val)}·{syms_str}"
         else:
             crypto_str = ""
-        job_str = f" *{job}*" if job else ""
-        parts = " · ".join(filter(None, [rob_str, voler_str, crypto_str]))
-        lines.append(f"`{i}.` **{name}** ({total:,}) — {parts}{job_str}")
+
+        job_str = f" `{job}`" if job else ""
+        parts   = " ".join(filter(None, [rob_str, coffre_str, crypto_str]))
+        lines.append(f"`{i}.` **{name}**{job_str} — {parts}")
+
     desc = "\n".join(lines) if lines else "Aucun joueur avec des fonds."
     embed = discord.Embed(title="🎯 Cibles", description=desc, color=0xe74c3c)
-    embed.set_footer(text="💵=rob · 🔒=coffre · 🎯₿=crypto hackable · 💊₿=antivirus · ✅libre · ⏳imm · 🛡️bouclier")
+    embed.set_footer(text="💵rob 🔒coffre 🎯=hackable 💊=antivirus ✅libre ⏳imm 🛡️bouclier")
     try:
         await ctx.author.send(embed=embed)
     except discord.Forbidden:
