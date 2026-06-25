@@ -3890,7 +3890,7 @@ async def update_crypto_prices():
 
         # 1) Momentum AR(1)
         trend = crypto_trends.get(s, 0.0) * 0.82 + random.gauss(0, vol * 0.7)
-        trend = max(-0.035, min(0.035, trend))
+        trend = max(-0.025, min(0.025, trend))
 
         # 2) News (~0.4% par tick)
         if random.random() < 0.004:
@@ -3911,9 +3911,15 @@ async def update_crypto_prices():
 
         # Bornes par crypto
         fl, cl = CRYPTO_FLOOR[s], CRYPTO_CEIL[s]
-        new_price = round(max(base * fl, min(base * cl, new_price)), 2)
+        clamped_price = round(max(base * fl, min(base * cl, new_price)), 2)
 
-        crypto_prices[s] = new_price
+        # Bounce du trend quand on touche une borne — évite de rester bloqué
+        if clamped_price <= base * fl and trend < 0:
+            trend = abs(trend) * random.uniform(0.2, 0.5)
+        elif clamped_price >= base * cl and trend > 0:
+            trend = -abs(trend) * random.uniform(0.2, 0.5)
+
+        crypto_prices[s] = clamped_price
         crypto_trends[s] = trend
         hist = price_history.setdefault(s, [])
         hist.append(new_price)
