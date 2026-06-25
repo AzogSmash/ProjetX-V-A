@@ -264,6 +264,7 @@ tournament_elo   = {}   # str(uid) -> int (score ELO tournoi)
 ADMIN_LOG_CHANNEL_ID = 0  # à configurer via !set_admin_log <channel_id>
 draft_sessions       = {}   # channel_id -> session dict (phase de ban Brawl Stars)
 theft_stats           = {}   # str(uid_victim) -> {'attempts': int, 'success': int}
+snipe_cache           = {}   # channel_id -> [{'author', 'content', 'at', 'attachments'}, ...]
 daily_sell_volume     = {}   # str(uid) -> {symbol: {date_str: float}} — volume brut vendu dans la journée
 crypto_buy_cooldowns  = {}   # str(uid) -> {symbol: ISO} — CD 30min entre achats du même symbole
 crypto_sell_cooldowns = {}   # str(uid) -> {symbol: ISO} — CD 30min entre ventes du même symbole
@@ -1129,6 +1130,16 @@ async def on_member_join(member):
 async def on_message_delete(message):
     if message.author.bot or not message.guild:
         return
+
+    cache = snipe_cache.setdefault(message.channel.id, [])
+    cache.append({
+        'author':      message.author,
+        'content':     message.content or '',
+        'at':          datetime.now(),
+        'attachments': [a.url for a in message.attachments],
+    })
+    if len(cache) > 15:
+        snipe_cache[message.channel.id] = cache[-15:]
 
     description = f"Message de {message.author.mention} supprimé dans {message.channel.mention}."
     fields = [
@@ -7390,9 +7401,47 @@ async def cmd_annuler_punition(ctx, membre: discord.Member):
     uid = str(membre.id)
     if uid not in punitions:
         return await ctx.send(f"❌ {membre.mention} n'est pas en punition.")
-    
+
     await _liberer_membre(ctx.guild, membre)
     await ctx.send(f"✅ La punition de {membre.mention} a été annulée.")
+
+
+@bot.command(name="snipe")
+async def cmd_snipe(ctx, *args):
+    nb     = 1
+    target = None
+    for arg in args:
+        if arg.isdigit():
+            nb = max(1, min(int(arg), 10))
+        else:
+            try:
+                target = await commands.MemberConverter().convert(ctx, arg)
+            except commands.BadArgument:
+                pass
+
+    cache = snipe_cache.get(ctx.channel.id, [])
+    entries = list(reversed(cache))
+    if target:
+        entries = [e for e in entries if e['author'].id == target.id]
+
+    if not entries:
+        msg = f"Aucun message supprimé de **{target.display_name}**." if target else "Aucun message supprimé récemment."
+        return await ctx.send(f"🔍 {msg}")
+
+    entries = entries[:nb]
+    for i, e in enumerate(entries):
+        ts   = e['at'].strftime('%H:%M:%S')
+        desc = e['content'] or '*(pas de texte)*'
+        if e['attachments']:
+            desc += '\n' + '\n'.join(e['attachments'])
+        embed = discord.Embed(
+            description=desc,
+            color=0xe74c3c,
+            timestamp=e['at']
+        )
+        embed.set_author(name=e['author'].display_name, icon_url=e['author'].display_avatar.url)
+        embed.set_footer(text=f"Supprimé à {ts}" + (f" — {i+1}/{len(entries)}" if len(entries) > 1 else ""))
+        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def _liberer_membre(guild, membre):
