@@ -5507,6 +5507,38 @@ def _build_cd_embed(uid_int, guild):
             else:
                 lines.append(line(biz_def['emoji'], f"!embaucher {biz_def['name']}", _secs_to_hm(_biz_hire_remaining(uid, biz_key))))
 
+    # Crypto buy/sell cooldowns (par symbole)
+    buy_cds  = crypto_buy_cooldowns.get(uid, {})
+    sell_cds = crypto_sell_cooldowns.get(uid, {})
+    now_dt   = datetime.now()
+
+    def _sym_cd_str(cd_dict_inner, sym, minutes):
+        iso = cd_dict_inner.get(sym)
+        if not iso:
+            return ''
+        try:
+            wait = datetime.fromisoformat(iso) + timedelta(minutes=minutes) - now_dt
+        except (ValueError, TypeError):
+            return ''
+        if wait.total_seconds() <= 0:
+            return ''
+        h, rem = divmod(int(wait.total_seconds()), 3600)
+        m = rem // 60
+        return f"{h}h {m}min" if h else f"{m}min"
+
+    crypto_lines = []
+    for sym in CRYPTO_SYMBOLS:
+        buy_rem  = _sym_cd_str(buy_cds,  sym, 30)
+        sell_rem = _sym_cd_str(sell_cds, sym, 30)
+        if buy_rem or sell_rem:
+            buy_str  = f"achat ⏳{buy_rem}"   if buy_rem  else "achat ✅"
+            sell_str = f"vente ⏳{sell_rem}"  if sell_rem else "vente ✅"
+            crypto_lines.append(f"💹 `{sym}` — {buy_str} · {sell_str}")
+
+    if crypto_lines:
+        lines.append("**── Crypto ──**")
+        lines.extend(crypto_lines)
+
     member = guild.get_member(uid_int) if guild else None
     name   = member.display_name if member else str(uid_int)
     embed  = discord.Embed(title="⏳ Tes cooldowns", description='\n'.join(lines), color=0x3498db)
