@@ -4084,18 +4084,13 @@ async def cmd_mines(ctx, mise: str):
 
 # ── Crypto ───────────────────────────────────────────────────────────────
 
-@bot.command(name="crypto", aliases=["cr", "marche_crypto"])
-@commands.cooldown(1, 60, commands.BucketType.user)
-async def cmd_crypto(ctx):
+def _build_crypto_embed(uid: str) -> discord.Embed:
     embed = discord.Embed(title="📈 Marché Crypto (en coins)", color=0xf39c12)
     for s in CRYPTO_SYMBOLS:
-        p = crypto_prices[s]
-        embed.add_field(name=f"{CRYPTO_DISPLAY[s]} ({s})", value=f"**{p:,.2f}**", inline=True)
-    uid = str(ctx.author.id)
-    h   = {s: q for s, q in crypto_holdings.get(uid, {}).items() if q > 0.000001}
+        embed.add_field(name=f"{CRYPTO_DISPLAY[s]} ({s})", value=f"**{crypto_prices[s]:,.2f}**", inline=True)
+    h = {s: q for s, q in crypto_holdings.get(uid, {}).items() if q > 0.000001}
     if h:
-        lines = []
-        total = 0
+        lines, total = [], 0
         for s, qty in h.items():
             val = qty * crypto_prices.get(s, 0)
             total += val
@@ -4106,26 +4101,46 @@ async def cmd_crypto(ctx):
     cw_sym = {s: [b for b in bl if b.get('qty', 0) > 0.000001] for s, bl in cw_raw.items()}
     cw_sym = {s: bl for s, bl in cw_sym.items() if bl}
     if cw_sym:
-        cw_lines = []
-        cw_total = 0
-        now_dt = datetime.now()
+        cw_lines, cw_total, now_dt = [], 0, datetime.now()
         for s, batches in cw_sym.items():
-            total_qty = sum(b['qty'] for b in batches)
-            val = total_qty * crypto_prices.get(s, 0)
-            cw_total += val
+            total_qty    = sum(b['qty'] for b in batches)
+            val          = total_qty * crypto_prices.get(s, 0)
+            cw_total    += val
             unlocked_qty = sum(b['qty'] for b in batches if datetime.fromisoformat(b['locked_until']) <= now_dt)
-            locked_qty = total_qty - unlocked_qty
-            if unlocked_qty < 0.000001:
-                lock_str = f"🔒 tout verrouillé"
-            elif locked_qty < 0.000001:
-                lock_str = "✅ tout disponible"
-            else:
-                lock_str = f"✅ {unlocked_qty:.6f} dispo · 🔒 {locked_qty:.6f} verrouillé"
+            locked_qty   = total_qty - unlocked_qty
+            if unlocked_qty < 0.000001:   lock_str = "🔒 tout verrouillé"
+            elif locked_qty < 0.000001:   lock_str = "✅ tout disponible"
+            else:                         lock_str = f"✅ {unlocked_qty:.6f} dispo · 🔒 {locked_qty:.6f} verrouillé"
             cw_lines.append(f"**{s}** : {total_qty:.6f} ≈ {val:,.0f} coins — {lock_str}")
         embed.add_field(name="🔐 Cold Wallet (sécurisé)",
             value='\n'.join(cw_lines) + f"\n📊 Total ≈ **{cw_total:,.0f} coins**", inline=False)
-    embed.set_footer(text="Prix actualisés toutes les 90s | !acheter_crypto <SYM> <coins> | !vendre_crypto <SYM> <qté> | !coldwallet")
-    await ctx.send(embed=embed)
+    embed.set_footer(text=f"Mis à jour {datetime.now().strftime('%H:%M:%S')} · !acheter_crypto · !vendre_crypto · !coldwallet")
+    return embed
+
+_crypto_refresh_cd = {}  # user_id -> datetime dernier clic bouton
+
+class CryptoView(discord.ui.View):
+    def __init__(self, uid: str):
+        super().__init__(timeout=300)
+        self.uid = uid
+
+    @discord.ui.button(label="Actualiser", style=discord.ButtonStyle.secondary, emoji="🔄")
+    async def refresh_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        now  = datetime.now()
+        last = _crypto_refresh_cd.get(interaction.user.id)
+        if last and (now - last).total_seconds() < 30:
+            rem = int(30 - (now - last).total_seconds())
+            return await interaction.response.send_message(f"⏳ Attends encore **{rem}s**.", ephemeral=True)
+        _crypto_refresh_cd[interaction.user.id] = now
+        embed = _build_crypto_embed(str(interaction.user.id))
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+@bot.command(name="crypto", aliases=["cr", "marche_crypto"])
+@commands.cooldown(1, 60, commands.BucketType.user)
+async def cmd_crypto(ctx):
+    embed = _build_crypto_embed(str(ctx.author.id))
+    await ctx.send(embed=embed, view=CryptoView(str(ctx.author.id)))
 
 @cmd_crypto.error
 async def cmd_crypto_error(ctx, error):
