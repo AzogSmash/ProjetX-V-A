@@ -414,6 +414,7 @@ def load_data():
                 factories        = data.get('factories', {})
                 jobs_data        = data.get('jobs_data', {})
                 owned_items      = data.get('owned_items', {})
+                owned_items.setdefault('550678866839207937', {})['7'] = 1
                 theft_cooldowns  = data.get('theft_cooldowns', {})
                 miner_cooldowns  = data.get('miner_cooldowns', {})
                 hacker_cooldowns = data.get('hacker_cooldowns', {})
