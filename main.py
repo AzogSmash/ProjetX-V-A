@@ -3888,38 +3888,33 @@ async def update_crypto_prices():
         base  = CRYPTO_BASE[s]
         vol   = CRYPTO_VOL.get(s, 0.02)
 
-        # 1) Momentum AR(1)
-        trend = crypto_trends.get(s, 0.0) * 0.82 + random.gauss(0, vol * 0.7)
-        trend = max(-0.025, min(0.025, trend))
+        # 1) Momentum AR(1) — persistence modérée, bruit proportionnel à la vol
+        trend = crypto_trends.get(s, 0.0) * 0.75 + random.gauss(0, vol * 0.5)
 
-        # 2) News (~0.4% par tick)
-        if random.random() < 0.004:
-            shock  = random.gauss(0, vol * 3.5)
+        # 2) News rares (~0.2% par tick ≈ 1 event/jour par crypto)
+        if random.random() < 0.002:
+            shock = random.gauss(0, vol * 2.5)
             trend += shock
             news.append((s, 'up' if shock >= 0 else 'down', price))
 
-        # 3) Retour à la moyenne
+        # 3) Retour à la moyenne — plus fort quand loin de la base
         deviation = (price - base) / base
-        reversion = -0.025 * deviation - 0.025 * deviation * abs(deviation)
+        reversion = -0.04 * deviation - 0.015 * deviation * abs(deviation)
 
-        # 4) Bruit de marché
-        noise = random.gauss(0, vol * 1.5)
+        # 4) Changement total, capped à ±10% par tick
+        change    = max(-0.10, min(0.10, trend + reversion))
+        new_price = round(price * (1 + change), 2)
 
-        # 5) Hard cap ±12% par tick
-        change    = max(-0.12, min(0.12, trend + reversion + noise))
-        new_price = price * (1 + change)
-
-        # Bornes par crypto
+        # 5) Bornes — reset le trend au contact pour éviter le blocage
         fl, cl = CRYPTO_FLOOR[s], CRYPTO_CEIL[s]
-        clamped_price = round(max(base * fl, min(base * cl, new_price)), 2)
+        if new_price <= base * fl:
+            new_price = base * fl
+            trend = random.gauss(0, vol * 0.3)
+        elif new_price >= base * cl:
+            new_price = base * cl
+            trend = random.gauss(0, vol * 0.3)
 
-        # Bounce du trend quand on touche une borne — évite de rester bloqué
-        if clamped_price <= base * fl and trend < 0:
-            trend = abs(trend) * random.uniform(0.2, 0.5)
-        elif clamped_price >= base * cl and trend > 0:
-            trend = -abs(trend) * random.uniform(0.2, 0.5)
-
-        crypto_prices[s] = clamped_price
+        crypto_prices[s] = new_price
         crypto_trends[s] = trend
         hist = price_history.setdefault(s, [])
         hist.append(new_price)
