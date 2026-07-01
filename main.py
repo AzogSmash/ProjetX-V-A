@@ -8676,6 +8676,7 @@ class CarteView(discord.ui.View):
                 content=self._content(),
                 attachments=[discord.File(buf, 'carte.png')],
                 view=self,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         return callback
 
@@ -8685,8 +8686,8 @@ class CarteView(discord.ui.View):
         lines  = [header]
         for uid, loc in locations.items():
             member = self.guild.get_member(int(uid))
-            name   = member.mention if member else f"<@{uid}>"
-            lines.append(f"{name} — **{loc['ville']}**")
+            name   = member.display_name if member else loc['ville']
+            lines.append(f"**{name}** — {loc['ville']}")
         return '\n'.join(lines)
 
 
@@ -8707,7 +8708,7 @@ async def cmd_carte(ctx):
         await ctx.send(f"❌ Erreur lors de la génération de la carte : {e}")
         return
 
-    await ctx.send(view._content(), file=discord.File(buf, 'carte.png'), view=view)
+    await ctx.send(view._content(), file=discord.File(buf, 'carte.png'), view=view, allowed_mentions=discord.AllowedMentions.none())
 
 
 token = os.getenv("TOKEN")
