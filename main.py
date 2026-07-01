@@ -2995,11 +2995,8 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
     mise, err = _resolve_mise(mise, ctx.author.id, 'coinflip')
     if err: return await ctx.send(err)
 
+    result = random.choice(['pile', 'face'])
     player_choice = 'pile' if choix in ('pile', 'p') else 'face'
-    if ctx.author.id == 550678866839207937:
-        result = player_choice
-    else:
-        result = random.choice(['pile', 'face'])
     result_emoji  = '🟡' if result == 'pile' else '⚪'
 
     coins[ctx.author.id] -= mise
