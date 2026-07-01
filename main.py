@@ -857,7 +857,8 @@ def _build_help_categories(ctx):
                  "`!profil` (`!profile`, `!stats`) — Voir sa fiche complète\n"
                  "`!cd` (`!cooldown`) — Voir tous tes cooldowns en cours *(privé)*\n"
                  "`!anniversaire JJ/MM` (`!anniv`) — Enregistrer son anniversaire\n"
-                 "`!stats_serveur` (`!serveur`) — Vue globale du serveur"))
+                 "`!stats_serveur` (`!serveur`) — Vue globale du serveur\n"
+                 "`!snipe [nb] [@membre]` — Voir le(s) dernier(s) message(s) supprimé(s) du salon"))
     cats.append(("eco", "🪙 Économie de base",
                  "Solde, daily, travail, coffre, rob, etc.",
                  "`!coins` (`!bal`, `!solde`) — Voir votre solde\n"
