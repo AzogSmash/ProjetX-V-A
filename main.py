@@ -9061,6 +9061,103 @@ async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
     return await ctx.send(f"ℹ️ `#{clean}` n'était pas dans la famille.")
 
 
+class BsFamilyLeaderboardView(discord.ui.View):
+    """Vue paginée (30/page) avec podium distinct pour le top 3 et filtre par clan.
+    Les données sont capturées une seule fois à l'appel de la commande — changer de page
+    ou de filtre ne fait AUCUN nouvel appel API, on ne fait que re-trancher la liste déjà
+    récupérée, gardée en mémoire sur la vue."""
+    PAGE_SIZE = 30
+
+    def __init__(self, title, color, entries, unit, clubs, value_key,
+                 extra_key=None, extra_note=None, club_filter=None, page=0):
+        super().__init__(timeout=300)
+        self.title = title
+        self.color = color
+        self.entries = entries
+        self.unit = unit
+        self.clubs = clubs
+        self.value_key = value_key
+        self.extra_key = extra_key
+        self.extra_note = extra_note
+        self.club_filter = club_filter
+
+        self.filtered = [e for e in entries if club_filter is None or e['club'] == club_filter]
+        self.total_pages = max(1, (len(self.filtered) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        self.page = max(0, min(page, self.total_pages - 1))
+
+        options = [discord.SelectOption(label="🌐 Tous les clans", value="__all__", default=(club_filter is None))]
+        for c in clubs[:24]:
+            options.append(discord.SelectOption(label=c[:100], value=c, default=(c == club_filter)))
+        self.select = discord.ui.Select(placeholder="Filtrer par clan…", options=options)
+        self.select.callback = self._on_filter
+        self.add_item(self.select)
+
+        if self.page > 0:
+            prev_btn = discord.ui.Button(label="◀ Précédent", style=discord.ButtonStyle.secondary, row=1)
+            prev_btn.callback = self._prev
+            self.add_item(prev_btn)
+        if self.page < self.total_pages - 1:
+            next_btn = discord.ui.Button(label="Suivant ▶", style=discord.ButtonStyle.secondary, row=1)
+            next_btn.callback = self._next
+            self.add_item(next_btn)
+
+    def _clone(self, **overrides):
+        kwargs = dict(
+            title=self.title, color=self.color, entries=self.entries, unit=self.unit, clubs=self.clubs,
+            value_key=self.value_key, extra_key=self.extra_key, extra_note=self.extra_note,
+            club_filter=self.club_filter, page=self.page,
+        )
+        kwargs.update(overrides)
+        return BsFamilyLeaderboardView(**kwargs)
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(title=self.title, color=self.color)
+        start = self.page * self.PAGE_SIZE
+        page_entries = self.filtered[start:start + self.PAGE_SIZE]
+
+        if self.page == 0:
+            medals = ['🥇', '🥈', '🥉']
+            for i, e in enumerate(self.filtered[:3]):
+                value_line = f"**{e[self.value_key]:,} {self.unit}**"
+                if self.extra_key and e.get(self.extra_key):
+                    value_line = f"{e[self.extra_key]}\n{value_line}"
+                embed.add_field(name=f"{medals[i]} {e['name']}", value=f"{value_line}\n*{e['club']}*", inline=True)
+            rest, rank_offset = page_entries[3:], 4
+        else:
+            rest, rank_offset = page_entries, start + 1
+
+        if rest:
+            lines = []
+            for i, e in enumerate(rest):
+                rank = rank_offset + i
+                extra = f"{e[self.extra_key]} · " if self.extra_key and e.get(self.extra_key) else ""
+                lines.append(f"**{rank}.** {e['name']} — {extra}{e[self.value_key]:,} {self.unit} *({e['club']})*")
+            for i in range(0, len(lines), 10):
+                embed.add_field(name=chr(8203), value="\n".join(lines[i:i + 10]), inline=False)
+        elif not self.filtered:
+            embed.description = "Aucun membre à afficher."
+
+        club_txt = self.club_filter or "tous les clans"
+        footer = f"{len(self.filtered)} membres ({club_txt}) · Page {self.page + 1}/{self.total_pages}"
+        if self.extra_note:
+            footer += f" · {self.extra_note}"
+        embed.set_footer(text=footer)
+        return embed
+
+    async def _on_filter(self, interaction: discord.Interaction):
+        value = self.select.values[0]
+        view = self._clone(club_filter=None if value == "__all__" else value, page=0)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    async def _prev(self, interaction: discord.Interaction):
+        view = self._clone(page=self.page - 1)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    async def _next(self, interaction: discord.Interaction):
+        view = self._clone(page=self.page + 1)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+
 @bot.command(name="classement_trophees_famille", aliases=["ctf", "top_famille"])
 async def cmd_classement_trophees_famille(ctx):
     if not bs_family_clubs:
@@ -9074,23 +9171,23 @@ async def cmd_classement_trophees_famille(ctx):
             errors.append(f"`#{tag}` : {err}")
             continue
         for m in data['members']:
-            all_members.append({**m, 'club': data['name']})
+            all_members.append({'name': m['name'], 'trophies': m['trophies'], 'club': data['name']})
         total_family += sum(m['trophies'] for m in data['members'])
 
     if not all_members:
         return await ctx.send("❌ Impossible de récupérer les données des clans.\n" + "\n".join(errors))
 
     all_members.sort(key=lambda m: m['trophies'], reverse=True)
-    lines = [
-        f"**{i + 1}.** {m['name']} — {m['trophies']:,} 🏆 *({m['club']})*"
-        for i, m in enumerate(all_members[:25])
-    ]
-    embed = discord.Embed(title="🏆 Classement Trophées — Famille", description="\n".join(lines), color=0xf1c40f)
-    footer = f"{len(all_members)} membres · {total_family:,} trophées cumulés"
+    clubs = list(dict.fromkeys(m['club'] for m in all_members))
+    note = f"{total_family:,} trophées cumulés"
     if errors:
-        footer += f" · {len(errors)} clan(s) injoignable(s)"
-    embed.set_footer(text=footer)
-    await ctx.send(embed=embed)
+        note += f" · {len(errors)} clan(s) injoignable(s)"
+
+    view = BsFamilyLeaderboardView(
+        title="🏆 Classement Trophées — Famille", color=0xf1c40f,
+        entries=all_members, unit="🏆", clubs=clubs, value_key='trophies', extra_note=note,
+    )
+    await ctx.send(embed=view.build_embed(), view=view)
 
 
 @tasks.loop(hours=4)
@@ -9136,16 +9233,15 @@ async def cmd_classement_ranked_famille(ctx):
         )
 
     entries = sorted(bs_family_ranked_cache.values(), key=lambda m: m.get('ranked_pts', 0), reverse=True)
-    lines = [
-        f"**{i + 1}.** {m['name']} — {m.get('ranked_tier', '?')} ({m.get('ranked_pts', 0):,} pts) *({m['club']})*"
-        for i, m in enumerate(entries[:25])
-    ]
-    embed = discord.Embed(title="🎖️ Classement Classé — Famille", description="\n".join(lines), color=0x9b59b6)
-    footer = f"{len(entries)} membres"
-    if bs_family_ranked_updated_at:
-        footer += f" · Dernière mise à jour : {bs_family_ranked_updated_at}"
-    embed.set_footer(text=footer)
-    await ctx.send(embed=embed)
+    clubs = list(dict.fromkeys(m['club'] for m in entries))
+    note = f"Dernière mise à jour : {bs_family_ranked_updated_at}" if bs_family_ranked_updated_at else None
+
+    view = BsFamilyLeaderboardView(
+        title="🎖️ Classement Classé — Famille", color=0x9b59b6,
+        entries=entries, unit="pts", clubs=clubs, value_key='ranked_pts',
+        extra_key='ranked_tier', extra_note=note,
+    )
+    await ctx.send(embed=view.build_embed(), view=view)
 
 
 @bot.command(name='maville')
