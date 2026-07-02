@@ -8672,6 +8672,7 @@ async def _bs_fetch_player(tag: str):
         'trophies': player.get('trophies', 0),
         'ranked_pts': ranked_pts,
         'ranked_tier': ranked_tier,
+        'club': (player.get('club') or {}).get('name'),
     }, None
 
 
@@ -8738,6 +8739,7 @@ def _bs_embed(member: discord.Member, acc: dict) -> discord.Embed:
         embed.add_field(name="🎖️ Rang classé", value=f"{acc['ranked_tier']} ({acc.get('ranked_pts', 0):,} pts)", inline=True)
     else:
         embed.add_field(name="🎖️ Rang classé", value="Indisponible pour le moment", inline=True)
+    embed.add_field(name="🌿 Club", value=acc.get('club') or "Sans club", inline=True)
     return embed
 
 
