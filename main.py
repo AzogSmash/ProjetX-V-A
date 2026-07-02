@@ -8,6 +8,7 @@ import math
 import random
 import json
 import io
+import re
 from collections import defaultdict
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
@@ -8620,6 +8621,13 @@ def _ranked_tier_name(points: int) -> str:
     return tier
 
 
+def _bs_strip_markup(text):
+    """Retire les balises de couleur du jeu (ex: '<c4>ProjetZ</c>' -> 'ProjetZ')."""
+    if not text:
+        return text
+    return re.sub(r'</?c\d*>', '', text).strip()
+
+
 async def _bs_fetch_player(tag: str):
     """Trophées via l'API officielle (proxy RoyaleAPI, pas besoin d'IP fixe) + rang classé
     via api.rnt.dev (source tierce non officielle, best-effort — l'API officielle n'expose
@@ -8668,15 +8676,16 @@ async def _bs_fetch_player(tag: str):
 
     return {
         'tag': player.get('tag', f"#{clean}"),
-        'name': player.get('name', '?'),
+        'name': _bs_strip_markup(player.get('name')) or '?',
         'trophies': player.get('trophies', 0),
         'ranked_pts': ranked_pts,
         'ranked_tier': ranked_tier,
-        'club': (player.get('club') or {}).get('name'),
+        'club': _bs_strip_markup((player.get('club') or {}).get('name')),
     }, None
 
 
-def _bs_expected_role(category: str, value: int):
+def _bs_best_tier(category: str, value: int):
+    """Retourne (seuil_min, role_id) du palier le plus haut atteint, ou None."""
     best = None
     for min_str, role_id in bs_role_config[category].items():
         try:
@@ -8685,7 +8694,58 @@ def _bs_expected_role(category: str, value: int):
             continue
         if value >= mn and (best is None or mn > best[0]):
             best = (mn, role_id)
+    return best
+
+
+def _bs_expected_role(category: str, value: int):
+    best = _bs_best_tier(category, value)
     return best[1] if best else None
+
+
+BS_CONGRATS_CHANNEL_ID = 1513110809109205151
+
+async def _bs_announce_promotion(member: discord.Member, old_acc: dict, new_data: dict):
+    """Poste un message de félicitations dans le salon général si le membre vient de
+    passer un palier (trophées et/ou classé) par rapport à son état précédent connu.
+    Ne doit JAMAIS être appelé lors du tout premier !bslink (pas d'état précédent =
+    pas de progression, juste une inscription) — seulement lors d'un rafraîchissement
+    ultérieur (!bsprofil ou sync horaire)."""
+    if not old_acc:
+        return  # pas d'état précédent → rien à comparer, on ne notifie pas
+
+    gains = []
+
+    old_trophy = _bs_best_tier('trophies', old_acc.get('trophies', 0))
+    new_trophy = _bs_best_tier('trophies', new_data.get('trophies', 0))
+    if new_trophy and (old_trophy is None or new_trophy[0] > old_trophy[0]):
+        gains.append(f"🏆 **{new_data.get('trophies', 0):,} trophées** → <@&{new_trophy[1]}>")
+
+    old_ranked_pts = old_acc.get('ranked_pts')
+    new_ranked_pts = new_data.get('ranked_pts')
+    if new_ranked_pts is not None:
+        old_rank = _bs_best_tier('ranked', old_ranked_pts) if old_ranked_pts is not None else None
+        new_rank = _bs_best_tier('ranked', new_ranked_pts)
+        if new_rank and (old_rank is None or new_rank[0] > old_rank[0]):
+            tier_label = new_data.get('ranked_tier') or 'Classé'
+            gains.append(f"🎖️ **{tier_label}** ({new_ranked_pts:,} pts) → <@&{new_rank[1]}>")
+
+    if not gains:
+        return
+
+    channel = bot.get_channel(BS_CONGRATS_CHANNEL_ID)
+    if not channel:
+        return
+
+    embed = discord.Embed(
+        title="🎉 Nouveau palier Brawl Stars !",
+        description=f"{member.mention} vient de progresser :\n" + "\n".join(gains),
+        color=0xf1c40f
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    try:
+        await channel.send(content=member.mention, embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
+    except (discord.Forbidden, discord.HTTPException):
+        pass
 
 
 async def _bs_sync_member_roles(member: discord.Member, trophies: int, ranked_pts):
@@ -8774,6 +8834,8 @@ async def cmd_bsprofil(ctx, member: discord.Member = None):
         if data['ranked_tier'] is None:
             data['ranked_pts']  = acc.get('ranked_pts')
             data['ranked_tier'] = acc.get('ranked_tier')
+        if ctx.guild:
+            await _bs_announce_promotion(member, acc, data)
         bs_accounts[uid] = data
         save_data()
         acc = data
@@ -8864,11 +8926,12 @@ async def sync_bs_roles():
             if data['ranked_tier'] is None:
                 data['ranked_pts']  = acc.get('ranked_pts')
                 data['ranked_tier'] = acc.get('ranked_tier')
-            bs_accounts[uid_str] = data
             for guild in bot.guilds:
                 member = guild.get_member(int(uid_str))
                 if member:
+                    await _bs_announce_promotion(member, acc, data)
                     await _bs_sync_member_roles(member, data['trophies'], data['ranked_pts'])
+            bs_accounts[uid_str] = data
         await asyncio.sleep(1)
     save_data()
 
