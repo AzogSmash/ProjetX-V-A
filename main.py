@@ -786,7 +786,7 @@ COMMAND_USAGE = {
     'lierbs':        '`!bslink <tag>` (alias `!lierbs`)\nEx : `!lierbs #2ABC123`',
     'bsprofil':      '`!bsprofil [@membre]`\nEx : `!bsprofil` · `!bs @Joueur`',
     'bs':            '`!bsprofil [@membre]` (alias `!bs`)\nEx : `!bs @Joueur`',
-    'bs_roles':      '`!bs_roles trophees <min> @role` · `!bs_roles rank <palier> @role` · `!bs_roles liste` *(Admin)*',
+    'bs_roles':      '`!bs_roles trophees <min> @role` · `!bs_roles ranked <min_points> @role` · `!bs_roles liste` *(Admin)*',
     'graphique':     '`!graphique <SYM>`\nSymboles disponibles : `BTC` `ETH` `DOGE` `SOL` `XRP`\nEx : `!graphique BTC`',
     'chart':         '`!graphique <SYM>` — Ex : `!graphique ETH`',
     'courbe':        '`!graphique <SYM>` — Ex : `!graphique DOGE`',
@@ -968,7 +968,7 @@ def _build_help_categories(ctx):
                  "`!bslink <tag>` (`!lierbs`) — Lier ton compte Brawl Stars\n"
                  "`!bsprofil [@membre]` (`!bs`) — Voir/rafraîchir trophées et rang classé\n"
                  "*(Admin)* `!bs_roles trophees <min> @role` — Palier de trophées → rôle\n"
-                 "*(Admin)* `!bs_roles rank <palier> @role` — Rang classé → rôle\n"
+                 "*(Admin)* `!bs_roles ranked <min_points> @role` — Palier de points classé → rôle\n"
                  "*(Admin)* `!bs_roles liste` — Voir la configuration"))
 
     if has_manage_messages or has_ban_members:
@@ -8676,26 +8676,26 @@ async def _bs_fetch_player(tag: str):
     }, None
 
 
-def _bs_expected_trophy_role(trophies: int):
+def _bs_expected_role(category: str, value: int):
     best = None
-    for min_str, role_id in bs_role_config['trophies'].items():
+    for min_str, role_id in bs_role_config[category].items():
         try:
             mn = int(min_str)
         except (ValueError, TypeError):
             continue
-        if trophies >= mn and (best is None or mn > best[0]):
+        if value >= mn and (best is None or mn > best[0]):
             best = (mn, role_id)
     return best[1] if best else None
 
 
-async def _bs_sync_member_roles(member: discord.Member, trophies: int, ranked_tier):
+async def _bs_sync_member_roles(member: discord.Member, trophies: int, ranked_pts):
     """Ajoute/retire les rôles Brawl Stars du membre selon ses trophées (toujours à jour,
-    source fiable) et son rang classé (seulement si `ranked_tier` est connu — sinon on ne
-    touche pas au rôle classé plutôt que de le retirer à tort)."""
+    source fiable) et ses points classés (seulement si `ranked_pts` est connu — sinon on ne
+    touche pas aux rôles classé plutôt que de les retirer à tort)."""
     guild = member.guild
     to_add, to_remove = [], []
 
-    expected_trophy_rid = _bs_expected_trophy_role(trophies)
+    expected_trophy_rid = _bs_expected_role('trophies', trophies)
     for role_id in set(bs_role_config['trophies'].values()):
         role = guild.get_role(role_id)
         if not role:
@@ -8707,8 +8707,8 @@ async def _bs_sync_member_roles(member: discord.Member, trophies: int, ranked_ti
         elif not should_have and has_it:
             to_remove.append(role)
 
-    if ranked_tier is not None:
-        expected_rank_rid = bs_role_config['ranked'].get(ranked_tier)
+    if ranked_pts is not None:
+        expected_rank_rid = _bs_expected_role('ranked', ranked_pts)
         for role_id in set(bs_role_config['ranked'].values()):
             role = guild.get_role(role_id)
             if not role:
@@ -8753,7 +8753,7 @@ async def cmd_bslink(ctx, tag: str):
     save_data()
 
     if ctx.guild:
-        await _bs_sync_member_roles(ctx.author, data['trophies'], data['ranked_tier'])
+        await _bs_sync_member_roles(ctx.author, data['trophies'], data['ranked_pts'])
 
     embed = _bs_embed(ctx.author, data)
     embed.title = f"✅ Compte Brawl Stars lié — {ctx.author.display_name}"
@@ -8778,7 +8778,7 @@ async def cmd_bsprofil(ctx, member: discord.Member = None):
         save_data()
         acc = data
         if ctx.guild:
-            await _bs_sync_member_roles(member, acc['trophies'], acc['ranked_tier'])
+            await _bs_sync_member_roles(member, acc['trophies'], acc['ranked_pts'])
     # en cas d'échec du rafraîchissement, on affiche simplement les dernières données connues
 
     await ctx.send(embed=_bs_embed(member, acc))
@@ -8789,19 +8789,22 @@ async def cmd_bs_roles(ctx, action: str = None, *, reste: str = None):
     if not (ctx.author.guild_permissions.administrator or is_bot_owner(ctx.author)):
         return await ctx.send("❌ Réservé aux administrateurs.")
 
+    ranked_ref = " · ".join(f"{name} = {pts:,}" for pts, name in RANKED_TIERS)
     usage = (
         "**Usage :**\n"
         "`!bs_roles trophees <min> @role` — définit un palier de trophées\n"
-        "`!bs_roles trophees <min> retirer` — supprime un palier\n"
-        "`!bs_roles rank <nom_palier> @role` — définit un rôle pour un rang classé "
-        "(ex : `Or 2`, `Légende 1`, `Masters 3`, `Pro`)\n"
-        "`!bs_roles rank <nom_palier> retirer` — supprime\n"
-        "`!bs_roles liste` — affiche la configuration actuelle"
+        "`!bs_roles ranked <min_points> @role` — définit un palier de points classé\n"
+        "`!bs_roles trophees|ranked <min> retirer` — supprime un palier\n"
+        "`!bs_roles liste` — affiche la configuration actuelle\n\n"
+        f"**Repères points classé :** {ranked_ref}\n"
+        "Un palier couvre tout jusqu'au suivant configuré : ex. `!bs_roles ranked 3000 @Diamant` "
+        "couvre tout Diamant (I à III) si tu n'as qu'un seul rôle pour ce rang."
     )
 
-    if action is None or action.lower() not in ('trophees', 'rank', 'liste'):
+    if action is None or action.lower() not in ('trophees', 'rank', 'ranked', 'liste'):
         return await ctx.send(usage)
     action = action.lower()
+    category = 'trophies' if action == 'trophees' else 'ranked'
 
     if action == 'liste':
         lines = []
@@ -8812,7 +8815,10 @@ async def cmd_bs_roles(ctx, action: str = None, *, reste: str = None):
             )
             lines.append(f"**Trophées**\n{trophy_lines}")
         if bs_role_config['ranked']:
-            rank_lines = "\n".join(f"**{name}** → <@&{rid}>" for name, rid in bs_role_config['ranked'].items())
+            rank_lines = "\n".join(
+                f"≥ {int(mn):,} pts → <@&{rid}>"
+                for mn, rid in sorted(bs_role_config['ranked'].items(), key=lambda x: int(x[0]))
+            )
             lines.append(f"**Classé**\n{rank_lines}")
         if not lines:
             return await ctx.send("Aucun palier configuré pour l'instant.")
@@ -8827,27 +8833,16 @@ async def cmd_bs_roles(ctx, action: str = None, *, reste: str = None):
         return await ctx.send(usage)
     key_raw, role_token = parts
 
-    if action == 'trophees':
-        try:
-            key = str(int(key_raw.replace(',', '').replace(' ', '')))
-        except ValueError:
-            return await ctx.send("❌ Le palier de trophées doit être un nombre. Ex : `!bs_roles trophees 10000 @role`.")
-        category = 'trophies'
-    else:
-        tier_names = {name.lower(): name for _, name in RANKED_TIERS}
-        norm = key_raw.strip().lower()
-        if norm not in tier_names:
-            return await ctx.send(
-                "❌ Palier classé inconnu. Paliers valides : " + ", ".join(name for _, name in RANKED_TIERS)
-            )
-        key = tier_names[norm]
-        category = 'ranked'
+    try:
+        key = str(int(key_raw.replace(',', '').replace(' ', '')))
+    except ValueError:
+        return await ctx.send(f"❌ Le seuil doit être un nombre. Ex : `!bs_roles {action} 3000 @role`.")
 
     if role_token.lower() in ('retirer', 'remove', 'aucun'):
         if key in bs_role_config[category]:
             del bs_role_config[category][key]
             save_data()
-            return await ctx.send(f"✅ Palier **{key}** retiré.")
+            return await ctx.send(f"✅ Palier **{key}** retiré ({'trophées' if category == 'trophies' else 'classé'}).")
         return await ctx.send(f"ℹ️ Aucun rôle configuré pour **{key}**.")
 
     try:
@@ -8857,7 +8852,8 @@ async def cmd_bs_roles(ctx, action: str = None, *, reste: str = None):
 
     bs_role_config[category][key] = role.id
     save_data()
-    await ctx.send(f"✅ **{key}** → {role.mention}", allowed_mentions=discord.AllowedMentions.none())
+    unit = "🏆" if category == 'trophies' else "pts"
+    await ctx.send(f"✅ ≥ {int(key):,} {unit} → {role.mention}", allowed_mentions=discord.AllowedMentions.none())
 
 
 @tasks.loop(hours=1)
@@ -8872,7 +8868,7 @@ async def sync_bs_roles():
             for guild in bot.guilds:
                 member = guild.get_member(int(uid_str))
                 if member:
-                    await _bs_sync_member_roles(member, data['trophies'], data['ranked_tier'])
+                    await _bs_sync_member_roles(member, data['trophies'], data['ranked_pts'])
         await asyncio.sleep(1)
     save_data()
 
