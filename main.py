@@ -9023,7 +9023,15 @@ async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
     if action == 'liste':
         if not bs_family_clubs:
             return await ctx.send("Aucun clan configuré pour l'instant.")
-        return await ctx.send("**Clans de la famille :**\n" + "\n".join(f"`#{t}`" for t in bs_family_clubs))
+        await ctx.typing()
+        lines = []
+        for t in bs_family_clubs:
+            data, err = await _bs_fetch_club(t)
+            if data:
+                lines.append(f"**{data['name']}** — `#{t}` ({len(data['members'])} membres)")
+            else:
+                lines.append(f"`#{t}` — ⚠️ {err}")
+        return await ctx.send("**Clans de la famille :**\n" + "\n".join(lines))
 
     if not tag:
         return await ctx.send(usage)
