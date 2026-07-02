@@ -8749,6 +8749,7 @@ async def _bs_fetch_club(tag: str):
     return {
         'tag': club.get('tag', f"#{clean}"),
         'name': _bs_strip_markup(club.get('name')) or '?',
+        'trophies': club.get('trophies', 0),
         'members': members,
     }, None
 
@@ -9024,14 +9025,20 @@ async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
         if not bs_family_clubs:
             return await ctx.send("Aucun clan configuré pour l'instant.")
         await ctx.typing()
-        lines = []
+        ok, failed = [], []
         for t in bs_family_clubs:
             data, err = await _bs_fetch_club(t)
             if data:
-                lines.append(f"**{data['name']}** — `#{t}` ({len(data['members'])} membres)")
+                data['raw_tag'] = t
+                ok.append(data)
             else:
-                lines.append(f"`#{t}` — ⚠️ {err}")
-        return await ctx.send("**Clans de la famille :**\n" + "\n".join(lines))
+                failed.append(f"`#{t}` — ⚠️ {err}")
+        ok.sort(key=lambda c: c['trophies'], reverse=True)
+        lines = [
+            f"**{c['name']}** — `#{c['raw_tag']}` — {c['trophies']:,} 🏆 ({len(c['members'])} membres)"
+            for c in ok
+        ]
+        return await ctx.send("**Clans de la famille (triés par trophées) :**\n" + "\n".join(lines + failed))
 
     if not tag:
         return await ctx.send(usage)
