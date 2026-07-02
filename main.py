@@ -8662,7 +8662,8 @@ async def _bs_fetch_player(tag: str):
                             ranked_pts, ranked_tier = val, _ranked_tier_name(val)
             except Exception:
                 pass  # Rang classé indisponible (API tierce down) — les trophées restent valides
-    except Exception:
+    except Exception as e:
+        logging.warning(f"[bs] erreur réseau API Brawl Stars pour tag '{clean}': {type(e).__name__}: {e}")
         return None, "🌐 Impossible de contacter l'API Brawl Stars. Réessaie plus tard."
 
     return {
