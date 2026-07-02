@@ -19,6 +19,7 @@ load_dotenv()
 LOG_MODERATION_CHANNEL_ID = os.getenv("1515780858483576923")
 LOG_GIVEAWAY_CHANNEL_ID = os.getenv("1515781002817966341")
 LOG_GENERAL_CHANNEL_ID = os.getenv("1515781072783151314")
+BRAWLSTARS_API_KEY = os.getenv("BRAWLSTARS_API_KEY")
 
 # Intents du bot
 intents = discord.Intents.default()
@@ -261,6 +262,8 @@ ticket_purchases  = {}   # str(uid) -> {'count': int, 'day': 'YYYY-MM-DD'}
 birthdays        = {}   # str(uid) -> {'day': int, 'month': int, 'guild_id': int}
 crypto_alerts    = {}   # str(uid) -> [{'symbol': str, 'target': float, 'direction': str}]
 tournament_elo   = {}   # str(uid) -> int (score ELO tournoi)
+bs_accounts      = {}   # str(uid) -> {'tag','name','trophies','ranked_pts','ranked_tier'}
+bs_role_config   = {'trophies': {}, 'ranked': {}}  # 'trophies': {str(min): role_id}, 'ranked': {tier_name: role_id}
 ADMIN_LOG_CHANNEL_ID = 0  # à configurer via !set_admin_log <channel_id>
 draft_sessions       = {}   # channel_id -> session dict (phase de ban Brawl Stars)
 theft_stats           = {}   # str(uid_victim) -> {'attempts': int, 'success': int}
@@ -356,6 +359,7 @@ def load_data():
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
+    global bs_accounts, bs_role_config
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
@@ -439,6 +443,11 @@ def load_data():
                 tournament_elo   = data.get('tournament_elo', {})
                 tournaments      = data.get('tournaments', {})
                 locations        = data.get('locations', {})
+                bs_accounts      = data.get('bs_accounts', {})
+                loaded_bs_roles  = data.get('bs_role_config', {})
+                if isinstance(loaded_bs_roles, dict):
+                    bs_role_config['trophies'] = loaded_bs_roles.get('trophies', {}) or {}
+                    bs_role_config['ranked']   = loaded_bs_roles.get('ranked', {}) or {}
                 businesses           = data.get('businesses', {})
                 theft_stats           = data.get('theft_stats', {})
                 daily_sell_volume     = data.get('daily_sell_volume', {})
@@ -574,6 +583,8 @@ def save_data():
     data_to_save['tournament_elo']   = tournament_elo
     data_to_save['tournaments']      = tournaments
     data_to_save['locations']        = locations
+    data_to_save['bs_accounts']      = bs_accounts
+    data_to_save['bs_role_config']   = bs_role_config
     data_to_save['businesses']           = businesses
     data_to_save['theft_stats']           = theft_stats
     data_to_save['daily_sell_volume']     = daily_sell_volume
@@ -711,6 +722,8 @@ async def on_ready():
         update_crypto_prices.start()
     if not check_birthdays.is_running():
         check_birthdays.start()
+    if not sync_bs_roles.is_running():
+        sync_bs_roles.start()
     logging.warning("Bot prêt et fonctionnel !")
 
 
@@ -769,6 +782,11 @@ COMMAND_USAGE = {
     'duel':          '`!duel @membre <mise|all>`\nEx : `!duel @Joueur 500`',
     'mines':         '`!mines <mise|all>`\nEx : `!mines 300` · `!mines all`',
     'poker':         '`!poker start <ante>` — Créer une table\n*(Tout le reste se joue avec les boutons : Rejoindre / Démarrer / Fold / Call / Check / Raise / All-in / Voir mes cartes)*',
+    'bslink':        '`!bslink <tag>`\nEx : `!bslink #2ABC123`',
+    'lierbs':        '`!bslink <tag>` (alias `!lierbs`)\nEx : `!lierbs #2ABC123`',
+    'bsprofil':      '`!bsprofil [@membre]`\nEx : `!bsprofil` · `!bs @Joueur`',
+    'bs':            '`!bsprofil [@membre]` (alias `!bs`)\nEx : `!bs @Joueur`',
+    'bs_roles':      '`!bs_roles trophees <min> @role` · `!bs_roles rank <palier> @role` · `!bs_roles liste` *(Admin)*',
     'graphique':     '`!graphique <SYM>`\nSymboles disponibles : `BTC` `ETH` `DOGE` `SOL` `XRP`\nEx : `!graphique BTC`',
     'chart':         '`!graphique <SYM>` — Ex : `!graphique ETH`',
     'courbe':        '`!graphique <SYM>` — Ex : `!graphique DOGE`',
@@ -945,6 +963,13 @@ def _build_help_categories(ctx):
                  "*(Admin)* `!tournoi_ajouter @membre [équipe]` — Ajouter un joueur\n"
                  "*(Admin)* `!tournoi_retirer @membre` — Retirer un joueur\n"
                  "`!draft <1v1|2v2|3v3|4v4|5v5> @cap2` — Phase de ban Brawl Stars"))
+    cats.append(("brawlstars", "🎮 Profil Brawl Stars",
+                 "Lie ton compte en jeu pour un rôle auto selon tes trophées/rang classé",
+                 "`!bslink <tag>` (`!lierbs`) — Lier ton compte Brawl Stars\n"
+                 "`!bsprofil [@membre]` (`!bs`) — Voir/rafraîchir trophées et rang classé\n"
+                 "*(Admin)* `!bs_roles trophees <min> @role` — Palier de trophées → rôle\n"
+                 "*(Admin)* `!bs_roles rank <palier> @role` — Rang classé → rôle\n"
+                 "*(Admin)* `!bs_roles liste` — Voir la configuration"))
 
     if has_manage_messages or has_ban_members:
         lines = []
@@ -3001,8 +3026,9 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
 
     coins[ctx.author.id] -= mise
     if player_choice == result:
-        coins[ctx.author.id] += mise * 2
-        outcome = f"🎉 **Gagné !** +{mise:,} coins"; color = 0x2ecc71
+        gain = int(mise * 1.9); net = gain - mise
+        coins[ctx.author.id] += gain
+        outcome = f"🎉 **Gagné !** +{net:,} coins"; color = 0x2ecc71
     else:
         outcome = f"😢 **Perdu !** -{mise:,} coins"; color = 0xe74c3c
     save_data()
@@ -8567,6 +8593,286 @@ def _carte_font(size):
         except Exception:
             pass
     return ImageFont.load_default()
+
+
+# ── Brawl Stars : liaison de compte + rôles auto (trophées / classé) ────────
+BS_API_BASE  = "https://bsproxy.royaleapi.dev/v1"
+RNT_API_BASE = "https://api.rnt.dev/profile"
+
+RANKED_TIERS = [
+    (0,     "Bronze 1"),   (250,   "Bronze 2"),   (500,   "Bronze 3"),
+    (750,   "Argent 1"),   (1000,  "Argent 2"),   (1250,  "Argent 3"),
+    (1500,  "Or 1"),       (2000,  "Or 2"),        (2500,  "Or 3"),
+    (3000,  "Diamant 1"),  (3500,  "Diamant 2"),   (4000,  "Diamant 3"),
+    (4500,  "Mythique 1"), (5000,  "Mythique 2"),  (5500,  "Mythique 3"),
+    (6000,  "Légende 1"),  (6750,  "Légende 2"),   (7500,  "Légende 3"),
+    (8250,  "Masters 1"),  (9250,  "Masters 2"),   (10250, "Masters 3"),
+    (11250, "Pro"),
+]
+
+def _ranked_tier_name(points: int) -> str:
+    tier = RANKED_TIERS[0][1]
+    for min_pts, name in RANKED_TIERS:
+        if points >= min_pts:
+            tier = name
+        else:
+            break
+    return tier
+
+
+async def _bs_fetch_player(tag: str):
+    """Trophées via l'API officielle (proxy RoyaleAPI, pas besoin d'IP fixe) + rang classé
+    via api.rnt.dev (source tierce non officielle, best-effort — l'API officielle n'expose
+    pas les points classés). Retourne (data: dict|None, err: str|None)."""
+    clean = tag.strip().lstrip('#').upper()
+    if not clean:
+        return None, "❌ Tag invalide. Exemple : `#2ABC123`."
+    if not BRAWLSTARS_API_KEY:
+        return None, "🔑 Aucune clé API Brawl Stars configurée. Préviens un admin."
+
+    headers = {"Authorization": f"Bearer {BRAWLSTARS_API_KEY}", "Accept": "application/json"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{BS_API_BASE}/players/%23{clean}",
+                headers=headers, timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status == 404:
+                    return None, "❓ Joueur introuvable. Vérifie que le tag est correct."
+                if resp.status == 403:
+                    return None, "🔑 Clé API Brawl Stars invalide ou expirée. Préviens un admin."
+                if resp.status == 429:
+                    return None, "⏳ Trop de requêtes vers l'API Brawl Stars, réessaie dans quelques secondes."
+                if resp.status == 503:
+                    return None, "🔧 L'API Brawl Stars est en maintenance, réessaie plus tard."
+                if resp.status != 200:
+                    return None, f"❌ Erreur inattendue de l'API Brawl Stars ({resp.status})."
+                player = await resp.json(content_type=None)
+
+            ranked_pts, ranked_tier = None, None
+            try:
+                async with session.get(
+                    f"{RNT_API_BASE}?tag={clean}", timeout=aiohttp.ClientTimeout(total=10)
+                ) as rnt_resp:
+                    if rnt_resp.status == 200:
+                        rnt_data = await rnt_resp.json(content_type=None)
+                        stats = (rnt_data.get('result') or {}).get('stats', [])
+                        val = next((s.get('value') for s in stats if s.get('id') == 24), None)
+                        if val is not None:
+                            ranked_pts, ranked_tier = val, _ranked_tier_name(val)
+            except Exception:
+                pass  # Rang classé indisponible (API tierce down) — les trophées restent valides
+    except Exception:
+        return None, "🌐 Impossible de contacter l'API Brawl Stars. Réessaie plus tard."
+
+    return {
+        'tag': player.get('tag', f"#{clean}"),
+        'name': player.get('name', '?'),
+        'trophies': player.get('trophies', 0),
+        'ranked_pts': ranked_pts,
+        'ranked_tier': ranked_tier,
+    }, None
+
+
+def _bs_expected_trophy_role(trophies: int):
+    best = None
+    for min_str, role_id in bs_role_config['trophies'].items():
+        try:
+            mn = int(min_str)
+        except (ValueError, TypeError):
+            continue
+        if trophies >= mn and (best is None or mn > best[0]):
+            best = (mn, role_id)
+    return best[1] if best else None
+
+
+async def _bs_sync_member_roles(member: discord.Member, trophies: int, ranked_tier):
+    """Ajoute/retire les rôles Brawl Stars du membre selon ses trophées (toujours à jour,
+    source fiable) et son rang classé (seulement si `ranked_tier` est connu — sinon on ne
+    touche pas au rôle classé plutôt que de le retirer à tort)."""
+    guild = member.guild
+    to_add, to_remove = [], []
+
+    expected_trophy_rid = _bs_expected_trophy_role(trophies)
+    for role_id in set(bs_role_config['trophies'].values()):
+        role = guild.get_role(role_id)
+        if not role:
+            continue
+        has_it = role in member.roles
+        should_have = (role_id == expected_trophy_rid)
+        if should_have and not has_it:
+            to_add.append(role)
+        elif not should_have and has_it:
+            to_remove.append(role)
+
+    if ranked_tier is not None:
+        expected_rank_rid = bs_role_config['ranked'].get(ranked_tier)
+        for role_id in set(bs_role_config['ranked'].values()):
+            role = guild.get_role(role_id)
+            if not role:
+                continue
+            has_it = role in member.roles
+            should_have = (role_id == expected_rank_rid)
+            if should_have and not has_it:
+                to_add.append(role)
+            elif not should_have and has_it:
+                to_remove.append(role)
+
+    try:
+        if to_remove:
+            await member.remove_roles(*to_remove, reason="Sync Brawl Stars")
+        if to_add:
+            await member.add_roles(*to_add, reason="Sync Brawl Stars")
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+def _bs_embed(member: discord.Member, acc: dict) -> discord.Embed:
+    embed = discord.Embed(title=f"🎮 Profil Brawl Stars de {member.display_name}", color=0xf1c40f)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="🏷️ Pseudo", value=acc.get('name', '?'), inline=True)
+    embed.add_field(name="🔖 Tag", value=acc.get('tag', '?'), inline=True)
+    embed.add_field(name="🏆 Trophées", value=f"{acc.get('trophies', 0):,}", inline=True)
+    if acc.get('ranked_tier'):
+        embed.add_field(name="🎖️ Rang classé", value=f"{acc['ranked_tier']} ({acc.get('ranked_pts', 0):,} pts)", inline=True)
+    else:
+        embed.add_field(name="🎖️ Rang classé", value="Indisponible pour le moment", inline=True)
+    return embed
+
+
+@bot.command(name="bslink", aliases=["lierbs"])
+async def cmd_bslink(ctx, tag: str):
+    data, err = await _bs_fetch_player(tag)
+    if err:
+        return await ctx.send(err)
+
+    bs_accounts[str(ctx.author.id)] = data
+    save_data()
+
+    if ctx.guild:
+        await _bs_sync_member_roles(ctx.author, data['trophies'], data['ranked_tier'])
+
+    embed = _bs_embed(ctx.author, data)
+    embed.title = f"✅ Compte Brawl Stars lié — {ctx.author.display_name}"
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="bsprofil", aliases=["bs"])
+async def cmd_bsprofil(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    uid = str(member.id)
+    acc = bs_accounts.get(uid)
+    if not acc:
+        who = "Tu n'as" if member == ctx.author else f"{member.display_name} n'a"
+        return await ctx.send(f"❌ {who} pas encore lié de compte Brawl Stars. Utilise `!bslink <tag>`.")
+
+    data, err = await _bs_fetch_player(acc['tag'])
+    if data:
+        if data['ranked_tier'] is None:
+            data['ranked_pts']  = acc.get('ranked_pts')
+            data['ranked_tier'] = acc.get('ranked_tier')
+        bs_accounts[uid] = data
+        save_data()
+        acc = data
+        if ctx.guild:
+            await _bs_sync_member_roles(member, acc['trophies'], acc['ranked_tier'])
+    # en cas d'échec du rafraîchissement, on affiche simplement les dernières données connues
+
+    await ctx.send(embed=_bs_embed(member, acc))
+
+
+@bot.command(name="bs_roles", aliases=["bsroles"])
+async def cmd_bs_roles(ctx, action: str = None, *, reste: str = None):
+    if not (ctx.author.guild_permissions.administrator or is_bot_owner(ctx.author)):
+        return await ctx.send("❌ Réservé aux administrateurs.")
+
+    usage = (
+        "**Usage :**\n"
+        "`!bs_roles trophees <min> @role` — définit un palier de trophées\n"
+        "`!bs_roles trophees <min> retirer` — supprime un palier\n"
+        "`!bs_roles rank <nom_palier> @role` — définit un rôle pour un rang classé "
+        "(ex : `Or 2`, `Légende 1`, `Masters 3`, `Pro`)\n"
+        "`!bs_roles rank <nom_palier> retirer` — supprime\n"
+        "`!bs_roles liste` — affiche la configuration actuelle"
+    )
+
+    if action is None or action.lower() not in ('trophees', 'rank', 'liste'):
+        return await ctx.send(usage)
+    action = action.lower()
+
+    if action == 'liste':
+        lines = []
+        if bs_role_config['trophies']:
+            trophy_lines = "\n".join(
+                f"≥ {int(mn):,} 🏆 → <@&{rid}>"
+                for mn, rid in sorted(bs_role_config['trophies'].items(), key=lambda x: int(x[0]))
+            )
+            lines.append(f"**Trophées**\n{trophy_lines}")
+        if bs_role_config['ranked']:
+            rank_lines = "\n".join(f"**{name}** → <@&{rid}>" for name, rid in bs_role_config['ranked'].items())
+            lines.append(f"**Classé**\n{rank_lines}")
+        if not lines:
+            return await ctx.send("Aucun palier configuré pour l'instant.")
+        embed = discord.Embed(title="🎮 Config rôles Brawl Stars", description="\n\n".join(lines), color=0xf1c40f)
+        return await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+    if not reste:
+        return await ctx.send(usage)
+
+    parts = reste.rsplit(None, 1)
+    if len(parts) != 2:
+        return await ctx.send(usage)
+    key_raw, role_token = parts
+
+    if action == 'trophees':
+        try:
+            key = str(int(key_raw.replace(',', '').replace(' ', '')))
+        except ValueError:
+            return await ctx.send("❌ Le palier de trophées doit être un nombre. Ex : `!bs_roles trophees 10000 @role`.")
+        category = 'trophies'
+    else:
+        tier_names = {name.lower(): name for _, name in RANKED_TIERS}
+        norm = key_raw.strip().lower()
+        if norm not in tier_names:
+            return await ctx.send(
+                "❌ Palier classé inconnu. Paliers valides : " + ", ".join(name for _, name in RANKED_TIERS)
+            )
+        key = tier_names[norm]
+        category = 'ranked'
+
+    if role_token.lower() in ('retirer', 'remove', 'aucun'):
+        if key in bs_role_config[category]:
+            del bs_role_config[category][key]
+            save_data()
+            return await ctx.send(f"✅ Palier **{key}** retiré.")
+        return await ctx.send(f"ℹ️ Aucun rôle configuré pour **{key}**.")
+
+    try:
+        role = await commands.RoleConverter().convert(ctx, role_token)
+    except commands.BadArgument:
+        return await ctx.send("❌ Rôle introuvable. Mentionne le rôle (`@role`) ou donne son ID.")
+
+    bs_role_config[category][key] = role.id
+    save_data()
+    await ctx.send(f"✅ **{key}** → {role.mention}", allowed_mentions=discord.AllowedMentions.none())
+
+
+@tasks.loop(hours=1)
+async def sync_bs_roles():
+    for uid_str, acc in list(bs_accounts.items()):
+        data, err = await _bs_fetch_player(acc.get('tag', ''))
+        if data:
+            if data['ranked_tier'] is None:
+                data['ranked_pts']  = acc.get('ranked_pts')
+                data['ranked_tier'] = acc.get('ranked_tier')
+            bs_accounts[uid_str] = data
+            for guild in bot.guilds:
+                member = guild.get_member(int(uid_str))
+                if member:
+                    await _bs_sync_member_roles(member, data['trophies'], data['ranked_tier'])
+        await asyncio.sleep(1)
+    save_data()
+
 
 @bot.command(name='maville')
 async def cmd_maville(ctx, *, ville: str = None):
