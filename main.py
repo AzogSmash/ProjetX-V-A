@@ -265,6 +265,9 @@ crypto_alerts    = {}   # str(uid) -> [{'symbol': str, 'target': float, 'directi
 tournament_elo   = {}   # str(uid) -> int (score ELO tournoi)
 bs_accounts      = {}   # str(uid) -> {'tag','name','trophies','ranked_pts','ranked_tier'}
 bs_role_config   = {'trophies': {}, 'ranked': {}}  # 'trophies': {str(min): role_id}, 'ranked': {tier_name: role_id}
+bs_family_clubs         = []   # [tag_clan_sans_diese, ...]
+bs_family_ranked_cache  = {}   # str(tag_joueur) -> {'name','club','ranked_pts','ranked_tier'}
+bs_family_ranked_updated_at = None  # str affichable, ex '02/07 21:40'
 ADMIN_LOG_CHANNEL_ID = 0  # à configurer via !set_admin_log <channel_id>
 draft_sessions       = {}   # channel_id -> session dict (phase de ban Brawl Stars)
 theft_stats           = {}   # str(uid_victim) -> {'attempts': int, 'success': int}
@@ -360,7 +363,7 @@ def load_data():
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
-    global bs_accounts, bs_role_config
+    global bs_accounts, bs_role_config, bs_family_clubs, bs_family_ranked_cache, bs_family_ranked_updated_at
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
@@ -449,6 +452,9 @@ def load_data():
                 if isinstance(loaded_bs_roles, dict):
                     bs_role_config['trophies'] = loaded_bs_roles.get('trophies', {}) or {}
                     bs_role_config['ranked']   = loaded_bs_roles.get('ranked', {}) or {}
+                bs_family_clubs         = data.get('bs_family_clubs', [])
+                bs_family_ranked_cache  = data.get('bs_family_ranked_cache', {})
+                bs_family_ranked_updated_at = data.get('bs_family_ranked_updated_at')
                 businesses           = data.get('businesses', {})
                 theft_stats           = data.get('theft_stats', {})
                 daily_sell_volume     = data.get('daily_sell_volume', {})
@@ -586,6 +592,9 @@ def save_data():
     data_to_save['locations']        = locations
     data_to_save['bs_accounts']      = bs_accounts
     data_to_save['bs_role_config']   = bs_role_config
+    data_to_save['bs_family_clubs']  = bs_family_clubs
+    data_to_save['bs_family_ranked_cache']      = bs_family_ranked_cache
+    data_to_save['bs_family_ranked_updated_at'] = bs_family_ranked_updated_at
     data_to_save['businesses']           = businesses
     data_to_save['theft_stats']           = theft_stats
     data_to_save['daily_sell_volume']     = daily_sell_volume
@@ -725,6 +734,8 @@ async def on_ready():
         check_birthdays.start()
     if not sync_bs_roles.is_running():
         sync_bs_roles.start()
+    if not sync_family_ranked.is_running():
+        sync_family_ranked.start()
     logging.warning("Bot prêt et fonctionnel !")
 
 
@@ -788,6 +799,9 @@ COMMAND_USAGE = {
     'bsprofil':      '`!bsprofil [@membre]`\nEx : `!bsprofil` · `!bs @Joueur`',
     'bs':            '`!bsprofil [@membre]` (alias `!bs`)\nEx : `!bs @Joueur`',
     'bs_roles':      '`!bs_roles trophees <min> @role` · `!bs_roles ranked <min_points> @role` · `!bs_roles liste` *(Admin)*',
+    'bs_famille':    '`!bs_famille ajouter <tag_clan>` · `!bs_famille retirer <tag_clan>` · `!bs_famille liste` *(Admin)*',
+    'classement_trophees_famille': '`!classement_trophees_famille` (alias `!ctf`, `!top_famille`)',
+    'classement_ranked_famille':   '`!classement_ranked_famille` (alias `!crf`, `!top_ranked_famille`)',
     'graphique':     '`!graphique <SYM>`\nSymboles disponibles : `BTC` `ETH` `DOGE` `SOL` `XRP`\nEx : `!graphique BTC`',
     'chart':         '`!graphique <SYM>` — Ex : `!graphique ETH`',
     'courbe':        '`!graphique <SYM>` — Ex : `!graphique DOGE`',
@@ -970,7 +984,10 @@ def _build_help_categories(ctx):
                  "`!bsprofil [@membre]` (`!bs`) — Voir/rafraîchir trophées et rang classé\n"
                  "*(Admin)* `!bs_roles trophees <min> @role` — Palier de trophées → rôle\n"
                  "*(Admin)* `!bs_roles ranked <min_points> @role` — Palier de points classé → rôle\n"
-                 "*(Admin)* `!bs_roles liste` — Voir la configuration"))
+                 "*(Admin)* `!bs_roles liste` — Voir la configuration\n"
+                 "`!classement_trophees_famille` (`!ctf`) — Classement trophées de la famille de clans\n"
+                 "`!classement_ranked_famille` (`!crf`) — Classement classé de la famille (mis à jour ttes les 4h)\n"
+                 "*(Admin)* `!bs_famille ajouter/retirer <tag_clan>` — Gérer les clans de la famille"))
 
     if has_manage_messages or has_ban_members:
         lines = []
@@ -8628,6 +8645,23 @@ def _bs_strip_markup(text):
     return re.sub(r'</?c\d*>', '', text).strip()
 
 
+async def _bs_fetch_ranked_pts(session: aiohttp.ClientSession, clean_tag: str):
+    """Points classés depuis api.rnt.dev (source tierce, best-effort). Retourne (pts, tier) ou (None, None)."""
+    try:
+        async with session.get(
+            f"{RNT_API_BASE}?tag={clean_tag}", timeout=aiohttp.ClientTimeout(total=10)
+        ) as rnt_resp:
+            if rnt_resp.status == 200:
+                rnt_data = await rnt_resp.json(content_type=None)
+                stats = (rnt_data.get('result') or {}).get('stats', [])
+                val = next((s.get('value') for s in stats if s.get('id') == 24), None)
+                if val is not None:
+                    return val, _ranked_tier_name(val)
+    except Exception:
+        pass  # Rang classé indisponible (API tierce down) — pas bloquant pour l'appelant
+    return None, None
+
+
 async def _bs_fetch_player(tag: str):
     """Trophées via l'API officielle (proxy RoyaleAPI, pas besoin d'IP fixe) + rang classé
     via api.rnt.dev (source tierce non officielle, best-effort — l'API officielle n'expose
@@ -8657,19 +8691,7 @@ async def _bs_fetch_player(tag: str):
                     return None, f"❌ Erreur inattendue de l'API Brawl Stars ({resp.status})."
                 player = await resp.json(content_type=None)
 
-            ranked_pts, ranked_tier = None, None
-            try:
-                async with session.get(
-                    f"{RNT_API_BASE}?tag={clean}", timeout=aiohttp.ClientTimeout(total=10)
-                ) as rnt_resp:
-                    if rnt_resp.status == 200:
-                        rnt_data = await rnt_resp.json(content_type=None)
-                        stats = (rnt_data.get('result') or {}).get('stats', [])
-                        val = next((s.get('value') for s in stats if s.get('id') == 24), None)
-                        if val is not None:
-                            ranked_pts, ranked_tier = val, _ranked_tier_name(val)
-            except Exception:
-                pass  # Rang classé indisponible (API tierce down) — les trophées restent valides
+            ranked_pts, ranked_tier = await _bs_fetch_ranked_pts(session, clean)
     except Exception as e:
         logging.warning(f"[bs] erreur réseau API Brawl Stars pour tag '{clean}': {type(e).__name__}: {e}")
         return None, "🌐 Impossible de contacter l'API Brawl Stars. Réessaie plus tard."
@@ -8681,6 +8703,53 @@ async def _bs_fetch_player(tag: str):
         'ranked_pts': ranked_pts,
         'ranked_tier': ranked_tier,
         'club': _bs_strip_markup((player.get('club') or {}).get('name')),
+    }, None
+
+
+async def _bs_fetch_club(tag: str):
+    """Un seul appel API officiel = tag/nom/trophées de TOUS les membres du clan
+    (contrairement au rang classé qui nécessite un appel par joueur).
+    Retourne (data: dict|None, err: str|None)."""
+    clean = tag.strip().lstrip('#').upper()
+    if not clean:
+        return None, "❌ Tag de clan invalide."
+    if not BRAWLSTARS_API_KEY:
+        return None, "🔑 Aucune clé API Brawl Stars configurée. Préviens un admin."
+
+    headers = {"Authorization": f"Bearer {BRAWLSTARS_API_KEY}", "Accept": "application/json"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{BS_API_BASE}/clubs/%23{clean}",
+                headers=headers, timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status == 404:
+                    return None, f"Clan `#{clean}` introuvable."
+                if resp.status == 403:
+                    return None, "Clé API Brawl Stars invalide ou expirée."
+                if resp.status == 429:
+                    return None, "Trop de requêtes vers l'API Brawl Stars, réessaie dans quelques secondes."
+                if resp.status == 503:
+                    return None, "L'API Brawl Stars est en maintenance, réessaie plus tard."
+                if resp.status != 200:
+                    return None, f"Erreur inattendue de l'API Brawl Stars ({resp.status})."
+                club = await resp.json(content_type=None)
+    except Exception as e:
+        logging.warning(f"[bs] erreur réseau clan '{clean}': {type(e).__name__}: {e}")
+        return None, "Impossible de contacter l'API Brawl Stars."
+
+    members = [
+        {
+            'tag': (m.get('tag') or '').lstrip('#').upper(),
+            'name': _bs_strip_markup(m.get('name')) or '?',
+            'trophies': m.get('trophies', 0),
+        }
+        for m in club.get('members', [])
+    ]
+    return {
+        'tag': club.get('tag', f"#{clean}"),
+        'name': _bs_strip_markup(club.get('name')) or '?',
+        'members': members,
     }, None
 
 
@@ -8934,6 +9003,134 @@ async def sync_bs_roles():
             bs_accounts[uid_str] = data
         await asyncio.sleep(1)
     save_data()
+
+
+@bot.command(name="bs_famille", aliases=["bsfamille"])
+async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
+    if not (ctx.author.guild_permissions.administrator or is_bot_owner(ctx.author)):
+        return await ctx.send("❌ Réservé aux administrateurs.")
+
+    usage = (
+        "**Usage :**\n"
+        "`!bs_famille ajouter <tag_clan>` — ajoute un clan à la famille\n"
+        "`!bs_famille retirer <tag_clan>` — retire un clan\n"
+        "`!bs_famille liste` — affiche les clans configurés"
+    )
+    if action is None or action.lower() not in ('ajouter', 'add', 'retirer', 'remove', 'liste'):
+        return await ctx.send(usage)
+    action = action.lower()
+
+    if action == 'liste':
+        if not bs_family_clubs:
+            return await ctx.send("Aucun clan configuré pour l'instant.")
+        return await ctx.send("**Clans de la famille :**\n" + "\n".join(f"`#{t}`" for t in bs_family_clubs))
+
+    if not tag:
+        return await ctx.send(usage)
+    clean = tag.strip().lstrip('#').upper()
+
+    if action in ('ajouter', 'add'):
+        if clean in bs_family_clubs:
+            return await ctx.send(f"ℹ️ `#{clean}` est déjà dans la famille.")
+        data, err = await _bs_fetch_club(clean)
+        if err:
+            return await ctx.send(f"❌ Impossible de vérifier ce clan : {err}")
+        bs_family_clubs.append(clean)
+        save_data()
+        return await ctx.send(f"✅ **{data['name']}** (`#{clean}`) ajouté à la famille — {len(data['members'])} membres.")
+
+    if clean in bs_family_clubs:
+        bs_family_clubs.remove(clean)
+        save_data()
+        return await ctx.send(f"✅ `#{clean}` retiré de la famille.")
+    return await ctx.send(f"ℹ️ `#{clean}` n'était pas dans la famille.")
+
+
+@bot.command(name="classement_trophees_famille", aliases=["ctf", "top_famille"])
+async def cmd_classement_trophees_famille(ctx):
+    if not bs_family_clubs:
+        return await ctx.send("❌ Aucun clan configuré. Utilise `!bs_famille ajouter <tag>` (Admin).")
+
+    await ctx.typing()
+    all_members, errors, total_family = [], [], 0
+    for tag in bs_family_clubs:
+        data, err = await _bs_fetch_club(tag)
+        if err:
+            errors.append(f"`#{tag}` : {err}")
+            continue
+        for m in data['members']:
+            all_members.append({**m, 'club': data['name']})
+        total_family += sum(m['trophies'] for m in data['members'])
+
+    if not all_members:
+        return await ctx.send("❌ Impossible de récupérer les données des clans.\n" + "\n".join(errors))
+
+    all_members.sort(key=lambda m: m['trophies'], reverse=True)
+    lines = [
+        f"**{i + 1}.** {m['name']} — {m['trophies']:,} 🏆 *({m['club']})*"
+        for i, m in enumerate(all_members[:25])
+    ]
+    embed = discord.Embed(title="🏆 Classement Trophées — Famille", description="\n".join(lines), color=0xf1c40f)
+    footer = f"{len(all_members)} membres · {total_family:,} trophées cumulés"
+    if errors:
+        footer += f" · {len(errors)} clan(s) injoignable(s)"
+    embed.set_footer(text=footer)
+    await ctx.send(embed=embed)
+
+
+@tasks.loop(hours=4)
+async def sync_family_ranked():
+    """Rafraîchit le cache des points classés de toute la famille en arrière-plan.
+    Fait exprès de ne PAS tourner à chaque commande : avec ~150 membres et une source
+    tierce (api.rnt.dev), interroger tout le monde à la demande serait lent et solliciterait
+    inutilement cette API à chaque fois qu'un membre tape la commande."""
+    global bs_family_ranked_updated_at
+    if not bs_family_clubs:
+        return
+
+    new_cache = {}
+    async with aiohttp.ClientSession() as session:
+        for tag in bs_family_clubs:
+            data, err = await _bs_fetch_club(tag)
+            if err:
+                continue
+            for m in data['members']:
+                if not m['tag']:
+                    continue
+                ranked_pts, ranked_tier = await _bs_fetch_ranked_pts(session, m['tag'])
+                if ranked_pts is not None:
+                    new_cache[m['tag']] = {
+                        'name': m['name'], 'club': data['name'],
+                        'ranked_pts': ranked_pts, 'ranked_tier': ranked_tier,
+                    }
+                await asyncio.sleep(0.6)
+
+    if new_cache:
+        bs_family_ranked_cache.clear()
+        bs_family_ranked_cache.update(new_cache)
+        bs_family_ranked_updated_at = datetime.now().strftime('%d/%m %H:%M')
+        save_data()
+
+
+@bot.command(name="classement_ranked_famille", aliases=["crf", "top_ranked_famille"])
+async def cmd_classement_ranked_famille(ctx):
+    if not bs_family_ranked_cache:
+        return await ctx.send(
+            "❌ Le cache classé n'est pas encore prêt (la première synchronisation peut prendre "
+            "quelques minutes après le démarrage du bot, ou après le premier `!bs_famille ajouter`). Réessaie plus tard."
+        )
+
+    entries = sorted(bs_family_ranked_cache.values(), key=lambda m: m.get('ranked_pts', 0), reverse=True)
+    lines = [
+        f"**{i + 1}.** {m['name']} — {m.get('ranked_tier', '?')} ({m.get('ranked_pts', 0):,} pts) *({m['club']})*"
+        for i, m in enumerate(entries[:25])
+    ]
+    embed = discord.Embed(title="🎖️ Classement Classé — Famille", description="\n".join(lines), color=0x9b59b6)
+    footer = f"{len(entries)} membres"
+    if bs_family_ranked_updated_at:
+        footer += f" · Dernière mise à jour : {bs_family_ranked_updated_at}"
+    embed.set_footer(text=footer)
+    await ctx.send(embed=embed)
 
 
 @bot.command(name='maville')
