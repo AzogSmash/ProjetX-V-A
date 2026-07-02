@@ -19,7 +19,7 @@ load_dotenv()
 LOG_MODERATION_CHANNEL_ID = os.getenv("1515780858483576923")
 LOG_GIVEAWAY_CHANNEL_ID = os.getenv("1515781002817966341")
 LOG_GENERAL_CHANNEL_ID = os.getenv("1515781072783151314")
-BRAWLSTARS_API_KEY = os.getenv("BRAWLSTARS_API_KEY")
+BRAWLSTARS_API_KEY = (os.getenv("BRAWLSTARS_API_KEY") or "").strip() or None
 
 # Intents du bot
 intents = discord.Intents.default()
