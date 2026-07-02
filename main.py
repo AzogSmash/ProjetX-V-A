@@ -9,6 +9,7 @@ import random
 import json
 import io
 import re
+import unicodedata
 from collections import defaultdict
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
@@ -265,7 +266,7 @@ crypto_alerts    = {}   # str(uid) -> [{'symbol': str, 'target': float, 'directi
 tournament_elo   = {}   # str(uid) -> int (score ELO tournoi)
 bs_accounts      = {}   # str(uid) -> {'tag','name','trophies','ranked_pts','ranked_tier'}
 bs_role_config   = {'trophies': {}, 'ranked': {}}  # 'trophies': {str(min): role_id}, 'ranked': {tier_name: role_id}
-bs_family_clubs         = []   # [tag_clan_sans_diese, ...]
+bs_family_clubs         = []   # [{'tag','name','slug','alias'}, ...] — slug/alias = commande dédiée au clan
 bs_family_ranked_cache  = {}   # str(tag_joueur) -> {'name','club','ranked_pts','ranked_tier'}
 bs_family_ranked_updated_at = None  # str affichable, ex '02/07 21:40'
 ADMIN_LOG_CHANNEL_ID = 0  # à configurer via !set_admin_log <channel_id>
@@ -704,6 +705,25 @@ async def check_mutes():
 async def on_ready():
     logging.warning("Connecté en tant que %s — DATA_FILE=%s — fichier_existe=%s", bot.user, DATA_FILE, os.path.exists(DATA_FILE))
     load_data()
+
+    # Migration bs_family_clubs : ancien format (liste de tags str) -> dicts avec slug/alias.
+    # Les commandes dynamiques par clan (!projetx, etc.) ne survivent pas à un redémarrage,
+    # donc on les réenregistre systématiquement ici, à chaque démarrage.
+    migrated = False
+    for i, entry in enumerate(bs_family_clubs):
+        if isinstance(entry, str):
+            data, err = await _bs_fetch_club(entry)
+            name = data['name'] if data else entry
+            slug = _bs_slug(name)
+            reserved = {e['slug'] for e in bs_family_clubs if isinstance(e, dict)} | \
+                       {e['alias'] for e in bs_family_clubs if isinstance(e, dict) and e.get('alias')}
+            bs_family_clubs[i] = {'tag': entry, 'name': name, 'slug': slug, 'alias': _bs_alias(slug, reserved)}
+            migrated = True
+    if migrated:
+        save_data()
+    for entry in bs_family_clubs:
+        _bs_register_club_command(entry)
+
     # Re-enregistre les views de tournoi pour que les boutons fonctionnent après restart
     _registered_join_ids = set()
     for gid, t in tournaments.items():
@@ -802,6 +822,7 @@ COMMAND_USAGE = {
     'bs_famille':    '`!bs_famille ajouter <tag_clan>` · `!bs_famille retirer <tag_clan>` · `!bs_famille liste` *(Admin)*',
     'classement_trophees_famille': '`!classement_trophees_famille` (alias `!ctf`, `!top_famille`)',
     'classement_ranked_famille':   '`!classement_ranked_famille` (alias `!crf`, `!top_ranked_famille`)',
+    'famille_stats': '`!famille_stats` (alias `!fs`, `!stats_famille`) — Vue d\'ensemble de la famille',
     'graphique':     '`!graphique <SYM>`\nSymboles disponibles : `BTC` `ETH` `DOGE` `SOL` `XRP`\nEx : `!graphique BTC`',
     'chart':         '`!graphique <SYM>` — Ex : `!graphique ETH`',
     'courbe':        '`!graphique <SYM>` — Ex : `!graphique DOGE`',
@@ -987,7 +1008,9 @@ def _build_help_categories(ctx):
                  "*(Admin)* `!bs_roles liste` — Voir la configuration\n"
                  "`!classement_trophees_famille` (`!ctf`) — Classement trophées de la famille de clans\n"
                  "`!classement_ranked_famille` (`!crf`) — Classement classé de la famille (mis à jour ttes les 4h)\n"
-                 "*(Admin)* `!bs_famille ajouter/retirer <tag_clan>` — Gérer les clans de la famille"))
+                 "`!famille_stats` (`!fs`) — Vue d'ensemble : membres, trophées, répartition par clan/rang\n"
+                 "*(Admin)* `!bs_famille ajouter/retirer <tag_clan>` — Gérer les clans de la famille\n"
+                 "Chaque clan ajouté obtient aussi sa propre commande (ex : `!projetx`) — voir `!bs_famille liste`"))
 
     if has_manage_messages or has_ban_members:
         lines = []
@@ -8645,6 +8668,35 @@ def _bs_strip_markup(text):
     return re.sub(r'</?c\d*>', '', text).strip()
 
 
+_BS_GREEK_MAP = {
+    'Δ': 'delta', 'α': 'alpha', 'β': 'beta', 'Ω': 'omega', 'Σ': 'sigma',
+    'θ': 'theta', 'λ': 'lambda', 'π': 'pi', 'Φ': 'phi', 'Ψ': 'psi', 'Χ': 'chi',
+}
+
+def _bs_slug(name: str) -> str:
+    """Nom de clan -> nom de commande valide (ex: 'ProjetΔ' -> 'projetdelta')."""
+    transliterated = ''.join(_BS_GREEK_MAP.get(ch, ch) for ch in (name or ''))
+    ascii_name = unicodedata.normalize('NFKD', transliterated).encode('ascii', 'ignore').decode('ascii')
+    return re.sub(r'[^a-z0-9]', '', ascii_name.lower()) or 'clan'
+
+
+def _bs_alias(slug: str, reserved: set) -> str:
+    """Alias court pour une commande de clan (ex: 'projetx' -> 'px'), en évitant les collisions
+    avec les commandes déjà enregistrées et les autres clans de la famille."""
+    candidates = []
+    if slug.startswith('projet') and len(slug) > 6:
+        candidates.append('p' + slug[6])
+    candidates.append(slug[:2])
+    candidates.append(slug[:3])
+    for c in candidates:
+        if c and c not in reserved and bot.get_command(c) is None:
+            return c
+    base, i = (slug[:3] or 'cl'), 1
+    while f"{base}{i}" in reserved or bot.get_command(f"{base}{i}") is not None:
+        i += 1
+    return f"{base}{i}"
+
+
 async def _bs_fetch_ranked_pts(session: aiohttp.ClientSession, clean_tag: str):
     """Points classés depuis api.rnt.dev (source tierce, best-effort). Retourne (pts, tier) ou (None, None)."""
     try:
@@ -9026,18 +9078,19 @@ async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
             return await ctx.send("Aucun clan configuré pour l'instant.")
         await ctx.typing()
         ok, failed = [], []
-        for t in bs_family_clubs:
-            data, err = await _bs_fetch_club(t)
+        for entry in bs_family_clubs:
+            data, err = await _bs_fetch_club(entry['tag'])
             if data:
-                data['raw_tag'] = t
+                data['entry'] = entry
                 ok.append(data)
             else:
-                failed.append(f"`#{t}` — ⚠️ {err}")
+                failed.append(f"`#{entry['tag']}` — ⚠️ {err}")
         ok.sort(key=lambda c: c['trophies'], reverse=True)
-        lines = [
-            f"**{c['name']}** — `#{c['raw_tag']}` — {c['trophies']:,} 🏆 ({len(c['members'])} membres)"
-            for c in ok
-        ]
+        lines = []
+        for c in ok:
+            e = c['entry']
+            cmd_hint = f"`!{e['slug']}`" + (f" / `!{e['alias']}`" if e.get('alias') else "")
+            lines.append(f"**{c['name']}** — `#{e['tag']}` — {c['trophies']:,} 🏆 ({len(c['members'])} membres) — {cmd_hint}")
         return await ctx.send("**Clans de la famille (triés par trophées) :**\n" + "\n".join(lines + failed))
 
     if not tag:
@@ -9045,19 +9098,36 @@ async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
     clean = tag.strip().lstrip('#').upper()
 
     if action in ('ajouter', 'add'):
-        if clean in bs_family_clubs:
+        if any(e['tag'] == clean for e in bs_family_clubs):
             return await ctx.send(f"ℹ️ `#{clean}` est déjà dans la famille.")
         data, err = await _bs_fetch_club(clean)
         if err:
             return await ctx.send(f"❌ Impossible de vérifier ce clan : {err}")
-        bs_family_clubs.append(clean)
-        save_data()
-        return await ctx.send(f"✅ **{data['name']}** (`#{clean}`) ajouté à la famille — {len(data['members'])} membres.")
 
-    if clean in bs_family_clubs:
-        bs_family_clubs.remove(clean)
+        slug = _bs_slug(data['name'])
+        if bot.get_command(slug) is not None:
+            return await ctx.send(
+                f"❌ Le nom de clan **{data['name']}** donnerait la commande `!{slug}`, "
+                f"qui existe déjà. Renomme le clan en jeu ou préviens le développeur."
+            )
+        reserved = {e['slug'] for e in bs_family_clubs} | {e['alias'] for e in bs_family_clubs if e.get('alias')}
+        alias = _bs_alias(slug, reserved)
+
+        entry = {'tag': clean, 'name': data['name'], 'slug': slug, 'alias': alias}
+        bs_family_clubs.append(entry)
+        _bs_register_club_command(entry)
         save_data()
-        return await ctx.send(f"✅ `#{clean}` retiré de la famille.")
+        return await ctx.send(
+            f"✅ **{data['name']}** (`#{clean}`) ajouté à la famille — {len(data['members'])} membres.\n"
+            f"Commande dédiée : `!{slug}` (alias `!{alias}`)."
+        )
+
+    entry = next((e for e in bs_family_clubs if e['tag'] == clean), None)
+    if entry:
+        bs_family_clubs.remove(entry)
+        _bs_unregister_club_command(entry)
+        save_data()
+        return await ctx.send(f"✅ `#{clean}` (**{entry['name']}**) retiré de la famille, commande `!{entry['slug']}` supprimée.")
     return await ctx.send(f"ℹ️ `#{clean}` n'était pas dans la famille.")
 
 
@@ -9085,12 +9155,14 @@ class BsFamilyLeaderboardView(discord.ui.View):
         self.total_pages = max(1, (len(self.filtered) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
         self.page = max(0, min(page, self.total_pages - 1))
 
-        options = [discord.SelectOption(label="🌐 Tous les clans", value="__all__", default=(club_filter is None))]
-        for c in clubs[:24]:
-            options.append(discord.SelectOption(label=c[:100], value=c, default=(c == club_filter)))
-        self.select = discord.ui.Select(placeholder="Filtrer par clan…", options=options)
-        self.select.callback = self._on_filter
-        self.add_item(self.select)
+        self.select = None
+        if len(clubs) > 1:
+            options = [discord.SelectOption(label="🌐 Tous les clans", value="__all__", default=(club_filter is None))]
+            for c in clubs[:24]:
+                options.append(discord.SelectOption(label=c[:100], value=c, default=(c == club_filter)))
+            self.select = discord.ui.Select(placeholder="Filtrer par clan…", options=options)
+            self.select.callback = self._on_filter
+            self.add_item(self.select)
 
         if self.page > 0:
             prev_btn = discord.ui.Button(label="◀ Précédent", style=discord.ButtonStyle.secondary, row=1)
@@ -9158,6 +9230,43 @@ class BsFamilyLeaderboardView(discord.ui.View):
         await interaction.response.edit_message(embed=view.build_embed(), view=view)
 
 
+async def _bs_club_command_callback(ctx, club_tag: str):
+    """Callback partagé par toutes les commandes dédiées à un clan (ex: !projetx)."""
+    await ctx.typing()
+    data, err = await _bs_fetch_club(club_tag)
+    if err:
+        return await ctx.send(f"❌ {err}")
+
+    members = [{'name': m['name'], 'trophies': m['trophies'], 'club': data['name']} for m in data['members']]
+    members.sort(key=lambda m: m['trophies'], reverse=True)
+
+    view = BsFamilyLeaderboardView(
+        title=f"🏆 {data['name']}", color=0xf1c40f,
+        entries=members, unit="🏆", clubs=[data['name']], value_key='trophies',
+        extra_note=f"{data['trophies']:,} trophées cumulés",
+    )
+    await ctx.send(embed=view.build_embed(), view=view)
+
+
+def _bs_register_club_command(entry: dict):
+    """(Ré)enregistre la commande dédiée d'un clan (ex: !projetx / !px) auprès du bot.
+    Appelé au démarrage pour chaque clan déjà configuré, et à chaque !bs_famille ajouter."""
+    if bot.get_command(entry['slug']) is not None:
+        return
+    club_tag = entry['tag']
+
+    async def _cb(ctx):
+        await _bs_club_command_callback(ctx, club_tag)
+
+    cmd = commands.Command(_cb, name=entry['slug'], aliases=[entry['alias']] if entry.get('alias') else [])
+    cmd.help = f"Classement trophées du clan {entry['name']}"
+    bot.add_command(cmd)
+
+
+def _bs_unregister_club_command(entry: dict):
+    bot.remove_command(entry['slug'])
+
+
 @bot.command(name="classement_trophees_famille", aliases=["ctf", "top_famille"])
 async def cmd_classement_trophees_famille(ctx):
     if not bs_family_clubs:
@@ -9165,10 +9274,10 @@ async def cmd_classement_trophees_famille(ctx):
 
     await ctx.typing()
     all_members, errors, total_family = [], [], 0
-    for tag in bs_family_clubs:
-        data, err = await _bs_fetch_club(tag)
+    for club in bs_family_clubs:
+        data, err = await _bs_fetch_club(club['tag'])
         if err:
-            errors.append(f"`#{tag}` : {err}")
+            errors.append(f"`#{club['tag']}` : {err}")
             continue
         for m in data['members']:
             all_members.append({'name': m['name'], 'trophies': m['trophies'], 'club': data['name']})
@@ -9202,8 +9311,8 @@ async def sync_family_ranked():
 
     new_cache = {}
     async with aiohttp.ClientSession() as session:
-        for tag in bs_family_clubs:
-            data, err = await _bs_fetch_club(tag)
+        for club in bs_family_clubs:
+            data, err = await _bs_fetch_club(club['tag'])
             if err:
                 continue
             for m in data['members']:
@@ -9242,6 +9351,69 @@ async def cmd_classement_ranked_famille(ctx):
         extra_key='ranked_tier', extra_note=note,
     )
     await ctx.send(embed=view.build_embed(), view=view)
+
+
+@bot.command(name="famille_stats", aliases=["fs", "stats_famille"])
+async def cmd_famille_stats(ctx):
+    if not bs_family_clubs:
+        return await ctx.send("❌ Aucun clan configuré. Utilise `!bs_famille ajouter <tag>` (Admin).")
+
+    await ctx.typing()
+    club_rows, errors = [], []
+    total_members, total_trophies = 0, 0
+    for entry in bs_family_clubs:
+        data, err = await _bs_fetch_club(entry['tag'])
+        if err:
+            errors.append(f"`#{entry['tag']}` : {err}")
+            continue
+        total_members  += len(data['members'])
+        total_trophies += data['trophies']
+        club_rows.append({
+            'name': data['name'], 'trophies': data['trophies'],
+            'members': len(data['members']), 'slug': entry['slug'], 'alias': entry.get('alias'),
+        })
+
+    if not club_rows:
+        return await ctx.send("❌ Impossible de récupérer les données des clans.\n" + "\n".join(errors))
+
+    club_rows.sort(key=lambda c: c['trophies'], reverse=True)
+    avg = total_trophies / total_members if total_members else 0
+
+    embed = discord.Embed(title="📊 Statistiques de la Famille", color=0x3498db)
+    embed.add_field(name="👥 Membres", value=f"{total_members}", inline=True)
+    embed.add_field(name="🏆 Trophées cumulés", value=f"{total_trophies:,}", inline=True)
+    embed.add_field(name="📈 Moyenne / membre", value=f"{avg:,.0f}", inline=True)
+
+    medals = ['🥇', '🥈', '🥉']
+    club_lines = []
+    for i, c in enumerate(club_rows):
+        rank = medals[i] if i < 3 else f"`#{i + 1}`"
+        cmd_hint = f"`!{c['slug']}`" + (f" / `!{c['alias']}`" if c.get('alias') else "")
+        club_lines.append(f"{rank} **{c['name']}** — {c['trophies']:,} 🏆 · {c['members']} membres · {cmd_hint}")
+    embed.add_field(name=f"🏰 Clans ({len(club_rows)})", value="\n".join(club_lines), inline=False)
+
+    if bs_family_ranked_cache:
+        tier_counts = {}
+        for m in bs_family_ranked_cache.values():
+            t = m.get('ranked_tier') or '?'
+            tier_counts[t] = tier_counts.get(t, 0) + 1
+        tier_order = [name for _, name in RANKED_TIERS]
+        sorted_tiers = sorted(
+            tier_counts.items(),
+            key=lambda x: tier_order.index(x[0]) if x[0] in tier_order else -1,
+            reverse=True,
+        )
+        tier_lines = [f"**{name}** : {count}" for name, count in sorted_tiers]
+        value = "\n".join(tier_lines[:15]) if tier_lines else "Aucune donnée"
+        note = f"\n\n*Cache classé — {bs_family_ranked_updated_at}*" if bs_family_ranked_updated_at else ""
+        embed.add_field(name="🎖️ Répartition classé", value=value + note, inline=False)
+    else:
+        embed.add_field(name="🎖️ Répartition classé", value="Cache pas encore prêt (premier cycle en cours).", inline=False)
+
+    if errors:
+        embed.add_field(name="⚠️ Clans injoignables", value="\n".join(errors), inline=False)
+
+    await ctx.send(embed=embed)
 
 
 @bot.command(name='maville')
