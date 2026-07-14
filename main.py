@@ -9511,7 +9511,6 @@ async def cmd_maville(ctx, *, ville: str = None):
 
 def _render_carte(preset, guild):
     from staticmap import StaticMap, CircleMarker
-    from PIL import ImageDraw
 
     IMG_W, IMG_H = 1200, 650
     zoom = preset['zoom']
@@ -9524,17 +9523,53 @@ def _render_carte(preset, guild):
         color = _CARTE_COLORS[i % len(_CARTE_COLORS)]
         m.add_marker(CircleMarker((loc['lon'], loc['lat']), color, 14))
 
-    image = m.render(zoom=zoom, center=[clon, clat])
-    draw  = ImageDraw.Draw(image)
-    font  = _carte_font(13)
+    image = m.render(zoom=zoom, center=[clon, clat]).convert('RGBA')
+    overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
+    odraw = ImageDraw.Draw(overlay)
+    font = _carte_font(15)
 
+    entries = []
     for i, (uid, loc) in enumerate(loc_items):
         px, py = _latlon_to_px(loc['lat'], loc['lon'], zoom, clat, clon, IMG_W, IMG_H)
         member = guild.get_member(int(uid))
         name   = member.display_name if member else loc['ville']
         color  = _CARTE_COLORS[i % len(_CARTE_COLORS)]
-        draw.text((px + 10, py - 7 + 1), name, fill='black', font=font)
-        draw.text((px + 10, py - 7),     name, fill=color,   font=font)
+        entries.append((px, py, name, color))
+
+    # Étiquettes triées de haut en bas pour un empilement vertical lisible
+    entries.sort(key=lambda e: e[1])
+
+    PAD_X, PAD_Y, GAP = 6, 3, 3
+    placed = []  # boîtes déjà posées : (x0, y0, x1, y1)
+
+    def overlaps(box):
+        x0, y0, x1, y1 = box
+        for px0, py0, px1, py1 in placed:
+            if x0 < px1 and x1 > px0 and y0 < py1 and y1 > py0:
+                return True
+        return False
+
+    for px, py, name, color in entries:
+        bbox = odraw.textbbox((0, 0), name, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        box_w, box_h = tw + PAD_X * 2, th + PAD_Y * 2
+        label_x = px + 12
+        label_y = py - box_h / 2
+        while overlaps((label_x, label_y, label_x + box_w, label_y + box_h)):
+            label_y += box_h + GAP
+        placed.append((label_x, label_y, label_x + box_w, label_y + box_h))
+
+        # Ligne de rappel si l'étiquette a dû être décalée loin de son point
+        if abs((label_y + box_h / 2) - py) > box_h:
+            odraw.line((px, py, label_x, label_y + box_h / 2), fill=(90, 90, 90, 200), width=1)
+
+        odraw.rounded_rectangle(
+            (label_x, label_y, label_x + box_w, label_y + box_h),
+            radius=5, fill=(20, 20, 20, 175)
+        )
+        odraw.text((label_x + PAD_X - bbox[0], label_y + PAD_Y - bbox[1]), name, fill=color, font=font)
+
+    image = Image.alpha_composite(image, overlay).convert('RGB')
 
     buf = io.BytesIO()
     image.save(buf, 'PNG')
