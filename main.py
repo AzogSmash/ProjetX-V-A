@@ -8655,9 +8655,9 @@ _CARTE_COLORS = [
 ]
 
 _CARTE_PRESETS = {
-    'monde':  {'label': '🌍 Monde',   'zoom': 2, 'clat': 25.0, 'clon': 10.0},
-    'europe': {'label': '🌍 Europe',  'zoom': 4, 'clat': 52.0, 'clon': 12.0},
-    'france': {'label': '🇫🇷 France', 'zoom': 6, 'clat': 46.5, 'clon': 2.5},
+    'monde':  {'label': '🌍 Monde',   'zoom': 2, 'clat': 25.0, 'clon': 10.0, 'cluster_max': 2},
+    'europe': {'label': '🌍 Europe',  'zoom': 4, 'clat': 52.0, 'clon': 12.0, 'cluster_max': 3},
+    'france': {'label': '🇫🇷 France', 'zoom': 6, 'clat': 46.5, 'clon': 2.5, 'cluster_max': None},
 }
 
 def _latlon_to_px(lat, lon, zoom, center_lat, center_lon, img_w, img_h):
@@ -9509,35 +9509,66 @@ async def cmd_maville(ctx, *, ville: str = None):
     await ctx.send(f"✅ Ville enregistrée : **{display_name}**")
 
 
+def _cluster_points(entries, radius):
+    """Regroupe les entrées dont les positions pixel sont à moins de `radius` les unes des autres."""
+    n = len(entries)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dx = entries[i]['px'] - entries[j]['px']
+            dy = entries[i]['py'] - entries[j]['py']
+            if dx * dx + dy * dy <= radius * radius:
+                union(i, j)
+
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(entries[i])
+    return list(groups.values())
+
+
 def _render_carte(preset, guild):
     from staticmap import StaticMap, CircleMarker
 
     IMG_W, IMG_H = 1200, 650
     zoom = preset['zoom']
     clat, clon = preset['clat'], preset['clon']
+    cluster_max = preset.get('cluster_max')
 
-    m = StaticMap(IMG_W, IMG_H)
     loc_items = list(locations.items())
-
-    for i, (uid, loc) in enumerate(loc_items):
-        color = _CARTE_COLORS[i % len(_CARTE_COLORS)]
-        m.add_marker(CircleMarker((loc['lon'], loc['lat']), color, 14))
-
-    image = m.render(zoom=zoom, center=[clon, clat]).convert('RGBA')
-    overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
-    odraw = ImageDraw.Draw(overlay)
-    font = _carte_font(15)
-
     entries = []
     for i, (uid, loc) in enumerate(loc_items):
         px, py = _latlon_to_px(loc['lat'], loc['lon'], zoom, clat, clon, IMG_W, IMG_H)
         member = guild.get_member(int(uid))
         name   = member.display_name if member else loc['ville']
         color  = _CARTE_COLORS[i % len(_CARTE_COLORS)]
-        entries.append((px, py, name, color))
+        entries.append({'lat': loc['lat'], 'lon': loc['lon'], 'px': px, 'py': py, 'name': name, 'color': color})
 
-    # Étiquettes triées de haut en bas pour un empilement vertical lisible
-    entries.sort(key=lambda e: e[1])
+    clusters = _cluster_points(entries, radius=26)
+
+    m = StaticMap(IMG_W, IMG_H)
+    for cluster in clusters:
+        if cluster_max and len(cluster) > cluster_max:
+            continue  # les paquets agrégés n'affichent pas de points individuels, juste la bulle
+        for e in cluster:
+            m.add_marker(CircleMarker((e['lon'], e['lat']), e['color'], 14))
+
+    image = m.render(zoom=zoom, center=[clon, clat]).convert('RGBA')
+    overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
+    odraw = ImageDraw.Draw(overlay)
+    font = _carte_font(15)
+    font_bubble = _carte_font(16)
 
     PAD_X, PAD_Y, GAP = 6, 3, 3
     placed = []  # boîtes déjà posées : (x0, y0, x1, y1)
@@ -9549,25 +9580,72 @@ def _render_carte(preset, guild):
                 return True
         return False
 
-    for px, py, name, color in entries:
-        bbox = odraw.textbbox((0, 0), name, font=font)
+    def place_label(anchor_x, anchor_y, text, color):
+        bbox = odraw.textbbox((0, 0), text, font=font)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
         box_w, box_h = tw + PAD_X * 2, th + PAD_Y * 2
-        label_x = px + 12
-        label_y = py - box_h / 2
+        label_x = anchor_x + 12
+        label_y = anchor_y - box_h / 2
         while overlaps((label_x, label_y, label_x + box_w, label_y + box_h)):
             label_y += box_h + GAP
         placed.append((label_x, label_y, label_x + box_w, label_y + box_h))
 
-        # Ligne de rappel si l'étiquette a dû être décalée loin de son point
-        if abs((label_y + box_h / 2) - py) > box_h:
-            odraw.line((px, py, label_x, label_y + box_h / 2), fill=(90, 90, 90, 200), width=1)
+        if abs((label_y + box_h / 2) - anchor_y) > box_h:
+            odraw.line((anchor_x, anchor_y, label_x, label_y + box_h / 2), fill=(90, 90, 90, 200), width=1)
 
         odraw.rounded_rectangle(
             (label_x, label_y, label_x + box_w, label_y + box_h),
             radius=5, fill=(20, 20, 20, 175)
         )
-        odraw.text((label_x + PAD_X - bbox[0], label_y + PAD_Y - bbox[1]), name, fill=color, font=font)
+        odraw.text((label_x + PAD_X - bbox[0], label_y + PAD_Y - bbox[1]), text, fill=color, font=font)
+
+    # Chaque paquet est traité de haut en bas pour un empilement stable
+    bubble_r = 18
+    LEGEND_MAX = 6  # au-delà, un empilement individuel devient une colonne illisible
+    font_legend = _carte_font(13)
+    render_jobs = []  # (anchor_y, callable)
+    for cluster in clusters:
+        cx = sum(e['px'] for e in cluster) / len(cluster)
+        cy = sum(e['py'] for e in cluster) / len(cluster)
+        if cluster_max and len(cluster) > cluster_max:
+            def draw_bubble(cx=cx, cy=cy, count=len(cluster)):
+                odraw.ellipse(
+                    (cx - bubble_r, cy - bubble_r, cx + bubble_r, cy + bubble_r),
+                    fill=(44, 62, 80, 235), outline=(255, 255, 255, 235), width=2
+                )
+                text = str(count)
+                bbox = odraw.textbbox((0, 0), text, font=font_bubble)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                odraw.text((cx - tw / 2 - bbox[0], cy - th / 2 - bbox[1]), text, fill=(255, 255, 255, 255), font=font_bubble)
+            render_jobs.append((cy, draw_bubble))
+        elif len(cluster) > LEGEND_MAX:
+            # Paquet trop dense pour un empilement individuel : petit panneau en grille
+            def draw_legend(cx=cx, cy=cy, members=cluster):
+                row_h, col_w, max_rows = 20, 150, 8
+                n = len(members)
+                cols = max(1, math.ceil(n / max_rows))
+                rows = math.ceil(n / cols)
+                box_w, box_h = cols * col_w + 12, rows * row_h + 12
+                x0, y0 = cx + 15, cy - box_h / 2
+                odraw.line((cx, cy, x0, y0 + box_h / 2), fill=(90, 90, 90, 200), width=1)
+                odraw.rounded_rectangle((x0, y0, x0 + box_w, y0 + box_h), radius=6, fill=(20, 20, 20, 205))
+                for idx, mm in enumerate(sorted(members, key=lambda m: m['name'].lower())):
+                    col, row = divmod(idx, rows)
+                    tx, ty = x0 + 8 + col * col_w, y0 + 6 + row * row_h
+                    odraw.ellipse((tx, ty + 5, tx + 9, ty + 14), fill=mm['color'])
+                    label = mm['name'] if len(mm['name']) <= 18 else mm['name'][:17] + '…'
+                    odraw.text((tx + 14, ty), label, fill=(255, 255, 255, 255), font=font_legend)
+            render_jobs.append((cy, draw_legend))
+        else:
+            # Toutes les étiquettes du paquet s'ancrent sur le même point → empilement propre
+            for e in sorted(cluster, key=lambda e: e['py']):
+                def draw_label(cx=cx, cy=cy, name=e['name'], color=e['color']):
+                    place_label(cx, cy, name, color)
+                render_jobs.append((cy, draw_label))
+
+    render_jobs.sort(key=lambda job: job[0])
+    for _, job in render_jobs:
+        job()
 
     image = Image.alpha_composite(image, overlay).convert('RGB')
 
