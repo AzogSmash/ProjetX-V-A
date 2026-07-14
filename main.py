@@ -32,6 +32,7 @@ intents.messages = True
 intents.reactions = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
+_slash_synced = False
 
 # --- Variables globales pour la persistance des données ---
 # Les données seront chargées depuis data.json
@@ -756,6 +757,19 @@ async def on_ready():
         sync_bs_roles.start()
     if not sync_family_ranked.is_running():
         sync_family_ranked.start()
+
+    global _slash_synced
+    if not _slash_synced:
+        try:
+            synced = await bot.tree.sync()
+            logging.warning("Slash commands synchronisées : %d", len(synced))
+            for guild in bot.guilds:
+                bot.tree.copy_global_to(guild=guild)
+                await bot.tree.sync(guild=guild)
+            _slash_synced = True
+        except Exception as e:
+            logging.warning("Erreur de synchronisation des slash commands : %s", e)
+
     logging.warning("Bot prêt et fonctionnel !")
 
 
@@ -1148,7 +1162,7 @@ class HelpView(discord.ui.View):
             item.disabled = True
 
 
-@bot.command()
+@bot.hybrid_command()
 async def aide(ctx):
     cats = _build_help_categories(ctx)
     embed = _help_home_embed(ctx, cats)
@@ -1265,7 +1279,8 @@ async def say(ctx, *, message):
         return await ctx.send("❌ Seul le créateur du bot peut utiliser cette commande.")
 
     try:
-        await ctx.message.delete()
+        if ctx.interaction is None:
+            await ctx.message.delete()
         await ctx.send(message)
         fields = [
             ("Auteur", ctx.author.mention, True),
@@ -2630,7 +2645,7 @@ class PokerGame:
 # ========================= COMMANDES CASINO ============================
 # =======================================================================
 
-@bot.command(name="coins", aliases=["solde", "bal", "balance"])
+@bot.hybrid_command(name="coins", aliases=["solde", "bal", "balance"])
 async def cmd_coins(ctx, member: discord.Member = None):
     target = member or ctx.author
     embed  = discord.Embed(
@@ -2641,7 +2656,7 @@ async def cmd_coins(ctx, member: discord.Member = None):
     await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
-@bot.command(name="daily", aliases=["d"])
+@bot.hybrid_command(name="daily", aliases=["d"])
 async def cmd_daily(ctx):
     uid  = str(ctx.author.id)
     now  = datetime.now()
@@ -2705,7 +2720,7 @@ async def cmd_daily(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="travail", aliases=["trav", "work"])
+@bot.hybrid_command(name="travail", aliases=["trav", "work"])
 async def cmd_travail(ctx):
     uid = str(ctx.author.id)
     now = datetime.now()
@@ -2745,7 +2760,7 @@ async def cmd_travail(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="risque", aliases=["risk", "roulette_russe"])
+@bot.hybrid_command(name="risque", aliases=["risk", "roulette_russe"])
 async def cmd_risque(ctx):
     uid = ctx.author.id
     uid_str = str(uid)
@@ -2798,7 +2813,7 @@ async def cmd_risque(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="give")
+@bot.hybrid_command(name="give")
 async def cmd_give(ctx, member: discord.Member, amount: str):
     bal = coins[ctx.author.id]
     raw = str(amount).strip().lower()
@@ -2826,7 +2841,7 @@ async def cmd_give(ctx, member: discord.Member, amount: str):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="roulette", aliases=["rou"])
+@bot.hybrid_command(name="roulette", aliases=["rou"])
 async def cmd_roulette(ctx, mise: str, *, choix: str):
     choix = choix.lower().strip()
     mise, err = _resolve_mise(mise, ctx.author.id, 'roulette')
@@ -2875,7 +2890,7 @@ async def cmd_roulette(ctx, mise: str, *, choix: str):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="slots", aliases=["sl", "machine"])
+@bot.hybrid_command(name="slots", aliases=["sl", "machine"])
 async def cmd_slots(ctx, mise: str):
     mise, err = _resolve_mise(mise, ctx.author.id, 'slots')
     if err: return await ctx.send(err)
@@ -3005,7 +3020,7 @@ class BlackjackView(discord.ui.View):
         self._disable_all()
 
 
-@bot.command(name="bj", aliases=["blackjack"])
+@bot.hybrid_command(name="bj", aliases=["blackjack"])
 async def cmd_bj(ctx, mise: str = None):
     """Démarre une partie de blackjack jouable avec des boutons."""
     uid = ctx.author.id
@@ -3053,7 +3068,7 @@ async def cmd_bj(ctx, mise: str = None):
     await ctx.send(embed=_bj_embed(game), view=view)
 
 
-@bot.command(name="coinflip", aliases=["cf"])
+@bot.hybrid_command(name="coinflip", aliases=["cf"])
 async def cmd_coinflip(ctx, mise: str, choix: str):
     choix = choix.lower()
     if choix not in ('pile', 'face', 'p', 'f'):
@@ -3082,7 +3097,7 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="duel", aliases=["pvp"])
+@bot.hybrid_command(name="duel", aliases=["pvp"])
 async def cmd_duel(ctx, member: discord.Member, mise: str):
     if member.id == ctx.author.id:
         await ctx.send("❌ Vous ne pouvez pas vous défier vous-même."); return
@@ -3136,7 +3151,7 @@ async def cmd_duel(ctx, member: discord.Member, mise: str):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="classement", aliases=["top", "leaderboard", "lb"])
+@bot.hybrid_command(name="classement", aliases=["top", "leaderboard", "lb"])
 async def cmd_classement(ctx):
     guild_members = {m.id for m in ctx.guild.members if not m.bot}
     totals = []
@@ -3415,7 +3430,7 @@ class PokerLobbyView(discord.ui.View):
         await interaction.followup.send("🚫 La table a été annulée. Buy-ins remboursés.")
 
 
-@bot.command(name="poker", aliases=["pk"])
+@bot.hybrid_command(name="poker", aliases=["pk"])
 async def cmd_poker(ctx, action: str = None, *, args: str = None):
     gid = ctx.guild.id
     uid = ctx.author.id
@@ -4146,7 +4161,7 @@ class MinesView(discord.ui.View):
 
 # ── !mines ───────────────────────────────────────────────────────────────
 
-@bot.command(name="mines", aliases=["mn", "minesweeper"])
+@bot.hybrid_command(name="mines", aliases=["mn", "minesweeper"])
 async def cmd_mines(ctx, mise: str):
     mise, err = _resolve_mise(mise, ctx.author.id, 'mines')
     if err: return await ctx.send(err)
@@ -4218,7 +4233,7 @@ class CryptoView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 
-@bot.command(name="crypto", aliases=["cr", "marche_crypto"])
+@bot.hybrid_command(name="crypto", aliases=["cr", "marche_crypto"])
 @commands.cooldown(1, 60, commands.BucketType.user)
 async def cmd_crypto(ctx):
     embed = _build_crypto_embed(str(ctx.author.id))
@@ -4229,7 +4244,7 @@ async def cmd_crypto_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
         await ctx.send(f"⏳ Attends encore **{int(error.retry_after)}s** avant de refaire `!cr`.", delete_after=5)
 
-@bot.command(name="graphique", aliases=["chart", "courbe", "graph"])
+@bot.hybrid_command(name="graphique", aliases=["chart", "courbe", "graph"])
 async def cmd_graphique(ctx, symbol: str = None):
     if symbol is None:
         return await ctx.send(f"❌ Précisez un symbole. Ex : `!graphique BTC`\nDisponibles : {', '.join(CRYPTO_SYMBOLS)}")
@@ -4272,7 +4287,7 @@ async def cmd_graphique(ctx, symbol: str = None):
     embed.set_footer(text="Mise à jour toutes les 90s | Tapez !crypto pour voir tous les prix")
     await ctx.send(embed=embed)
 
-@bot.command(name="acheter_crypto", aliases=["buyc", "achat_crypto"])
+@bot.hybrid_command(name="acheter_crypto", aliases=["buyc", "achat_crypto"])
 async def cmd_acheter_crypto(ctx, symbol: str, montant: str):
     if crypto_market_frozen:
         return await ctx.send("🔒 Le marché crypto est temporairement suspendu. Revenez plus tard !")
@@ -4344,7 +4359,7 @@ async def cmd_acheter_crypto(ctx, symbol: str, montant: str):
     ))
     await ctx.send(embed=embed)
 
-@bot.command(name="vendre_crypto", aliases=["vc", "sellc"])
+@bot.hybrid_command(name="vendre_crypto", aliases=["vc", "sellc"])
 async def cmd_vendre_crypto(ctx, symbol: str, qty_str: str):
     if crypto_market_frozen:
         return await ctx.send("🔒 Le marché crypto est temporairement suspendu. Revenez plus tard !")
@@ -4443,7 +4458,7 @@ async def cmd_vendre_crypto(ctx, symbol: str, qty_str: str):
 
 # ── Métiers ───────────────────────────────────────────────────────────────
 
-@bot.command(name="metier", aliases=["job", "emploi"])
+@bot.hybrid_command(name="metier", aliases=["job", "emploi"])
 async def cmd_metier(ctx):
     current = _get_job(ctx.author.id)
     embed   = discord.Embed(title="💼 Métiers disponibles", color=0x9b59b6,
@@ -4457,7 +4472,7 @@ async def cmd_metier(ctx):
         )
     await ctx.send(embed=embed)
 
-@bot.command(name="choisir_metier", aliases=["cm", "set_job", "job_set"])
+@bot.hybrid_command(name="choisir_metier", aliases=["cm", "set_job", "job_set"])
 async def cmd_choisir_metier(ctx, metier: str):
     metier = metier.lower()
     if metier not in JOBS:
@@ -4470,7 +4485,7 @@ async def cmd_choisir_metier(ctx, metier: str):
         description=f"{info['desc']}\nAction : {info['action']}")
     await ctx.send(embed=embed)
 
-@bot.command(name="miner")
+@bot.hybrid_command(name="miner")
 async def cmd_miner(ctx):
     if _get_job(ctx.author.id) != 'mineur':
         return await ctx.send("❌ Vous devez être **⛏️ Mineur**. Tapez `!choisir_metier mineur`.")
@@ -4612,7 +4627,7 @@ def _theft_record(victim_id: int, success: bool):
         theft_stats[key]['success'] += 1
 
 
-@bot.command(name="hacker", aliases=["hack"])
+@bot.hybrid_command(name="hacker", aliases=["hack"])
 async def cmd_hacker(ctx, cible: discord.Member):
     if _get_job(ctx.author.id) != 'hacker':
         return await ctx.send("❌ Vous devez être **💻 Hacker**. Tapez `!choisir_metier hacker`.")
@@ -4946,7 +4961,7 @@ class TeamView(discord.ui.View):
             return await interaction.response.edit_message(embed=_team_embed(self.ctx), view=self)
 
 
-@bot.command(name="team", aliases=["club", "guilde"])
+@bot.hybrid_command(name="team", aliases=["club", "guilde"])
 async def cmd_team(ctx):
     await ctx.send(embed=_team_embed(ctx), view=TeamView(ctx))
 
@@ -5110,7 +5125,7 @@ class CoffreView(discord.ui.View):
         await interaction.response.send_modal(CoffreWithdrawModal(self.author_id))
 
 
-@bot.command(name="coffre", aliases=["vault", "banque"])
+@bot.hybrid_command(name="coffre", aliases=["vault", "banque"])
 async def cmd_coffre(ctx):
     uid = str(ctx.author.id)
     bal_coffre = safes.get(uid, 0)
@@ -5125,7 +5140,7 @@ async def cmd_coffre(ctx):
 
 # ── Vol de cash ───────────────────────────────────────────────────────────
 
-@bot.command(name="voler", aliases=["steal"])
+@bot.hybrid_command(name="voler", aliases=["steal"])
 async def cmd_voler(ctx, cible: discord.Member):
     if cible.id == ctx.author.id or cible.bot:
         return await ctx.send("❌ Cible invalide.")
@@ -5175,7 +5190,7 @@ async def cmd_voler(ctx, cible: discord.Member):
 
 
 # ── !rob — Voler le cash d'un joueur (Casino, accessible à tous) ─────
-@bot.command(name="rob")
+@bot.hybrid_command(name="rob")
 async def cmd_rob(ctx, cible: discord.Member):
     if cible.id == ctx.author.id or cible.bot:
         return await ctx.send("❌ Cible invalide.")
@@ -5218,7 +5233,7 @@ async def cmd_rob(ctx, cible: discord.Member):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="top_voles", aliases=["classement_vol"])
+@bot.hybrid_command(name="top_voles", aliases=["classement_vol"])
 async def cmd_top_voles(ctx):
     """Classement des membres les plus ciblés par les vols/hacks/robs."""
     if not theft_stats:
@@ -5664,12 +5679,13 @@ class CdView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.command(name="cd", aliases=["cooldown", "cooldowns", "cds"])
+@bot.hybrid_command(name="cd", aliases=["cooldown", "cooldowns", "cds"])
 async def cmd_cd_member(ctx):
-    try:
-        await ctx.message.delete()
-    except discord.Forbidden:
-        pass
+    if ctx.interaction is None:
+        try:
+            await ctx.message.delete()
+        except discord.Forbidden:
+            pass
     await ctx.send(
         f"{ctx.author.mention}",
         view=CdView(ctx.author.id, ctx.guild),
@@ -6109,17 +6125,17 @@ class ShopView(discord.ui.View):
         await interaction.followup.send(msg, ephemeral=True)
 
 
-@bot.command(name="shop", aliases=["magasin", "boutique"])
+@bot.hybrid_command(name="shop", aliases=["magasin", "boutique"])
 async def cmd_shop(ctx):
     await ctx.send(embed=_shop_embed(ctx.author.id), view=ShopView(ctx.author.id))
 
 
-@bot.command(name="acheter", aliases=["buy"])
+@bot.hybrid_command(name="acheter", aliases=["buy"])
 async def cmd_acheter(ctx, item_id: int):
     ok, msg = _do_purchase(ctx.author.id, item_id)
     await ctx.send(msg)
 
-@bot.command(name="inventaire", aliases=["inv"])
+@bot.hybrid_command(name="inventaire", aliases=["inv"])
 async def cmd_inventaire(ctx, member: discord.Member = None):
     target = member or ctx.author
     uid    = str(target.id)
@@ -6215,7 +6231,7 @@ class ScratchView(discord.ui.View):
         return callback
 
 
-@bot.command(name="gratter", aliases=["scratch"])
+@bot.hybrid_command(name="gratter", aliases=["scratch"])
 async def cmd_gratter(ctx):
     uid = str(ctx.author.id)
     if owned_items.get(uid, {}).get('4', 0) <= 0:
@@ -6368,13 +6384,13 @@ class UsineView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 
-@bot.command(name="usine", aliases=["factory"])
+@bot.hybrid_command(name="usine", aliases=["factory"])
 async def cmd_usine(ctx):
     embed, _, _ = _usine_embed(ctx.author.id)
     await ctx.send(embed=embed, view=UsineView(ctx.author.id))
 
 
-@bot.command(name="embaucher", aliases=["hire"])
+@bot.hybrid_command(name="embaucher", aliases=["hire"])
 async def cmd_embaucher(ctx):
     uid = str(ctx.author.id)
     f = factories.setdefault(uid, {'workers': 0, 'last': datetime.now().isoformat(), 'upgraded': False})
@@ -6405,7 +6421,7 @@ async def cmd_embaucher(ctx):
         ))
     await ctx.send(embed=embed)
 
-@bot.command(name="collecter", aliases=["collect", "recolter"])
+@bot.hybrid_command(name="collecter", aliases=["collect", "recolter"])
 async def cmd_collecter(ctx):
     uid     = str(ctx.author.id)
     pending = _factory_earnings(uid)
@@ -6565,12 +6581,12 @@ async def _run_race(channel, guild):
     await channel.send(embed=embed)
 
 
-@bot.command(name="course", aliases=["race", "courses"])
+@bot.hybrid_command(name="course", aliases=["race", "courses"])
 async def cmd_course(ctx):
     await ctx.send(embed=_course_embed(), view=CourseView())
 
 
-@bot.command(name="parier", aliases=["bet"])
+@bot.hybrid_command(name="parier", aliases=["bet"])
 async def cmd_parier(ctx, pilote: int, mise: str):
     if not race_accepting:
         return await ctx.send("❌ Les paris ne sont pas ouverts. Un admin doit utiliser `!ouvrir_course`.")
@@ -7282,7 +7298,7 @@ async def cmd_ouverture_tournoi(ctx):
         await _advance_tournament(ctx.guild, t, gid)
 
 
-@bot.command(name="win", aliases=["victoire"])
+@bot.hybrid_command(name="win", aliases=["victoire"])
 async def cmd_win(ctx, numero: int):
     gid = str(ctx.guild.id)
     t   = tournaments.get(gid)
@@ -7318,7 +7334,7 @@ async def cmd_win(ctx, numero: int):
     await _advance_tournament(ctx.guild, t, gid)
 
 
-@bot.command(name="tournoi_status", aliases=["t_status", "bracket_status"])
+@bot.hybrid_command(name="tournoi_status", aliases=["t_status", "bracket_status"])
 async def cmd_tournoi_status(ctx):
     gid = str(ctx.guild.id)
     t   = tournaments.get(gid)
@@ -7730,7 +7746,7 @@ async def cmd_annuler_morse(ctx, membre: discord.Member):
 # =======================================================================
 
 # ── Profil complet ───────────────────────────────────────────────────────
-@bot.command(name="profil", aliases=["profile", "stats"])
+@bot.hybrid_command(name="profil", aliases=["profile", "stats"])
 async def cmd_profil(ctx, member: discord.Member = None):
     member = member or ctx.author
     uid = str(member.id)
@@ -7809,7 +7825,7 @@ async def cmd_profil(ctx, member: discord.Member = None):
 
 
 # ── Anniversaires ────────────────────────────────────────────────────────
-@bot.command(name="anniversaire", aliases=["birthday", "anniv"])
+@bot.hybrid_command(name="anniversaire", aliases=["birthday", "anniv"])
 async def cmd_anniversaire(ctx, date: str = None):
     uid = str(ctx.author.id)
     if date is None:
@@ -7860,7 +7876,7 @@ async def check_birthdays():
 
 
 # ── Alertes prix crypto ───────────────────────────────────────────────────
-@bot.command(name="alerte_crypto", aliases=["alerte", "crypto_alert"])
+@bot.hybrid_command(name="alerte_crypto", aliases=["alerte", "crypto_alert"])
 async def cmd_alerte_crypto(ctx, symbol: str = None, target: str = None):
     uid = str(ctx.author.id)
     if symbol is None:
@@ -7903,7 +7919,7 @@ async def cmd_alerte_crypto(ctx, symbol: str = None, target: str = None):
     )
 
 
-@bot.command(name="suppr_alerte", aliases=["del_alerte", "remove_alert"])
+@bot.hybrid_command(name="suppr_alerte", aliases=["del_alerte", "remove_alert"])
 async def cmd_suppr_alerte(ctx, symbol: str = None):
     uid = str(ctx.author.id)
     alerts = crypto_alerts.get(uid, [])
@@ -7949,7 +7965,7 @@ async def _check_crypto_alerts():
 
 
 # ── Classement crypto (portfolio) ─────────────────────────────────────────
-@bot.command(name="top_crypto", aliases=["classement_crypto", "crypto_top"])
+@bot.hybrid_command(name="top_crypto", aliases=["classement_crypto", "crypto_top"])
 async def cmd_top_crypto(ctx):
     guild_members = {m.id for m in ctx.guild.members if not m.bot}
     scores = []
@@ -7985,7 +8001,7 @@ async def cmd_top_crypto(ctx):
 
 
 # ── Stats serveur ─────────────────────────────────────────────────────────
-@bot.command(name="stats_serveur", aliases=["stats-serveur", "server_stats", "serveur"])
+@bot.hybrid_command(name="stats_serveur", aliases=["stats-serveur", "server_stats", "serveur"])
 async def cmd_stats_serveur(ctx):
     guild_members = {m.id for m in ctx.guild.members if not m.bot}
     total_coins   = sum(coins[uid] + safes.get(str(uid), 0) for uid in guild_members)
@@ -8026,7 +8042,7 @@ def _update_elo(winner_id: int, loser_id: int):
     save_data()
 
 
-@bot.command(name="classement_tournoi", aliases=["elo", "top_elo"])
+@bot.hybrid_command(name="classement_tournoi", aliases=["elo", "top_elo"])
 async def cmd_classement_tournoi(ctx):
     guild_members = {m.id for m in ctx.guild.members if not m.bot}
     scores = [(uid_int, tournament_elo.get(str(uid_int), 1000)) for uid_int in guild_members if str(uid_int) in tournament_elo]
@@ -8328,7 +8344,7 @@ class BanPhaseView(discord.ui.View):
         draft_sessions.pop(self.channel_id, None)
 
 
-@bot.command(name="draft")
+@bot.hybrid_command(name="draft")
 async def cmd_draft(ctx, mode: str = None, captain2: discord.Member = None):
     """Phase de ban style Brawl Stars — !draft <1v1|2v2|3v3|4v4|5v5> @capitaine2"""
     if ctx.channel.id in draft_sessions:
@@ -8584,15 +8600,15 @@ async def _cmd_biz(ctx, biz_key):
             f"Ouvrez-la pour **{biz['open_cost']:,} coins** avec `!acheter {biz['shop_item']}`.")
     await ctx.send(embed=_biz_embed(ctx.author.id, biz_key), view=BusinessView(ctx.author.id, biz_key))
 
-@bot.command(name="epicerie")
+@bot.hybrid_command(name="epicerie")
 async def cmd_epicerie(ctx):
     await _cmd_biz(ctx, 'epicerie')
 
-@bot.command(name="fastfood", aliases=["fast_food"])
+@bot.hybrid_command(name="fastfood", aliases=["fast_food"])
 async def cmd_fastfood(ctx):
     await _cmd_biz(ctx, 'fastfood')
 
-@bot.command(name="restaurant", aliases=["resto"])
+@bot.hybrid_command(name="restaurant", aliases=["resto"])
 async def cmd_restaurant(ctx):
     await _cmd_biz(ctx, 'restaurant')
 
@@ -8925,7 +8941,7 @@ def _bs_embed(member: discord.Member, acc: dict) -> discord.Embed:
     return embed
 
 
-@bot.command(name="bslink", aliases=["lierbs"])
+@bot.hybrid_command(name="bslink", aliases=["lierbs"])
 async def cmd_bslink(ctx, tag: str):
     data, err = await _bs_fetch_player(tag)
     if err:
@@ -8942,7 +8958,7 @@ async def cmd_bslink(ctx, tag: str):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="bsprofil", aliases=["bs"])
+@bot.hybrid_command(name="bsprofil", aliases=["bs"])
 async def cmd_bsprofil(ctx, member: discord.Member = None):
     member = member or ctx.author
     uid = str(member.id)
@@ -9117,6 +9133,9 @@ async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
         bs_family_clubs.append(entry)
         _bs_register_club_command(entry)
         save_data()
+        if ctx.guild:
+            bot.tree.copy_global_to(guild=ctx.guild)
+            await bot.tree.sync(guild=ctx.guild)
         return await ctx.send(
             f"✅ **{data['name']}** (`#{clean}`) ajouté à la famille — {len(data['members'])} membres.\n"
             f"Commande dédiée : `!{slug}` (alias `!{alias}`)."
@@ -9127,6 +9146,8 @@ async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
         bs_family_clubs.remove(entry)
         _bs_unregister_club_command(entry)
         save_data()
+        if ctx.guild:
+            await bot.tree.sync(guild=ctx.guild)
         return await ctx.send(f"✅ `#{clean}` (**{entry['name']}**) retiré de la famille, commande `!{entry['slug']}` supprimée.")
     return await ctx.send(f"ℹ️ `#{clean}` n'était pas dans la famille.")
 
@@ -9258,7 +9279,7 @@ def _bs_register_club_command(entry: dict):
     async def _cb(ctx):
         await _bs_club_command_callback(ctx, club_tag)
 
-    cmd = commands.Command(_cb, name=entry['slug'], aliases=[entry['alias']] if entry.get('alias') else [])
+    cmd = commands.HybridCommand(_cb, name=entry['slug'], aliases=[entry['alias']] if entry.get('alias') else [])
     cmd.help = f"Classement trophées du clan {entry['name']}"
     bot.add_command(cmd)
 
@@ -9267,7 +9288,7 @@ def _bs_unregister_club_command(entry: dict):
     bot.remove_command(entry['slug'])
 
 
-@bot.command(name="classement_trophees_famille", aliases=["ctf", "top_famille"])
+@bot.hybrid_command(name="classement_trophees_famille", aliases=["ctf", "top_famille"])
 async def cmd_classement_trophees_famille(ctx):
     if not bs_family_clubs:
         return await ctx.send("❌ Aucun clan configuré. Utilise `!bs_famille ajouter <tag>` (Admin).")
@@ -9333,7 +9354,7 @@ async def sync_family_ranked():
         save_data()
 
 
-@bot.command(name="classement_ranked_famille", aliases=["crf", "top_ranked_famille"])
+@bot.hybrid_command(name="classement_ranked_famille", aliases=["crf", "top_ranked_famille"])
 async def cmd_classement_ranked_famille(ctx):
     if not bs_family_ranked_cache:
         return await ctx.send(
@@ -9353,7 +9374,7 @@ async def cmd_classement_ranked_famille(ctx):
     await ctx.send(embed=view.build_embed(), view=view)
 
 
-@bot.command(name="famille_stats", aliases=["fs", "stats_famille"])
+@bot.hybrid_command(name="famille_stats", aliases=["fs", "stats_famille"])
 async def cmd_famille_stats(ctx):
     if not bs_family_clubs:
         return await ctx.send("❌ Aucun clan configuré. Utilise `!bs_famille ajouter <tag>` (Admin).")
@@ -9416,7 +9437,7 @@ async def cmd_famille_stats(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name='maville')
+@bot.hybrid_command(name='maville')
 async def cmd_maville(ctx, *, ville: str = None):
     uid = str(ctx.author.id)
     if not ville:
@@ -9539,7 +9560,7 @@ class CarteView(discord.ui.View):
         return '\n'.join(lines)
 
 
-@bot.command(name='carte')
+@bot.hybrid_command(name='carte')
 async def cmd_carte(ctx):
     if not locations:
         await ctx.send("Personne n'a encore enregistré sa ville avec `!maville`.")
