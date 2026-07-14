@@ -288,6 +288,8 @@ ranked_pending    = {}   # "minuid_maxuid" -> {'p1','p2','guild_id','channel_id'
 ranked_pair_daily = {}   # "minuid_maxuid" -> {'date':'YYYY-MM-DD','count':int}
 ranked_reports    = {}   # str(target_uid) -> [{'reporter','reason','guild_id','created_at','resolved'}]
 ranked_report_cooldowns = {}  # "reporter_target" -> ISO datetime
+ranked_1v1_history = {}   # "YYYY-MM" -> {uid_str: {'points','wins','losses'}} — saisons archivées
+ranked_season_month = None  # "YYYY-MM" — mois de la saison en cours
 RANKED_CHALLENGE_CHANNEL_ID = 1526529629974695977  # #commandes... — tableau des défis 1v1
 RANKED_LOG_CHANNEL_ID       = 1526529856421105715  # #chat-duels — log public des résultats validés
 RANKED_1V1_TIERS = [
@@ -392,6 +394,35 @@ def _r1v1_apply_result(winner_id: int, loser_id: int):
     return win_delta, loss_delta
 
 
+_R1V1_MONTH_NAMES_FR = [
+    'janvier', 'février', 'mars', 'avril', 'mai', 'juin',
+    'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre',
+]
+
+
+def _r1v1_month_label(month_key: str) -> str:
+    year, month = month_key.split('-')
+    return f"{_R1V1_MONTH_NAMES_FR[int(month) - 1]} {year}"
+
+
+def _r1v1_leaderboard_entries(guild, month=None):
+    """Entrées triées par points pour la saison en cours (month=None) ou une saison archivée."""
+    source = ranked_1v1 if month is None else ranked_1v1_history.get(month, {})
+    entries = []
+    for uid_str, prof in source.items():
+        if not (prof.get('wins', 0) or prof.get('losses', 0)):
+            continue
+        member = guild.get_member(int(uid_str)) if guild else None
+        name = member.display_name if member else f"<@{uid_str}>"
+        entries.append({
+            'name': name, 'points': prof.get('points', 0),
+            'tier': _r1v1_tier_name(prof.get('points', 0)),
+            'wins': prof.get('wins', 0), 'losses': prof.get('losses', 0),
+        })
+    entries.sort(key=lambda e: e['points'], reverse=True)
+    return entries
+
+
 # ── Configuration prix / mises (modifiable par !prix_casino) ─────────────
 BOT_OWNER_ID = 1056848438270115900   # happy_gt3 — créateur du bot
 MAX_FACTORY_WORKERS = 10
@@ -479,6 +510,7 @@ def load_data():
     global bs_accounts, bs_role_config, bs_family_clubs, bs_family_ranked_cache, bs_family_ranked_updated_at
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
+    global ranked_1v1_history, ranked_season_month
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
             try:
@@ -589,6 +621,8 @@ def load_data():
                 ranked_pair_daily = data.get('ranked_pair_daily', {})
                 ranked_reports    = data.get('ranked_reports', {})
                 ranked_report_cooldowns = data.get('ranked_report_cooldowns', {})
+                ranked_1v1_history  = data.get('ranked_1v1_history', {})
+                ranked_season_month = data.get('ranked_season_month')
                 loaded_cfg = data.get('casino_config', {})
                 if isinstance(loaded_cfg, dict):
                     casino_config['shop_prices']   = loaded_cfg.get('shop_prices', {}) or {}
@@ -730,6 +764,8 @@ def save_data():
     data_to_save['ranked_pair_daily'] = ranked_pair_daily
     data_to_save['ranked_reports']    = ranked_reports
     data_to_save['ranked_report_cooldowns'] = ranked_report_cooldowns
+    data_to_save['ranked_1v1_history']  = ranked_1v1_history
+    data_to_save['ranked_season_month'] = ranked_season_month
 
     try:
         with open(DATA_FILE, 'w') as f:
@@ -881,6 +917,8 @@ async def on_ready():
         sync_bs_roles.start()
     if not sync_family_ranked.is_running():
         sync_family_ranked.start()
+    if not check_ranked_season.is_running():
+        check_ranked_season.start()
 
     global _slash_synced
     if not _slash_synced:
@@ -9871,6 +9909,46 @@ async def cmd_carte(ctx):
 # ── Ranked 1v1 interne au serveur ───────────────────────────────────────────
 # ═════════════════════════════════════════════════════════════════════════
 
+@tasks.loop(hours=6)
+async def check_ranked_season():
+    """Archive et remet à zéro le classement ranked 1v1 au changement de mois.
+    Se base sur le mois stocké (pas l'heure exacte) pour rattraper un redémarrage manqué."""
+    await bot.wait_until_ready()
+    global ranked_season_month
+    current_month = datetime.now().strftime('%Y-%m')
+    if ranked_season_month is None:
+        ranked_season_month = current_month
+        save_data()
+        return
+    if current_month == ranked_season_month:
+        return
+
+    ended_month = ranked_season_month
+    ranked_1v1_history[ended_month] = {
+        uid: {'points': p.get('points', 0), 'wins': p.get('wins', 0), 'losses': p.get('losses', 0)}
+        for uid, p in ranked_1v1.items() if p.get('wins', 0) or p.get('losses', 0)
+    }
+    for p in ranked_1v1.values():
+        p['points'] = 0
+        p['wins']   = 0
+        p['losses'] = 0
+    ranked_season_month = current_month
+    save_data()
+
+    announcement = (
+        f"🏆 **Nouvelle saison ranked 1v1 !**\n"
+        f"Le classement de **{_r1v1_month_label(ended_month)}** est archivé "
+        f"(consultable via `!classement_1v1`) — tout le monde repart de **0 point**."
+    )
+    for guild in bot.guilds:
+        log_ch = guild.get_channel(RANKED_LOG_CHANNEL_ID)
+        if log_ch:
+            try:
+                await log_ch.send(announcement)
+            except Exception:
+                pass
+
+
 async def _r1v1_set_role(guild, uid: int, active: bool):
     """Pose ou retire le rôle 'Recherche Duel' — porté tant qu'un défi ou un duel 1v1 est en cours."""
     if not guild:
@@ -10127,26 +10205,42 @@ class RankedResultView(discord.ui.View):
 
 
 class RankedLeaderboardView(discord.ui.View):
-    """Podium top 3 + pagination (30/page) — même pattern que BsFamilyLeaderboardView, sans filtre par clan."""
+    """Podium top 3 + pagination (30/page) + sélecteur de saison (mois passés archivés)."""
     PAGE_SIZE = 30
 
-    def __init__(self, entries, page=0):
+    def __init__(self, guild, month=None, page=0):
         super().__init__(timeout=300)
-        self.entries = entries
-        self.total_pages = max(1, (len(entries) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        self.guild = guild
+        self.month = month  # None = saison en cours
+        self.entries = _r1v1_leaderboard_entries(guild, month)
+        self.total_pages = max(1, (len(self.entries) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
         self.page = max(0, min(page, self.total_pages - 1))
 
+        past_months = sorted(ranked_1v1_history.keys(), reverse=True)
+        if past_months:
+            current_key = ranked_season_month or datetime.now().strftime('%Y-%m')
+            options = [discord.SelectOption(
+                label=f"📅 Saison actuelle ({_r1v1_month_label(current_key)})"[:100],
+                value="__current__", default=(month is None)
+            )]
+            for m in past_months[:24]:
+                options.append(discord.SelectOption(label=_r1v1_month_label(m)[:100], value=m, default=(m == month)))
+            self.month_select = discord.ui.Select(placeholder="📅 Choisir une saison…", options=options)
+            self.month_select.callback = self._on_month
+            self.add_item(self.month_select)
+
         if self.page > 0:
-            prev_btn = discord.ui.Button(label="◀ Précédent", style=discord.ButtonStyle.secondary)
+            prev_btn = discord.ui.Button(label="◀ Précédent", style=discord.ButtonStyle.secondary, row=1)
             prev_btn.callback = self._prev
             self.add_item(prev_btn)
         if self.page < self.total_pages - 1:
-            next_btn = discord.ui.Button(label="Suivant ▶", style=discord.ButtonStyle.secondary)
+            next_btn = discord.ui.Button(label="Suivant ▶", style=discord.ButtonStyle.secondary, row=1)
             next_btn.callback = self._next
             self.add_item(next_btn)
 
     def build_embed(self) -> discord.Embed:
-        embed = discord.Embed(title="🥊 Classement Ranked 1v1", color=0xc0392b)
+        month_label = "Saison actuelle" if self.month is None else _r1v1_month_label(self.month)
+        embed = discord.Embed(title=f"🥊 Classement Ranked 1v1 — {month_label}", color=0xc0392b)
         start = self.page * self.PAGE_SIZE
         page_entries = self.entries[start:start + self.PAGE_SIZE]
 
@@ -10170,17 +10264,23 @@ class RankedLeaderboardView(discord.ui.View):
             for i in range(0, len(lines), 10):
                 embed.add_field(name=chr(8203), value="\n".join(lines[i:i + 10]), inline=False)
         elif not self.entries:
-            embed.description = "Personne n'a encore fait de duel classé."
+            embed.description = "Personne n'a fait de duel classé sur cette période."
 
         embed.set_footer(text=f"{len(self.entries)} joueur(s) classé(s) · Page {self.page + 1}/{self.total_pages}")
         return embed
 
+    async def _on_month(self, interaction: discord.Interaction):
+        value = self.month_select.values[0]
+        month = None if value == "__current__" else value
+        view = RankedLeaderboardView(self.guild, month, 0)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
     async def _prev(self, interaction: discord.Interaction):
-        view = RankedLeaderboardView(self.entries, self.page - 1)
+        view = RankedLeaderboardView(self.guild, self.month, self.page - 1)
         await interaction.response.edit_message(embed=view.build_embed(), view=view)
 
     async def _next(self, interaction: discord.Interaction):
-        view = RankedLeaderboardView(self.entries, self.page + 1)
+        view = RankedLeaderboardView(self.guild, self.month, self.page + 1)
         await interaction.response.edit_message(embed=view.build_embed(), view=view)
 
 
@@ -10254,19 +10354,7 @@ async def cmd_1v1(ctx, membre: discord.Member = None):
 
 @bot.hybrid_command(name="classement_1v1", aliases=["top_1v1"])
 async def cmd_classement_1v1(ctx):
-    entries = []
-    for uid_str, prof in ranked_1v1.items():
-        if prof.get('wins', 0) == 0 and prof.get('losses', 0) == 0:
-            continue
-        member = ctx.guild.get_member(int(uid_str)) if ctx.guild else None
-        name = member.display_name if member else f"<@{uid_str}>"
-        entries.append({
-            'name': name, 'points': prof.get('points', 0),
-            'tier': _r1v1_tier_name(prof.get('points', 0)),
-            'wins': prof.get('wins', 0), 'losses': prof.get('losses', 0),
-        })
-    entries.sort(key=lambda e: e['points'], reverse=True)
-    view = RankedLeaderboardView(entries)
+    view = RankedLeaderboardView(ctx.guild)
     await ctx.send(embed=view.build_embed(), view=view)
 
 
