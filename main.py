@@ -281,6 +281,116 @@ crypto_hold_since    = {}   # str(uid) -> {symbol: ISO} — timestamp dernier ac
 cold_wallets         = {}   # str(uid) -> {symbol: {'qty': float, 'locked_until': ISO}}
 crypto_market_frozen = False  # si True, achats et ventes crypto désactivés
 
+# ── Ranked 1v1 interne (indépendant de !duel, tournament_elo et RANKED_TIERS BS) ──
+ranked_1v1        = {}   # str(uid) -> {'points','wins','losses','reputation','banned_until'}
+ranked_challenges = {}   # str(id) -> {'type':'open'|'target','challenger','target','guild_id','channel_id','message_id','created_at'}
+ranked_pending    = {}   # "minuid_maxuid" -> {'p1','p2','guild_id','channel_id','message_id','created_at','votes':{}}
+ranked_pair_daily = {}   # "minuid_maxuid" -> {'date':'YYYY-MM-DD','count':int}
+ranked_reports    = {}   # str(target_uid) -> [{'reporter','reason','guild_id','created_at','resolved'}]
+ranked_report_cooldowns = {}  # "reporter_target" -> ISO datetime
+RANKED_CHALLENGE_CHANNEL_ID = 1526529629974695977  # #commandes... — tableau des défis 1v1
+RANKED_LOG_CHANNEL_ID       = 1526529856421105715  # #chat-duels — log public des résultats validés
+RANKED_1V1_TIERS = [
+    (0,    '🥉 Bronze'),
+    (100,  '🥈 Argent'),
+    (250,  '🥇 Or'),
+    (450,  '💎 Diamant'),
+    (700,  '🔥 Mythique'),
+    (1000, '👑 Légende'),
+]
+RANKED_1V1_DELTA = {
+    # tier_diff (adversaire - joueur) -> (gain_victoire, perte_defaite)
+    1:  (25, -15),  # adversaire mieux classé
+    0:  (20, -20),  # même niveau
+    -1: (15, -25),  # adversaire moins bien classé
+}
+RANKED_REP_START         = 100
+RANKED_REP_PENALTY       = 20
+RANKED_REP_BAN_THRESHOLD = 40
+RANKED_REP_BAN_HOURS     = 72
+RANKED_CHALLENGE_TTL_H   = 24
+RANKED_MAX_DUELS_PER_DAY_PAIR = 2
+
+
+def _r1v1_profile(uid_str: str) -> dict:
+    return ranked_1v1.setdefault(uid_str, {
+        'points': 0, 'wins': 0, 'losses': 0,
+        'reputation': RANKED_REP_START, 'banned_until': None,
+    })
+
+
+def _r1v1_tier_index(points: int) -> int:
+    idx = 0
+    for i, (min_pts, _name) in enumerate(RANKED_1V1_TIERS):
+        if points >= min_pts:
+            idx = i
+    return idx
+
+
+def _r1v1_tier_name(points: int) -> str:
+    return RANKED_1V1_TIERS[_r1v1_tier_index(points)][1]
+
+
+def _r1v1_delta(is_win: bool, own_points: int, opp_points: int) -> int:
+    diff = max(-1, min(1, _r1v1_tier_index(opp_points) - _r1v1_tier_index(own_points)))
+    win_gain, loss_loss = RANKED_1V1_DELTA[diff]
+    return win_gain if is_win else loss_loss
+
+
+def _r1v1_pair_key(uid1, uid2) -> str:
+    a, b = sorted([int(uid1), int(uid2)])
+    return f"{a}_{b}"
+
+
+def _r1v1_banned(uid_str: str):
+    """Retourne (banni: bool, temps_restant_str: str|None)."""
+    prof = ranked_1v1.get(uid_str)
+    if not prof or not prof.get('banned_until'):
+        return False, None
+    until = datetime.fromisoformat(prof['banned_until'])
+    now = datetime.now()
+    if until <= now:
+        prof['banned_until'] = None
+        return False, None
+    rem = until - now
+    h, rem_s = divmod(int(rem.total_seconds()), 3600)
+    m = rem_s // 60
+    return True, (f"{h}h {m}min" if h else f"{m}min")
+
+
+def _r1v1_pair_cap_ok(uid1, uid2) -> bool:
+    key = _r1v1_pair_key(uid1, uid2)
+    today = datetime.now().strftime('%Y-%m-%d')
+    entry = ranked_pair_daily.get(key)
+    if not entry or entry.get('date') != today:
+        return True
+    return entry.get('count', 0) < RANKED_MAX_DUELS_PER_DAY_PAIR
+
+
+def _r1v1_pair_increment(uid1, uid2):
+    key = _r1v1_pair_key(uid1, uid2)
+    today = datetime.now().strftime('%Y-%m-%d')
+    entry = ranked_pair_daily.get(key)
+    if not entry or entry.get('date') != today:
+        entry = {'date': today, 'count': 0}
+    entry['count'] += 1
+    ranked_pair_daily[key] = entry
+
+
+def _r1v1_apply_result(winner_id: int, loser_id: int):
+    """Met à jour points/wins/losses des deux joueurs. Retourne (win_delta, loss_delta)."""
+    wp = _r1v1_profile(str(winner_id))
+    lp = _r1v1_profile(str(loser_id))
+    win_delta = _r1v1_delta(True, wp['points'], lp['points'])
+    loss_delta = _r1v1_delta(False, lp['points'], wp['points'])
+    wp['points'] = max(0, wp['points'] + win_delta)
+    lp['points'] = max(0, lp['points'] + loss_delta)
+    wp['wins'] += 1
+    lp['losses'] += 1
+    _r1v1_pair_increment(winner_id, loser_id)
+    return win_delta, loss_delta
+
+
 # ── Configuration prix / mises (modifiable par !prix_casino) ─────────────
 BOT_OWNER_ID = 1056848438270115900   # happy_gt3 — créateur du bot
 MAX_FACTORY_WORKERS = 10
@@ -367,6 +477,7 @@ def load_data():
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
     global bs_accounts, bs_role_config, bs_family_clubs, bs_family_ranked_cache, bs_family_ranked_updated_at
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
+    global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
             try:
@@ -471,6 +582,12 @@ def load_data():
                         if isinstance(_wallet[_sym], dict):
                             _wallet[_sym] = [_wallet[_sym]]
                 ADMIN_LOG_CHANNEL_ID = data.get('admin_log_channel_id', 0)
+                ranked_1v1        = data.get('ranked_1v1', {})
+                ranked_challenges = data.get('ranked_challenges', {})
+                ranked_pending    = data.get('ranked_pending', {})
+                ranked_pair_daily = data.get('ranked_pair_daily', {})
+                ranked_reports    = data.get('ranked_reports', {})
+                ranked_report_cooldowns = data.get('ranked_report_cooldowns', {})
                 loaded_cfg = data.get('casino_config', {})
                 if isinstance(loaded_cfg, dict):
                     casino_config['shop_prices']   = loaded_cfg.get('shop_prices', {}) or {}
@@ -606,6 +723,12 @@ def save_data():
     data_to_save['crypto_hold_since']     = crypto_hold_since
     data_to_save['cold_wallets']         = cold_wallets
     data_to_save['admin_log_channel_id'] = ADMIN_LOG_CHANNEL_ID
+    data_to_save['ranked_1v1']        = ranked_1v1
+    data_to_save['ranked_challenges'] = ranked_challenges
+    data_to_save['ranked_pending']    = ranked_pending
+    data_to_save['ranked_pair_daily'] = ranked_pair_daily
+    data_to_save['ranked_reports']    = ranked_reports
+    data_to_save['ranked_report_cooldowns'] = ranked_report_cooldowns
 
     try:
         with open(DATA_FILE, 'w') as f:
@@ -785,6 +908,7 @@ ADMIN_LOCKED_CMDS = {
     'freeze_crypto', 'addcoins', 'removecoins', 'tournois', 'prix_tournoi',
     'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter',
     'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log',
+    'ranked_sanction', 'ranked_ajuster',
 }
 
 
@@ -7832,6 +7956,16 @@ async def cmd_profil(ctx, member: discord.Member = None):
         embed.add_field(name="📈 Crypto (coins)", value="\n".join(crypto_parts), inline=True)
     embed.add_field(name="🔥 Streak Daily", value=f"{streak} jour{'s' if streak != 1 else ''}", inline=True)
     embed.add_field(name="🏆 ELO Tournoi", value=str(elo), inline=True)
+    r1v1 = ranked_1v1.get(uid)
+    if r1v1 and (r1v1.get('wins', 0) or r1v1.get('losses', 0)):
+        rep = r1v1.get('reputation', 100)
+        rep_str = f" · ⚠️ Réputation {rep}/100" if rep < 100 else ""
+        embed.add_field(
+            name="🥊 Classé 1v1",
+            value=f"{_r1v1_tier_name(r1v1.get('points', 0))} — **{r1v1.get('points', 0)} pts**\n"
+                  f"{r1v1.get('wins', 0)}V / {r1v1.get('losses', 0)}D{rep_str}",
+            inline=True
+        )
     embed.add_field(name="💼 Métier", value=job_str, inline=True)
     factory_rate = _factory_rate(workers, factories.get(uid, {}).get('upgraded', False) or _has_item(uid_int, 6))
     factory_pending = _factory_earnings(uid)
@@ -9730,6 +9864,446 @@ async def cmd_carte(ctx):
         return
 
     await ctx.send(view._content(), file=discord.File(buf, 'carte.png'), view=view, allowed_mentions=discord.AllowedMentions.none())
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# ── Ranked 1v1 interne au serveur ───────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════
+
+def _r1v1_purge_stale_challenges():
+    now = datetime.now()
+    for cid in list(ranked_challenges.keys()):
+        ch = ranked_challenges[cid]
+        try:
+            created = datetime.fromisoformat(ch['created_at'])
+        except Exception:
+            ranked_challenges.pop(cid, None)
+            continue
+        if (now - created).total_seconds() > RANKED_CHALLENGE_TTL_H * 3600:
+            ranked_challenges.pop(cid, None)
+
+
+def _r1v1_is_engaged(uid: int) -> bool:
+    """True si uid a un duel en attente de résultat ou un défi actif en tant que challenger."""
+    for v in ranked_pending.values():
+        if uid in (v['p1'], v['p2']):
+            return True
+    for v in ranked_challenges.values():
+        if v.get('challenger') == uid:
+            return True
+    return False
+
+
+def _r1v1_find_pending(uid: int):
+    for key, v in ranked_pending.items():
+        if uid in (v['p1'], v['p2']):
+            return key, v
+    return None, None
+
+
+class RankedChallengeView(discord.ui.View):
+    """Défi 1v1 en attente d'acceptation — ouvert (n'importe qui) ou ciblé (un membre précis)."""
+    def __init__(self, challenge_id: str, challenger_id: int, target_id: int = None):
+        super().__init__(timeout=RANKED_CHALLENGE_TTL_H * 3600)
+        self.challenge_id = challenge_id
+        self.challenger_id = challenger_id
+        self.target_id = target_id
+
+    async def on_timeout(self):
+        ranked_challenges.pop(self.challenge_id, None)
+        save_data()
+
+    @discord.ui.button(label="✅ Accepter", style=discord.ButtonStyle.success)
+    async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        challenge = ranked_challenges.get(self.challenge_id)
+        if not challenge:
+            return await interaction.response.send_message("❌ Ce défi n'est plus disponible.", ephemeral=True)
+        uid = interaction.user.id
+        if uid == self.challenger_id:
+            return await interaction.response.send_message("❌ Tu ne peux pas accepter ton propre défi.", ephemeral=True)
+        if self.target_id and uid != self.target_id:
+            return await interaction.response.send_message("❌ Ce défi n'est pas pour toi.", ephemeral=True)
+        banned, wait = _r1v1_banned(str(uid))
+        if banned:
+            return await interaction.response.send_message(f"❌ Tu es exclu des 1v1 classés encore {wait}.", ephemeral=True)
+        if _r1v1_is_engaged(uid):
+            return await interaction.response.send_message(
+                "❌ Tu as déjà un duel ou un défi en cours, termine-le avant d'en accepter un autre.", ephemeral=True)
+        if not _r1v1_pair_cap_ok(uid, self.challenger_id):
+            return await interaction.response.send_message(
+                f"❌ Vous avez déjà fait {RANKED_MAX_DUELS_PER_DAY_PAIR} duels aujourd'hui ensemble. Réessayez demain.",
+                ephemeral=True
+            )
+
+        ranked_challenges.pop(self.challenge_id, None)
+        pair_key = _r1v1_pair_key(uid, self.challenger_id)
+        ranked_pending[pair_key] = {
+            'p1': self.challenger_id, 'p2': uid,
+            'guild_id': interaction.guild_id, 'created_at': datetime.now().isoformat(),
+            'votes': {},
+        }
+        save_data()
+        for item in self.children:
+            item.disabled = True
+        challenger = interaction.guild.get_member(self.challenger_id)
+        challenger_name = challenger.display_name if challenger else f"<@{self.challenger_id}>"
+        await interaction.response.edit_message(
+            content=f"⚔️ **{challenger_name}** vs **{interaction.user.display_name}** — duel accepté !\n"
+                    f"Une fois le combat terminé en jeu, refaites `!1v1` pour déclarer le résultat.",
+            view=self
+        )
+
+    @discord.ui.button(label="Retirer le défi", style=discord.ButtonStyle.danger)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.challenger_id:
+            return await interaction.response.send_message("❌ Seul l'auteur du défi peut le retirer.", ephemeral=True)
+        ranked_challenges.pop(self.challenge_id, None)
+        save_data()
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="🚫 Défi retiré.", view=self)
+
+
+class RankedResultView(discord.ui.View):
+    """Vote à deux pour valider le résultat d'un duel 1v1 classé — même mécanique que MatchView (tournois)."""
+    def __init__(self, pair_key: str, p1_id: int, p2_id: int, p1_name: str, p2_name: str):
+        super().__init__(timeout=None)
+        self.pair_key = pair_key
+        self.p1_id, self.p2_id = p1_id, p2_id
+        for pid, name in [(p1_id, p1_name), (p2_id, p2_name)]:
+            btn = discord.ui.Button(label=f"🏆 {name[:60]} a gagné", style=discord.ButtonStyle.success)
+            btn.callback = self._make_cb(pid)
+            self.add_item(btn)
+        cancel_btn = discord.ui.Button(label="🚫 Annuler le duel", style=discord.ButtonStyle.danger)
+        cancel_btn.callback = self._cancel
+        self.add_item(cancel_btn)
+
+    async def _finalize(self, interaction, winner_id, loser_id, by_admin):
+        win_delta, loss_delta = _r1v1_apply_result(winner_id, loser_id)
+        ranked_pending.pop(self.pair_key, None)
+        save_data()
+        for item in self.children:
+            item.disabled = True
+        guild = interaction.guild
+        winner = guild.get_member(winner_id) if guild else None
+        loser = guild.get_member(loser_id) if guild else None
+        wname = winner.display_name if winner else f"<@{winner_id}>"
+        lname = loser.display_name if loser else f"<@{loser_id}>"
+        wp = ranked_1v1[str(winner_id)]
+        lp = ranked_1v1[str(loser_id)]
+        desc = (
+            f"🏆 **{wname}** bat **{lname}** !\n"
+            f"{wname} : {win_delta:+d} pts → **{wp['points']}** ({_r1v1_tier_name(wp['points'])})\n"
+            f"{lname} : {loss_delta:+d} pts → **{lp['points']}** ({_r1v1_tier_name(lp['points'])})"
+        )
+        if by_admin:
+            desc += "\n*(résultat tranché par un admin)*"
+        embed = discord.Embed(title="⚔️ Duel 1v1 — Résultat", description=desc, color=0x2ecc71)
+        await interaction.response.edit_message(content=None, embed=embed, view=self)
+        if guild:
+            log_ch = guild.get_channel(RANKED_LOG_CHANNEL_ID)
+            if log_ch:
+                try:
+                    await log_ch.send(embed=embed)
+                except Exception:
+                    pass
+
+    def _make_cb(self, winner_id):
+        async def callback(interaction: discord.Interaction):
+            pending = ranked_pending.get(self.pair_key)
+            if not pending:
+                return await interaction.response.send_message("❌ Ce duel n'est plus en attente.", ephemeral=True)
+            uid = interaction.user.id
+            is_admin = bool(interaction.guild) and interaction.user.guild_permissions.administrator
+            is_player = uid in (self.p1_id, self.p2_id)
+            if not is_player and not is_admin:
+                return await interaction.response.send_message(
+                    "❌ Seuls les deux joueurs (ou un admin) peuvent déclarer le résultat.", ephemeral=True)
+
+            loser_id = self.p2_id if winner_id == self.p1_id else self.p1_id
+
+            if is_admin and not is_player:
+                return await self._finalize(interaction, winner_id, loser_id, by_admin=True)
+
+            votes = pending.setdefault('votes', {})
+            votes[uid] = winner_id
+            c1, c2 = self.p1_id, self.p2_id
+            if c1 in votes and c2 in votes:
+                if votes[c1] == votes[c2]:
+                    win = votes[c1]
+                    lose = self.p2_id if win == self.p1_id else self.p1_id
+                    return await self._finalize(interaction, win, lose, by_admin=False)
+                # Désaccord : reset des votes, alerte staff
+                pending['votes'] = {}
+                save_data()
+                guild = interaction.guild
+                p1 = guild.get_member(self.p1_id) if guild else None
+                p2 = guild.get_member(self.p2_id) if guild else None
+                p1n = p1.display_name if p1 else f"<@{self.p1_id}>"
+                p2n = p2.display_name if p2 else f"<@{self.p2_id}>"
+                conflict = discord.Embed(
+                    title="⚠️ Duel 1v1 — Désaccord",
+                    description=(
+                        f"{p1n} et {p2n} ont désigné des vainqueurs différents.\n"
+                        "Le staff a été notifié et va trancher.\n"
+                        "Si vous pensez que l'autre joueur est de mauvaise foi, "
+                        "vous pouvez le signaler avec `!signaler @joueur <raison>`."
+                    ),
+                    color=0xe74c3c
+                )
+                await interaction.response.edit_message(content=None, embed=conflict, view=self)
+                if guild:
+                    if guild.get_channel(RANKED_LOG_CHANNEL_ID):
+                        try:
+                            await guild.get_channel(RANKED_LOG_CHANNEL_ID).send(embed=conflict)
+                        except Exception:
+                            pass
+                    await _admin_log(
+                        guild, "Duel 1v1 contesté",
+                        f"{p1n} et {p2n} ne sont pas d'accord sur le résultat de leur duel 1v1.",
+                        color=0xe74c3c
+                    )
+                    if ADMIN_LOG_CHANNEL_ID:
+                        admin_ch = guild.get_channel(ADMIN_LOG_CHANNEL_ID)
+                        if admin_ch:
+                            resolve_view = RankedResultView(self.pair_key, self.p1_id, self.p2_id, p1n, p2n)
+                            try:
+                                await admin_ch.send("Trancher ce duel :", view=resolve_view)
+                            except Exception:
+                                pass
+                return
+
+            other_id = c2 if uid == c1 else c1
+            waiting = discord.Embed(
+                title="⚔️ Duel 1v1 — Vote enregistré",
+                description=f"<@{uid}> a voté. En attente de la confirmation de <@{other_id}>…",
+                color=0xe67e22
+            )
+            await interaction.response.edit_message(content=None, embed=waiting, view=self)
+        return callback
+
+    async def _cancel(self, interaction: discord.Interaction):
+        pending = ranked_pending.get(self.pair_key)
+        if not pending:
+            return await interaction.response.send_message("❌ Ce duel n'est plus en attente.", ephemeral=True)
+        uid = interaction.user.id
+        is_admin = bool(interaction.guild) and interaction.user.guild_permissions.administrator
+        if uid not in (self.p1_id, self.p2_id) and not is_admin:
+            return await interaction.response.send_message("❌ Seuls les deux joueurs (ou un admin) peuvent annuler.", ephemeral=True)
+        ranked_pending.pop(self.pair_key, None)
+        save_data()
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="🚫 Duel annulé.", embed=None, view=self)
+
+
+class RankedLeaderboardView(discord.ui.View):
+    """Podium top 3 + pagination (30/page) — même pattern que BsFamilyLeaderboardView, sans filtre par clan."""
+    PAGE_SIZE = 30
+
+    def __init__(self, entries, page=0):
+        super().__init__(timeout=300)
+        self.entries = entries
+        self.total_pages = max(1, (len(entries) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        self.page = max(0, min(page, self.total_pages - 1))
+
+        if self.page > 0:
+            prev_btn = discord.ui.Button(label="◀ Précédent", style=discord.ButtonStyle.secondary)
+            prev_btn.callback = self._prev
+            self.add_item(prev_btn)
+        if self.page < self.total_pages - 1:
+            next_btn = discord.ui.Button(label="Suivant ▶", style=discord.ButtonStyle.secondary)
+            next_btn.callback = self._next
+            self.add_item(next_btn)
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(title="🥊 Classement Ranked 1v1", color=0xc0392b)
+        start = self.page * self.PAGE_SIZE
+        page_entries = self.entries[start:start + self.PAGE_SIZE]
+
+        if self.page == 0:
+            medals = ['🥇', '🥈', '🥉']
+            for i, e in enumerate(self.entries[:3]):
+                embed.add_field(
+                    name=f"{medals[i]} {e['name']}",
+                    value=f"{e['tier']}\n**{e['points']:,} pts** · {e['wins']}V/{e['losses']}D",
+                    inline=True
+                )
+            rest, rank_offset = page_entries[3:], 4
+        else:
+            rest, rank_offset = page_entries, start + 1
+
+        if rest:
+            lines = []
+            for i, e in enumerate(rest):
+                rank = rank_offset + i
+                lines.append(f"**{rank}.** {e['name']} — {e['tier']} · **{e['points']:,} pts** ({e['wins']}V/{e['losses']}D)")
+            for i in range(0, len(lines), 10):
+                embed.add_field(name=chr(8203), value="\n".join(lines[i:i + 10]), inline=False)
+        elif not self.entries:
+            embed.description = "Personne n'a encore fait de duel classé."
+
+        embed.set_footer(text=f"{len(self.entries)} joueur(s) classé(s) · Page {self.page + 1}/{self.total_pages}")
+        return embed
+
+    async def _prev(self, interaction: discord.Interaction):
+        view = RankedLeaderboardView(self.entries, self.page - 1)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    async def _next(self, interaction: discord.Interaction):
+        view = RankedLeaderboardView(self.entries, self.page + 1)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+
+@bot.hybrid_command(name="1v1", aliases=["ranked"])
+async def cmd_1v1(ctx, membre: discord.Member = None):
+    author_id = ctx.author.id
+
+    # Un duel accepté attend un résultat → on affiche le vote, peu importe la mention
+    pair_key, pending = _r1v1_find_pending(author_id)
+    if pending:
+        guild = ctx.guild
+        p1 = guild.get_member(pending['p1']) if guild else None
+        p2 = guild.get_member(pending['p2']) if guild else None
+        p1n = p1.display_name if p1 else f"<@{pending['p1']}>"
+        p2n = p2.display_name if p2 else f"<@{pending['p2']}>"
+        view = RankedResultView(pair_key, pending['p1'], pending['p2'], p1n, p2n)
+        embed = discord.Embed(
+            title="⚔️ Déclarer le résultat du duel",
+            description=f"{p1n} vs {p2n}\nCliquez sur le vainqueur (les deux joueurs doivent être d'accord).",
+            color=0xe67e22
+        )
+        return await ctx.send(embed=embed, view=view)
+
+    _r1v1_purge_stale_challenges()
+
+    if any(ch.get('challenger') == author_id for ch in ranked_challenges.values()):
+        return await ctx.send("❌ Tu as déjà un défi en attente. Attends qu'il soit accepté ou retire-le.")
+
+    banned, wait = _r1v1_banned(str(author_id))
+    if banned:
+        return await ctx.send(f"❌ Tu es exclu des 1v1 classés encore {wait}.")
+
+    if membre:
+        if membre.id == author_id or membre.bot:
+            return await ctx.send("❌ Cible invalide.")
+        target_banned, target_wait = _r1v1_banned(str(membre.id))
+        if target_banned:
+            return await ctx.send(f"❌ {membre.mention} est exclu des 1v1 classés encore {target_wait}.")
+        if _r1v1_is_engaged(membre.id):
+            return await ctx.send(f"❌ {membre.mention} a déjà un duel ou un défi en cours.")
+        if not _r1v1_pair_cap_ok(author_id, membre.id):
+            return await ctx.send(
+                f"❌ Vous avez déjà fait {RANKED_MAX_DUELS_PER_DAY_PAIR} duels aujourd'hui ensemble. Réessayez demain.")
+
+    challenge_id = f"{author_id}_{int(datetime.now().timestamp())}"
+    ranked_challenges[challenge_id] = {
+        'type': 'target' if membre else 'open',
+        'challenger': author_id,
+        'target': membre.id if membre else None,
+        'guild_id': ctx.guild.id if ctx.guild else None,
+        'created_at': datetime.now().isoformat(),
+    }
+    save_data()
+
+    view = RankedChallengeView(challenge_id, author_id, membre.id if membre else None)
+    if membre:
+        content = f"⚔️ {ctx.author.mention} défie {membre.mention} en 1v1 classé ! Seul {membre.mention} peut accepter."
+    else:
+        content = f"⚔️ {ctx.author.mention} cherche un adversaire pour un 1v1 classé ! Premier arrivé, premier servi."
+
+    challenge_channel = ctx.guild.get_channel(RANKED_CHALLENGE_CHANNEL_ID) if ctx.guild else None
+    target_channel = challenge_channel or ctx.channel
+    msg = await target_channel.send(content, view=view)
+    ranked_challenges[challenge_id]['channel_id'] = target_channel.id
+    ranked_challenges[challenge_id]['message_id'] = msg.id
+    save_data()
+    if target_channel.id != ctx.channel.id:
+        await ctx.send(f"✅ Défi envoyé dans {target_channel.mention} !")
+
+
+@bot.hybrid_command(name="classement_1v1", aliases=["top_1v1"])
+async def cmd_classement_1v1(ctx):
+    entries = []
+    for uid_str, prof in ranked_1v1.items():
+        if prof.get('wins', 0) == 0 and prof.get('losses', 0) == 0:
+            continue
+        member = ctx.guild.get_member(int(uid_str)) if ctx.guild else None
+        name = member.display_name if member else f"<@{uid_str}>"
+        entries.append({
+            'name': name, 'points': prof.get('points', 0),
+            'tier': _r1v1_tier_name(prof.get('points', 0)),
+            'wins': prof.get('wins', 0), 'losses': prof.get('losses', 0),
+        })
+    entries.sort(key=lambda e: e['points'], reverse=True)
+    view = RankedLeaderboardView(entries)
+    await ctx.send(embed=view.build_embed(), view=view)
+
+
+@bot.hybrid_command(name="signaler")
+async def cmd_signaler(ctx, joueur: discord.Member, *, raison: str):
+    if joueur.id == ctx.author.id or joueur.bot:
+        return await ctx.send("❌ Cible invalide.")
+    key = f"{ctx.author.id}_{joueur.id}"
+    last = ranked_report_cooldowns.get(key)
+    if last:
+        elapsed = (datetime.now() - datetime.fromisoformat(last)).total_seconds()
+        if elapsed < 86400:
+            wait_h = max(1, int((86400 - elapsed) // 3600))
+            return await ctx.send(f"❌ Tu as déjà signalé ce joueur récemment. Réessaie dans ~{wait_h}h.")
+    ranked_report_cooldowns[key] = datetime.now().isoformat()
+    ranked_reports.setdefault(str(joueur.id), []).append({
+        'reporter': ctx.author.id, 'reason': raison,
+        'guild_id': ctx.guild.id if ctx.guild else None,
+        'created_at': datetime.now().isoformat(), 'resolved': False,
+    })
+    save_data()
+    if ctx.guild:
+        await _admin_log(
+            ctx.guild, "🚩 Signalement 1v1",
+            f"{ctx.author.mention} a signalé {joueur.mention}.\n**Raison :** {raison}",
+            color=0xe67e22, author=ctx.author
+        )
+    await ctx.send(
+        f"✅ Signalement envoyé au staff concernant {joueur.mention}.\n"
+        f"⚠️ Un signalement validé par le staff peut faire baisser sa réputation et l'exclure temporairement des 1v1 classés."
+    )
+
+
+@bot.command(name="ranked_sanction")
+async def cmd_ranked_sanction(ctx, joueur: discord.Member):
+    reports = ranked_reports.get(str(joueur.id), [])
+    unresolved = next((r for r in reports if not r.get('resolved')), None)
+    if not unresolved:
+        return await ctx.send(f"❌ Aucun signalement non résolu pour {joueur.mention}.")
+    unresolved['resolved'] = True
+    prof = _r1v1_profile(str(joueur.id))
+    prof['reputation'] = max(0, prof['reputation'] - RANKED_REP_PENALTY)
+    banned_msg = ""
+    if prof['reputation'] <= RANKED_REP_BAN_THRESHOLD:
+        until = datetime.now() + timedelta(hours=RANKED_REP_BAN_HOURS)
+        prof['banned_until'] = until.isoformat()
+        banned_msg = f"\n🚫 Réputation trop basse : exclu des 1v1 classés pendant {RANKED_REP_BAN_HOURS}h."
+    save_data()
+    await ctx.send(f"✅ Signalement traité pour {joueur.mention}. Réputation : **{prof['reputation']}/100**.{banned_msg}")
+    if ctx.guild:
+        await _admin_log(
+            ctx.guild, "⚖️ Sanction 1v1 appliquée",
+            f"{ctx.author.mention} a validé un signalement contre {joueur.mention}. "
+            f"Réputation → {prof['reputation']}/100.{banned_msg}",
+            color=0xc0392b, author=ctx.author
+        )
+
+
+@bot.command(name="ranked_ajuster")
+async def cmd_ranked_ajuster(ctx, joueur: discord.Member, delta: int):
+    prof = _r1v1_profile(str(joueur.id))
+    prof['points'] = max(0, prof['points'] + delta)
+    save_data()
+    await ctx.send(
+        f"✅ Points de {joueur.mention} ajustés de {delta:+d} → "
+        f"**{prof['points']} pts** ({_r1v1_tier_name(prof['points'])})."
+    )
 
 
 token = os.getenv("TOKEN")
