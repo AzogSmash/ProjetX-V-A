@@ -310,6 +310,7 @@ RANKED_REP_BAN_THRESHOLD = 40
 RANKED_REP_BAN_HOURS     = 72
 RANKED_CHALLENGE_TTL_H   = 24
 RANKED_MAX_DUELS_PER_DAY_PAIR = 2
+RANKED_SEARCH_ROLE_ID    = 1526561617695866901  # "Recherche Duel" — porté tant qu'un défi/duel 1v1 est en cours
 
 
 def _r1v1_profile(uid_str: str) -> dict:
@@ -9870,7 +9871,24 @@ async def cmd_carte(ctx):
 # ── Ranked 1v1 interne au serveur ───────────────────────────────────────────
 # ═════════════════════════════════════════════════════════════════════════
 
-def _r1v1_purge_stale_challenges():
+async def _r1v1_set_role(guild, uid: int, active: bool):
+    """Pose ou retire le rôle 'Recherche Duel' — porté tant qu'un défi ou un duel 1v1 est en cours."""
+    if not guild:
+        return
+    role = guild.get_role(RANKED_SEARCH_ROLE_ID)
+    member = guild.get_member(uid)
+    if not role or not member:
+        return
+    try:
+        if active and role not in member.roles:
+            await member.add_roles(role, reason="Défi/duel 1v1 en cours")
+        elif not active and role in member.roles:
+            await member.remove_roles(role, reason="Défi/duel 1v1 terminé")
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+async def _r1v1_purge_stale_challenges(guild=None):
     now = datetime.now()
     for cid in list(ranked_challenges.keys()):
         ch = ranked_challenges[cid]
@@ -9881,6 +9899,8 @@ def _r1v1_purge_stale_challenges():
             continue
         if (now - created).total_seconds() > RANKED_CHALLENGE_TTL_H * 3600:
             ranked_challenges.pop(cid, None)
+            if guild:
+                await _r1v1_set_role(guild, ch['challenger'], False)
 
 
 def _r1v1_is_engaged(uid: int) -> bool:
@@ -9903,15 +9923,18 @@ def _r1v1_find_pending(uid: int):
 
 class RankedChallengeView(discord.ui.View):
     """Défi 1v1 en attente d'acceptation — ouvert (n'importe qui) ou ciblé (un membre précis)."""
-    def __init__(self, challenge_id: str, challenger_id: int, target_id: int = None):
+    def __init__(self, challenge_id: str, challenger_id: int, target_id: int = None, guild_id: int = None):
         super().__init__(timeout=RANKED_CHALLENGE_TTL_H * 3600)
         self.challenge_id = challenge_id
         self.challenger_id = challenger_id
         self.target_id = target_id
+        self.guild_id = guild_id
 
     async def on_timeout(self):
         ranked_challenges.pop(self.challenge_id, None)
         save_data()
+        guild = bot.get_guild(self.guild_id) if self.guild_id else None
+        await _r1v1_set_role(guild, self.challenger_id, False)
 
     @discord.ui.button(label="✅ Accepter", style=discord.ButtonStyle.success)
     async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -9943,6 +9966,7 @@ class RankedChallengeView(discord.ui.View):
             'votes': {},
         }
         save_data()
+        await _r1v1_set_role(interaction.guild, uid, True)
         for item in self.children:
             item.disabled = True
         challenger = interaction.guild.get_member(self.challenger_id)
@@ -9959,6 +9983,7 @@ class RankedChallengeView(discord.ui.View):
             return await interaction.response.send_message("❌ Seul l'auteur du défi peut le retirer.", ephemeral=True)
         ranked_challenges.pop(self.challenge_id, None)
         save_data()
+        await _r1v1_set_role(interaction.guild, self.challenger_id, False)
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(content="🚫 Défi retiré.", view=self)
@@ -9982,9 +10007,11 @@ class RankedResultView(discord.ui.View):
         win_delta, loss_delta = _r1v1_apply_result(winner_id, loser_id)
         ranked_pending.pop(self.pair_key, None)
         save_data()
+        guild = interaction.guild
+        await _r1v1_set_role(guild, winner_id, False)
+        await _r1v1_set_role(guild, loser_id, False)
         for item in self.children:
             item.disabled = True
-        guild = interaction.guild
         winner = guild.get_member(winner_id) if guild else None
         loser = guild.get_member(loser_id) if guild else None
         wname = winner.display_name if winner else f"<@{winner_id}>"
@@ -10092,6 +10119,8 @@ class RankedResultView(discord.ui.View):
             return await interaction.response.send_message("❌ Seuls les deux joueurs (ou un admin) peuvent annuler.", ephemeral=True)
         ranked_pending.pop(self.pair_key, None)
         save_data()
+        await _r1v1_set_role(interaction.guild, self.p1_id, False)
+        await _r1v1_set_role(interaction.guild, self.p2_id, False)
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(content="🚫 Duel annulé.", embed=None, view=self)
@@ -10175,7 +10204,7 @@ async def cmd_1v1(ctx, membre: discord.Member = None):
         )
         return await ctx.send(embed=embed, view=view)
 
-    _r1v1_purge_stale_challenges()
+    await _r1v1_purge_stale_challenges(ctx.guild)
 
     if any(ch.get('challenger') == author_id for ch in ranked_challenges.values()):
         return await ctx.send("❌ Tu as déjà un défi en attente. Attends qu'il soit accepté ou retire-le.")
@@ -10205,8 +10234,9 @@ async def cmd_1v1(ctx, membre: discord.Member = None):
         'created_at': datetime.now().isoformat(),
     }
     save_data()
+    await _r1v1_set_role(ctx.guild, author_id, True)
 
-    view = RankedChallengeView(challenge_id, author_id, membre.id if membre else None)
+    view = RankedChallengeView(challenge_id, author_id, membre.id if membre else None, ctx.guild.id if ctx.guild else None)
     if membre:
         content = f"⚔️ {ctx.author.mention} défie {membre.mention} en 1v1 classé ! Seul {membre.mention} peut accepter."
     else:
