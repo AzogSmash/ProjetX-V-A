@@ -7478,13 +7478,19 @@ async def cmd_punition(ctx, nombre: int, membre: discord.Member):
         return await ctx.send("❌ Le nombre doit être supérieur à 0.")
     
     guild = ctx.guild
-    
+
     # Créer le salon de punition
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         membre: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+        ctx.author: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
     }
+    # Les rôles autorisés à utiliser !punition via !perm doivent aussi voir le salon créé
+    for rid in cmd_role_perms.get('punition', []):
+        role = guild.get_role(rid)
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
     salon = await guild.create_text_channel(
         f"punition-{membre.display_name}",
         overwrites=overwrites,
