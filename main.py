@@ -499,6 +499,29 @@ if not os.path.exists(DATA_FILE) and os.path.exists('/app/data.json'):
     os.makedirs(os.path.dirname(DATA_FILE) or '.', exist_ok=True)
     shutil.copy('/app/data.json', DATA_FILE)
 
+def _resolve_data_path():
+    """Retourne le fichier à charger : DATA_FILE s'il contient du JSON valide,
+    sinon la sauvegarde .bak la plus récente (protection contre un fichier
+    tronqué/corrompu par un arrêt en plein milieu d'une écriture)."""
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
+                json.load(f)
+            return DATA_FILE
+        except Exception as e:
+            logging.warning("%s invalide (%s), tentative de restauration depuis .bak", DATA_FILE, e)
+    bak_path = f"{DATA_FILE}.bak"
+    if os.path.exists(bak_path):
+        try:
+            with open(bak_path, 'r', encoding='utf-8-sig') as f:
+                json.load(f)
+            logging.warning("Restauration réussie depuis %s.", bak_path)
+            return bak_path
+        except Exception:
+            pass
+    return DATA_FILE
+
+
 # --- Fonctions de chargement et de sauvegarde des données ---
 def load_data():
     global warns, mutes, silenced_users, coins, giveaway_data, daily_cooldowns, work_cooldowns
@@ -511,8 +534,9 @@ def load_data():
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
     global ranked_1v1_history, ranked_season_month
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
+    load_path = _resolve_data_path()
+    if os.path.exists(load_path):
+        with open(load_path, 'r', encoding='utf-8-sig') as f:
             try:
                 data = json.load(f)
 
@@ -768,8 +792,21 @@ def save_data():
     data_to_save['ranked_season_month'] = ranked_season_month
 
     try:
-        with open(DATA_FILE, 'w') as f:
-            json.dump(data_to_save, f, indent=4)
+        # Écriture atomique : on écrit dans un fichier temporaire puis on remplace l'ancien
+        # d'un coup (os.replace est atomique). Sans ça, un crash/redémarrage pendant
+        # l'écriture directe de DATA_FILE peut le laisser tronqué/invalide, et le prochain
+        # démarrage réinitialiserait alors TOUTES les données (coins, ranked_1v1, etc.).
+        tmp_path = f"{DATA_FILE}.tmp"
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(data_to_save, f, indent=4, ensure_ascii=False)
+        # Garde une copie du dernier état connu-bon AVANT de le remplacer, pour pouvoir
+        # restaurer automatiquement si jamais DATA_FILE finit corrompu malgré l'écriture atomique.
+        if os.path.exists(DATA_FILE):
+            try:
+                shutil.copy2(DATA_FILE, f"{DATA_FILE}.bak")
+            except Exception:
+                pass
+        os.replace(tmp_path, DATA_FILE)
         print("Données sauvegardées avec succès.")
     except Exception as e:
         print(f"Erreur lors de la sauvegarde des données: {e}")
@@ -923,14 +960,18 @@ async def on_ready():
     global _slash_synced
     if not _slash_synced:
         try:
-            # Purge les commandes globales (un ancien déploiement les avait enregistrées
-            # en plus des commandes par serveur, ce qui créait des doublons dans Discord).
-            bot.tree.clear_commands(guild=None)
-            await bot.tree.sync()
+            # copy_global_to lit la liste globale EN MÉMOIRE : il faut donc synchroniser
+            # les serveurs d'abord, et ne purger le registre global (distant) qu'ensuite —
+            # clear_commands(guild=None) vide aussi cette liste en mémoire, donc le faire
+            # avant la boucle ferait copier une liste déjà vide (0 commande partout).
             for guild in bot.guilds:
                 bot.tree.copy_global_to(guild=guild)
                 synced = await bot.tree.sync(guild=guild)
                 logging.warning("Slash commands synchronisées sur %s : %d", guild.name, len(synced))
+            # Purge ensuite les commandes globales distantes (un ancien déploiement les avait
+            # enregistrées en plus des commandes par serveur, ce qui créait des doublons).
+            bot.tree.clear_commands(guild=None)
+            await bot.tree.sync()
             _slash_synced = True
         except Exception as e:
             logging.warning("Erreur de synchronisation des slash commands : %s", e)
