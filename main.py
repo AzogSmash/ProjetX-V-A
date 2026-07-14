@@ -761,11 +761,14 @@ async def on_ready():
     global _slash_synced
     if not _slash_synced:
         try:
-            synced = await bot.tree.sync()
-            logging.warning("Slash commands synchronisées : %d", len(synced))
+            # Purge les commandes globales (un ancien déploiement les avait enregistrées
+            # en plus des commandes par serveur, ce qui créait des doublons dans Discord).
+            bot.tree.clear_commands(guild=None)
+            await bot.tree.sync()
             for guild in bot.guilds:
                 bot.tree.copy_global_to(guild=guild)
-                await bot.tree.sync(guild=guild)
+                synced = await bot.tree.sync(guild=guild)
+                logging.warning("Slash commands synchronisées sur %s : %d", guild.name, len(synced))
             _slash_synced = True
         except Exception as e:
             logging.warning("Erreur de synchronisation des slash commands : %s", e)
@@ -1185,6 +1188,15 @@ async def aide(ctx):
     embed = _help_home_embed(ctx, cats)
     view = HelpView(ctx, cats)
     await ctx.send(embed=embed, view=view)
+
+@bot.event
+async def on_guild_join(guild):
+    try:
+        bot.tree.copy_global_to(guild=guild)
+        await bot.tree.sync(guild=guild)
+    except Exception as e:
+        logging.warning("Erreur de synchronisation des slash commands sur %s : %s", guild.name, e)
+
 
 @bot.event
 async def on_member_join(member):
