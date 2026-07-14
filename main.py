@@ -776,6 +776,14 @@ async def on_ready():
 # ── Liste des commandes toujours autorisées (anti-bricking) ──────────────
 ALWAYS_ALLOWED_CMDS = {'gestion', 'permission', 'cooldown', 'cd', 'aide'}
 
+# ── Commandes sensibles : admin par défaut, sauf rôle explicitement autorisé via !perm ──
+ADMIN_LOCKED_CMDS = {
+    'giveaway', 'cancelgiveaway', 'gdt', 'prix_casino', 'ouvrir_course', 'lancer_course',
+    'freeze_crypto', 'addcoins', 'removecoins', 'tournois', 'prix_tournoi',
+    'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter',
+    'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log',
+}
+
 
 @bot.check
 async def _global_command_gate(ctx):
@@ -794,22 +802,31 @@ async def _global_command_gate(ctx):
         except Exception:
             pass
         return False
+    # Les admins du serveur passent toujours
+    if ctx.guild and ctx.author.guild_permissions.administrator:
+        return True
     # Restrictions de rôle (!permission)
     allowed_roles = cmd_role_perms.get(cmd_name)
     if allowed_roles and ctx.guild:
-        # Les admins du serveur passent toujours
-        if ctx.author.guild_permissions.administrator:
-            return True
         user_role_ids = {r.id for r in ctx.author.roles}
-        if not (user_role_ids & set(allowed_roles)):
-            try:
-                await ctx.send(
-                    f"🔒 La commande `!{cmd_name}` est restreinte à certains rôles. "
-                    f"Vous n'avez pas la permission de l'utiliser."
-                )
-            except Exception:
-                pass
-            return False
+        if user_role_ids & set(allowed_roles):
+            return True
+    # Commande sensible sans rôle explicitement autorisé : réservée aux admins
+    if cmd_name in ADMIN_LOCKED_CMDS and not (allowed_roles and ctx.guild):
+        try:
+            await ctx.send(f"❌ La commande `!{cmd_name}` est réservée aux administrateurs (ou à un rôle autorisé via `!perm`).")
+        except Exception:
+            pass
+        return False
+    if allowed_roles and ctx.guild:
+        try:
+            await ctx.send(
+                f"🔒 La commande `!{cmd_name}` est restreinte à certains rôles. "
+                f"Vous n'avez pas la permission de l'utiliser."
+            )
+        except Exception:
+            pass
+        return False
     return True
 
 
@@ -1832,7 +1849,6 @@ async def _run_giveaway(ctx, guild_id, message, duration_hours, winners_count, p
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
 async def giveaway(ctx, duration_hours: float, winners_count: int, *, prize: str):
     if duration_hours <= 0 or winners_count <= 0:
         await ctx.send("❌ La durée et le nombre de gagnants doivent être supérieurs à zéro.")
@@ -1877,7 +1893,6 @@ async def giveaway(ctx, duration_hours: float, winners_count: int, *, prize: str
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
 async def cancelgiveaway(ctx):
     guild_id = ctx.guild.id
     if guild_id not in giveaway_data or not giveaway_data[guild_id]:
@@ -5041,7 +5056,6 @@ class GdtView(discord.ui.View):
 
 
 @bot.command(name="gdt", aliases=["competition_clubs"])
-@commands.has_permissions(administrator=True)
 async def cmd_gdt(ctx):
     await ctx.send(embed=_gdt_embed(), view=GdtView(ctx.author.id))
 
@@ -5366,11 +5380,17 @@ async def cmd_gestion(ctx):
 
 class PermSelectRolesView(discord.ui.View):
     """Menu pour sélectionner les rôles autorisés à utiliser la commande choisie."""
-    def __init__(self, ctx, cmd_name):
+    PAGE_SIZE = 25
+
+    def __init__(self, ctx, cmd_name, page: int = 0):
         super().__init__(timeout=180)
         self.ctx = ctx
         self.cmd_name = cmd_name
-        roles = [r for r in ctx.guild.roles if not r.is_default()][:25]
+        self.page = page
+        self.all_roles = [r for r in ctx.guild.roles if not r.is_default()]
+        self.total_pages = max(1, (len(self.all_roles) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        start = page * self.PAGE_SIZE
+        roles = self.all_roles[start:start + self.PAGE_SIZE]
         # Récupérer les rôles déjà autorisés
         current = set(cmd_role_perms.get(cmd_name, []))
         options = []
@@ -5382,22 +5402,34 @@ class PermSelectRolesView(discord.ui.View):
         if not options:
             options = [discord.SelectOption(label="Aucun rôle disponible", value="none")]
         self.select = discord.ui.Select(
-            placeholder=f"Rôles autorisés pour !{cmd_name}",
+            placeholder=f"Rôles autorisés pour !{cmd_name} — page {page + 1}/{self.total_pages}",
             options=options, min_values=0, max_values=len(options)
         )
         self.select.callback = self._on_select
         self.add_item(self.select)
+        if page > 0:
+            prev_btn = discord.ui.Button(label="◀ Précédent", style=discord.ButtonStyle.secondary, row=1)
+            prev_btn.callback = self._prev
+            self.add_item(prev_btn)
+        if page < self.total_pages - 1:
+            next_btn = discord.ui.Button(label="Suivant ▶", style=discord.ButtonStyle.secondary, row=1)
+            next_btn.callback = self._next
+            self.add_item(next_btn)
 
     async def interaction_check(self, interaction):
-        if not is_bot_owner(interaction.user):
-            await interaction.response.send_message("❌ Réservé au créateur du bot.", ephemeral=True)
+        if not (interaction.user.guild_permissions.administrator or is_bot_owner(interaction.user)):
+            await interaction.response.send_message("❌ Réservé aux administrateurs ou au créateur du bot.", ephemeral=True)
             return False
         return True
 
     async def _on_select(self, interaction):
-        values = [v for v in self.select.values if v != "none"]
-        if values:
-            cmd_role_perms[self.cmd_name] = [int(v) for v in values]
+        # Ne touche qu'aux rôles affichés sur cette page ; les autres pages restent inchangées.
+        page_role_ids = {int(o.value) for o in self.select.options if o.value != "none"}
+        selected_ids = {int(v) for v in self.select.values if v != "none"}
+        current = set(cmd_role_perms.get(self.cmd_name, []))
+        updated = (current - page_role_ids) | selected_ids
+        if updated:
+            cmd_role_perms[self.cmd_name] = sorted(updated)
         else:
             cmd_role_perms.pop(self.cmd_name, None)
         save_data()
@@ -5409,7 +5441,13 @@ class PermSelectRolesView(discord.ui.View):
             ephemeral=True
         )
 
-    @discord.ui.button(label="Supprimer la restriction", style=discord.ButtonStyle.danger, emoji="🗑️", row=1)
+    async def _prev(self, interaction):
+        await interaction.response.edit_message(view=PermSelectRolesView(self.ctx, self.cmd_name, self.page - 1))
+
+    async def _next(self, interaction):
+        await interaction.response.edit_message(view=PermSelectRolesView(self.ctx, self.cmd_name, self.page + 1))
+
+    @discord.ui.button(label="Supprimer la restriction", style=discord.ButtonStyle.danger, emoji="🗑️", row=2)
     async def clear_btn(self, interaction, button):
         cmd_role_perms.pop(self.cmd_name, None)
         save_data()
@@ -5466,8 +5504,8 @@ class PermissionView(discord.ui.View):
             self.add_item(next_btn)
 
     async def interaction_check(self, interaction):
-        if not is_bot_owner(interaction.user):
-            await interaction.response.send_message("❌ Réservé au créateur du bot.", ephemeral=True)
+        if not (interaction.user.guild_permissions.administrator or is_bot_owner(interaction.user)):
+            await interaction.response.send_message("❌ Réservé aux administrateurs ou au créateur du bot.", ephemeral=True)
             return False
         return True
 
@@ -5489,8 +5527,8 @@ class PermissionView(discord.ui.View):
 
 @bot.command(name="permission", aliases=["permissions", "perm"])
 async def cmd_permission(ctx):
-    if not is_bot_owner(ctx.author):
-        return await ctx.send("❌ Réservé au créateur du bot.")
+    if not (ctx.guild and ctx.author.guild_permissions.administrator) and not is_bot_owner(ctx.author):
+        return await ctx.send("❌ Réservé aux administrateurs ou au créateur du bot.")
     if not ctx.guild:
         return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
     await ctx.send(embed=_perm_embed(), view=PermissionView(ctx))
@@ -5990,7 +6028,6 @@ class PrixCasinoView(discord.ui.View):
 
 
 @bot.command(name="prix_casino", aliases=["casino_config", "prixcasino"])
-@commands.has_permissions(administrator=True)
 async def cmd_prix_casino(ctx):
     await ctx.send(embed=_prix_casino_embed(), view=PrixCasinoView(ctx.author.id))
 
@@ -6605,7 +6642,6 @@ async def cmd_parier(ctx, pilote: int, mise: str):
     await ctx.send(f"🏎️ {ctx.author.mention} a misé **{mise:,} coins** sur **{driver_name}** (cote ×{odds}) !")
 
 @bot.command(name="ouvrir_course", aliases=["oc", "open_race"])
-@commands.has_permissions(administrator=True)
 async def cmd_ouvrir_course(ctx):
     global race_accepting, race_bets
     race_accepting = True
@@ -6616,7 +6652,6 @@ async def cmd_ouvrir_course(ctx):
     await ctx.send(embed=embed)
 
 @bot.command(name="lancer_course", aliases=["lc", "start_race"])
-@commands.has_permissions(administrator=True)
 async def cmd_lancer_course(ctx):
     global race_accepting, race_bets
     if not race_accepting:
@@ -6675,7 +6710,6 @@ async def cmd_lancer_course(ctx):
 # ── Admin — marché crypto ─────────────────────────────────────────────────
 
 @bot.command(name="freeze_crypto", aliases=["crypto_freeze", "market_freeze"])
-@commands.has_permissions(administrator=True)
 async def cmd_freeze_crypto(ctx):
     global crypto_market_frozen
     crypto_market_frozen = not crypto_market_frozen
@@ -6685,7 +6719,6 @@ async def cmd_freeze_crypto(ctx):
 # ── Admin — gestion des coins ─────────────────────────────────────────────
 
 @bot.command(name="addcoins", aliases=["addc", "add_coins"])
-@commands.has_permissions(administrator=True)
 async def cmd_addcoins(ctx, member: discord.Member, amount: int):
     coins[member.id] += amount
     save_data()
@@ -6697,7 +6730,6 @@ async def cmd_addcoins(ctx, member: discord.Member, amount: int):
         f"{member.mention} : **+{amount:,} coins** → solde {coins[member.id]:,}", author=ctx.author)
 
 @bot.command(name="removecoins", aliases=["rmc", "remove_coins", "delcoins"])
-@commands.has_permissions(administrator=True)
 async def cmd_removecoins(ctx, member: discord.Member, amount: int):
     if amount <= 0:
         return await ctx.send("❌ Montant invalide.")
@@ -7164,7 +7196,6 @@ class MatchView(discord.ui.View):
 # ── Commandes tournoi ─────────────────────────────────────────────────────
 
 @bot.command(name="tournois", aliases=["tournoi", "tournament"])
-@commands.has_permissions(administrator=True)
 async def cmd_tournoi(ctx, mode: str = None):
     gid = str(ctx.guild.id)
     if gid in tournaments:
@@ -7227,7 +7258,6 @@ async def cmd_tournoi(ctx, mode: str = None):
 
 
 @bot.command(name="prix_tournoi", aliases=["set_prize", "prize_tournoi"])
-@commands.has_permissions(administrator=True)
 async def cmd_prix_tournoi(ctx, montant: int):
     gid = str(ctx.guild.id)
     t   = tournaments.get(gid)
@@ -7247,7 +7277,6 @@ async def cmd_prix_tournoi(ctx, montant: int):
 @bot.command(name="ouverture_tournoi",
              aliases=["debut_tournoi", "bracket", "open_tournoi",
                       "lancer_tournoi", "start_tournoi"])
-@commands.has_permissions(administrator=True)
 async def cmd_ouverture_tournoi(ctx):
     gid = str(ctx.guild.id)
     t   = tournaments.get(gid)
@@ -7360,7 +7389,6 @@ async def cmd_tournoi_status(ctx):
 
 
 @bot.command(name="annuler_tournoi", aliases=["cancel_tournoi", "cancel_tournament"])
-@commands.has_permissions(administrator=True)
 async def cmd_annuler_tournoi(ctx):
     gid = str(ctx.guild.id)
     if gid not in tournaments:
@@ -7370,7 +7398,6 @@ async def cmd_annuler_tournoi(ctx):
     await ctx.send("✅ Le tournoi a été annulé.")
 
 @bot.command(name="tournoi_retirer", aliases=["t_retirer", "tournoi_kick"])
-@commands.has_permissions(administrator=True)
 async def cmd_tournoi_retirer(ctx, membre: discord.Member):
     gid = str(ctx.guild.id)
     t = tournaments.get(gid)
@@ -7398,7 +7425,6 @@ async def cmd_tournoi_retirer(ctx, membre: discord.Member):
 
 
 @bot.command(name="tournoi_ajouter", aliases=["t_ajouter", "tournoi_add"])
-@commands.has_permissions(administrator=True)
 async def cmd_tournoi_ajouter(ctx, membre: discord.Member, *, team_name: str = None):
     gid = str(ctx.guild.id)
     t = tournaments.get(gid)
@@ -7435,7 +7461,6 @@ async def cmd_tournoi_ajouter(ctx, membre: discord.Member, *, team_name: str = N
 
 
 @bot.command(name="punition", aliases=["pun", "punir"])
-@commands.has_permissions(administrator=True)
 async def cmd_punition(ctx, nombre: int, membre: discord.Member):
     if nombre <= 0:
         return await ctx.send("❌ Le nombre doit être supérieur à 0.")
@@ -7480,7 +7505,6 @@ async def cmd_punition(ctx, nombre: int, membre: discord.Member):
 
 
 @bot.command(name="annuler_punition", aliases=["apun", "unpunish"])
-@commands.has_permissions(administrator=True)
 async def cmd_annuler_punition(ctx, membre: discord.Member):
     uid = str(membre.id)
     if uid not in punitions:
@@ -7663,7 +7687,6 @@ def _morse_to_image(morse_text, word):
 morse_punitions = {}
 
 @bot.command(name="morse")
-@commands.has_permissions(administrator=True)
 async def cmd_morse(ctx, membre: discord.Member):
     guild = ctx.guild
     
@@ -7734,7 +7757,6 @@ async def _liberer_membre_morse(guild, membre):
 
 
 @bot.command(name="annuler_morse", aliases=["amorse", "unmorse"])
-@commands.has_permissions(administrator=True)
 async def cmd_annuler_morse(ctx, membre: discord.Member):
     if str(membre.id) not in morse_punitions:
         return await ctx.send(f"❌ {membre.mention} n'est pas en punition morse.")
@@ -8062,7 +8084,6 @@ async def cmd_classement_tournoi(ctx):
 
 # ── Config salon logs admin ───────────────────────────────────────────────
 @bot.command(name="set_admin_log", aliases=["admin_log"])
-@commands.has_permissions(administrator=True)
 async def cmd_set_admin_log(ctx, channel: discord.TextChannel = None):
     global ADMIN_LOG_CHANNEL_ID
     if channel is None:
