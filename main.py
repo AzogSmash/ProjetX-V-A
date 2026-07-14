@@ -33,6 +33,7 @@ intents.reactions = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 _slash_synced = False
+slash_global_purged = False  # persisté : la purge des commandes globales ne doit se faire qu'une fois
 
 # --- Variables globales pour la persistance des données ---
 # Les données seront chargées depuis data.json
@@ -533,7 +534,7 @@ def load_data():
     global bs_accounts, bs_role_config, bs_family_clubs, bs_family_ranked_cache, bs_family_ranked_updated_at
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
-    global ranked_1v1_history, ranked_season_month
+    global ranked_1v1_history, ranked_season_month, slash_global_purged
     load_path = _resolve_data_path()
     if os.path.exists(load_path):
         with open(load_path, 'r', encoding='utf-8-sig') as f:
@@ -647,6 +648,7 @@ def load_data():
                 ranked_report_cooldowns = data.get('ranked_report_cooldowns', {})
                 ranked_1v1_history  = data.get('ranked_1v1_history', {})
                 ranked_season_month = data.get('ranked_season_month')
+                slash_global_purged = data.get('slash_global_purged', False)
                 loaded_cfg = data.get('casino_config', {})
                 if isinstance(loaded_cfg, dict):
                     casino_config['shop_prices']   = loaded_cfg.get('shop_prices', {}) or {}
@@ -790,6 +792,7 @@ def save_data():
     data_to_save['ranked_report_cooldowns'] = ranked_report_cooldowns
     data_to_save['ranked_1v1_history']  = ranked_1v1_history
     data_to_save['ranked_season_month'] = ranked_season_month
+    data_to_save['slash_global_purged'] = slash_global_purged
 
     try:
         # Écriture atomique : on écrit dans un fichier temporaire puis on remplace l'ancien
@@ -957,7 +960,7 @@ async def on_ready():
     if not check_ranked_season.is_running():
         check_ranked_season.start()
 
-    global _slash_synced
+    global _slash_synced, slash_global_purged
     if not _slash_synced:
         try:
             # copy_global_to lit la liste globale EN MÉMOIRE : il faut donc synchroniser
@@ -968,10 +971,16 @@ async def on_ready():
                 bot.tree.copy_global_to(guild=guild)
                 synced = await bot.tree.sync(guild=guild)
                 logging.warning("Slash commands synchronisées sur %s : %d", guild.name, len(synced))
-            # Purge ensuite les commandes globales distantes (un ancien déploiement les avait
-            # enregistrées en plus des commandes par serveur, ce qui créait des doublons).
-            bot.tree.clear_commands(guild=None)
-            await bot.tree.sync()
+            # Purge les commandes globales distantes une seule fois pour de bon (persisté) :
+            # un ancien déploiement les avait enregistrées en plus des commandes par serveur,
+            # ce qui créait des doublons. On ne refait PAS ça à chaque démarrage, sinon la
+            # liste globale en mémoire resterait vide pour le reste du process et casserait
+            # la synchro d'un nouveau serveur (on_guild_join) ou de !bs_famille ajouter.
+            if not slash_global_purged:
+                bot.tree.clear_commands(guild=None)
+                await bot.tree.sync()
+                slash_global_purged = True
+                save_data()
             _slash_synced = True
         except Exception as e:
             logging.warning("Erreur de synchronisation des slash commands : %s", e)
