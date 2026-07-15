@@ -10654,6 +10654,73 @@ async def cmd_ranked_set(ctx, joueur: discord.Member, points: int, victoires: in
     )
 
 
+@bot.command(name="commandes_admin", aliases=["modcommandes", "aide_admin", "admincommands"])
+async def cmd_commandes_admin(ctx):
+    """Liste toutes les commandes de modération/admin — volontairement en préfixe only (pas de /),
+    donc pas d'autocomplete Discord pour les retrouver : ce menu sert d'index."""
+    if not (ctx.guild and ctx.author.guild_permissions.administrator) and not is_bot_owner(ctx.author):
+        return await ctx.send("❌ Réservé aux administrateurs.")
+
+    embed = discord.Embed(
+        title="🛡️ Commandes de modération & admin",
+        description="Toutes en préfixe `!` uniquement (pas de `/`) — pas d'abus, pas de clutter dans l'autocomplete.",
+        color=0xe74c3c
+    )
+    embed.add_field(
+        name="⚖️ Modération",
+        value=(
+            "`!warn @m <raison>` · `!mute @m [durée] <raison>` · `!unmute @m`\n"
+            "`!clear <nb>` · `!silence @m` · `!unsilence @m` · `!sanctions [@m]`\n"
+            "`!ban @m <raison>` · `!unban <id>`\n"
+            "`!lock [#salon]` · `!unlock [#salon]`\n"
+            "`!rename @m <pseudo>`"
+        ), inline=False
+    )
+    embed.add_field(
+        name="🔒 Punitions",
+        value=(
+            "`!punition <nb> @m` (`!pun`) — Punition morse\n"
+            "`!annuler_punition @m` (`!apun`)\n"
+            "`!morse @m` — Punition morse avancée\n"
+            "`!annuler_morse @m` (`!amorse`)"
+        ), inline=False
+    )
+    embed.add_field(
+        name="⚙️ Administration serveur",
+        value=(
+            "`!gestion` (`!gest`) — Activer/désactiver des commandes\n"
+            "`!permission` (`!perm`) — Restreindre des commandes par rôle\n"
+            "`!cd_set` — Modifier les cooldowns\n"
+            "`!prix_casino` — Prix shop/usine + mises\n"
+            "`!set_admin_log #salon` — Salon de logs admin\n"
+            "`!addcoins @m <n>` / `!removecoins @m <n>`\n"
+            "`!giveaway` / `!cancelgiveaway`\n"
+            "`!ouvrir_course` / `!lancer_course`\n"
+            "`!ouverture_tournoi` / `!annuler_tournoi`\n"
+            "`!tournoi_ajouter @m [équipe]` / `!tournoi_retirer @m`\n"
+            "`!prix_tournoi <montant>` / `!win <n°>`\n"
+            "`!freeze_crypto` — Geler le marché crypto\n"
+            "`!bs_famille ajouter/retirer <tag>` · `!bs_roles trophees/ranked <min> @role`"
+        ), inline=False
+    )
+    embed.add_field(
+        name="🥊 Ranked 1v1 (admin)",
+        value=(
+            "`!ranked_sanction @m` — Valider un signalement (baisse réputation, ban auto si trop bas)\n"
+            "`!ranked_ajuster @m <+/-N>` — Ajuster les points\n"
+            "`!ranked_set @m <points> <V> <D>` — Fixer précisément points/V/D"
+        ), inline=False
+    )
+    if is_bot_owner(ctx.author):
+        embed.add_field(
+            name="👑 Créateur du bot",
+            value="`!say <message>` · `!dm @m <msg>` · `!dmall <msg>` · `!construction` · `!nuke`",
+            inline=False
+        )
+    embed.set_footer(text="!perm permet de déléguer certaines de ces commandes à un rôle non-admin.")
+    await ctx.send(embed=embed)
+
+
 token = os.getenv("TOKEN")
 if token is not None:
     bot.run(token)
