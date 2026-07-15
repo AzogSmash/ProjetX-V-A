@@ -430,7 +430,7 @@ MAX_FACTORY_WORKERS = 10
 DEFAULT_FACTORY_COSTS = [500, 1000, 2000, 5000, 7500, 10000, 15000, 25000, 55000, 100000]
 FACTORY_HIRE_COOLDOWN_HOURS = 24
 RISQUE_COOLDOWN_HOURS = 3
-GAMES_WITH_LIMITS = ['slots', 'coinflip', 'roulette', 'bj', 'duel', 'mines', 'poker', 'course']
+GAMES_WITH_LIMITS = ['slots', 'coinflip', 'roulette', 'bj', 'duel', 'mines', 'poker', 'course', 'higherlower']
 
 # Cooldowns par commande (en heures) — modifiable via !cooldown
 DEFAULT_COOLDOWNS_H = {
@@ -1060,6 +1060,7 @@ COMMAND_USAGE = {
     'cf':            '`!coinflip <mise|all> <pile|face>`\nEx : `!cf 500 pile`',
     'duel':          '`!duel @membre <mise|all>`\nEx : `!duel @Joueur 500`',
     'mines':         '`!mines <mise|all>`\nEx : `!mines 300` · `!mines all`',
+    'higherlower':   '`!higherlower <mise>` (`!hl`) — Plus haut/bas/égal, multiplicateur croissant',
     'poker':         '`!poker start <ante>` — Créer une table\n*(Tout le reste se joue avec les boutons : Rejoindre / Démarrer / Fold / Call / Check / Raise / All-in / Voir mes cartes)*',
     'bslink':        '`!bslink <tag>`\nEx : `!bslink #2ABC123`',
     'lierbs':        '`!bslink <tag>` (alias `!lierbs`)\nEx : `!lierbs #2ABC123`',
@@ -1181,7 +1182,8 @@ def _build_help_categories(ctx):
                  "`!poker start <ante>` (`!pk`) — Poker (boutons)\n"
                  "`!course` (`!race`) — Course de voitures\n"
                  "`!parier <pilote> <mise>` (`!bet`) — Parier sur une course\n"
-                 "`!gratter` (`!scratch`) — Gratter un ticket (5 cases 🍀)"))
+                 "`!gratter` (`!scratch`) — Gratter un ticket (5 cases 🍀)\n"
+                 "`!higherlower <mise>` (`!hl`) — Plus haut/bas/égal, multiplicateur croissant\n"))
     cats.append(("crypto", "📈 Crypto-monnaies",
                  "Marché simulé · 5 cryptos · Prix actualisés toutes les 90s",
                  "`!crypto` (`!cr`) — Prix actuels + portefeuille\n"
@@ -4417,6 +4419,170 @@ async def cmd_mines(ctx, mise: str):
     embed.add_field(name="💰 Mise", value=f"{mise:,} coins", inline=True)
     embed.add_field(name="Multiplicateur", value="×1.0", inline=True)
     await ctx.send(embed=embed, view=view)
+
+# ── Higher or Lower ───────────────────────────────────────────────────────
+
+HL_MULT_CAP = 15.0  # plafond par manche, anti-abus
+
+def _hl_odds(remaining, current_val):
+    """Retourne {'higher': (count, mult|None), 'lower': (...), 'equal': (...)} pour le deck restant."""
+    total = len(remaining)
+    if total == 0:
+        return None
+    higher = [c for c in remaining if RANK_VAL[c['r']] > current_val]
+    lower  = [c for c in remaining if RANK_VAL[c['r']] < current_val]
+    equal  = [c for c in remaining if RANK_VAL[c['r']] == current_val]
+
+    def _m(count, edge):
+        if count == 0:
+            return None
+        return round(min((total / count) * edge, HL_MULT_CAP), 2)
+
+    return {
+        'higher': (len(higher), _m(len(higher), 0.95)),
+        'lower':  (len(lower),  _m(len(lower), 0.95)),
+        'equal':  (len(equal),  _m(len(equal), 0.85)),
+    }
+
+
+def _hl_embed(view, result_text=None, color=0x3498db, title="🎴 Higher or Lower"):
+    embed = discord.Embed(title=title, color=color)
+    embed.add_field(name="🃏 Carte actuelle", value=_card(view.current), inline=True)
+    embed.add_field(name="💰 Mise", value=f"{view.bet:,} coins", inline=True)
+    embed.add_field(name="✖️ Multiplicateur", value=f"×{view.cumulative:.2f}", inline=True)
+    if view.history:
+        embed.add_field(name="📜 Historique", value=' '.join(_card(c) for c in view.history[-8:]), inline=False)
+    odds = _hl_odds(view.deck, RANK_VAL[view.current['r']])
+    if odds and result_text is None:
+        lines = []
+        if odds['higher'][1]: lines.append(f"⬆️ Plus haut : ×{odds['higher'][1]:.2f} ({odds['higher'][0]} cartes)")
+        if odds['lower'][1]:  lines.append(f"⬇️ Plus bas : ×{odds['lower'][1]:.2f} ({odds['lower'][0]} cartes)")
+        if odds['equal'][1]:  lines.append(f"⚖️ Égal : ×{odds['equal'][1]:.2f} ({odds['equal'][0]} cartes)")
+        embed.add_field(name="🎲 Cotes actuelles", value='\n'.join(lines) or "—", inline=False)
+        if view.rounds_won > 0:
+            payout = int(view.bet * view.cumulative)
+            embed.add_field(name="💵 Encaissable maintenant", value=f"{payout:,} coins", inline=False)
+    if result_text:
+        embed.add_field(name="Résultat", value=result_text, inline=False)
+    return embed
+
+
+class HigherLowerView(discord.ui.View):
+    def __init__(self, author_id: int, bet: int):
+        super().__init__(timeout=120)
+        self.author_id  = author_id
+        self.bet        = bet
+        self.deck       = _new_deck()
+        self.current    = self.deck.pop()
+        self.history    = []
+        self.cumulative = 1.0
+        self.rounds_won = 0
+        self.game_over  = False
+        self._build_buttons()
+
+    def _replenish_if_needed(self):
+        if len(self.deck) < 4:
+            fresh = _new_deck()
+            self.deck = [c for c in fresh if not (c['r'] == self.current['r'] and c['s'] == self.current['s'])]
+
+    def _build_buttons(self):
+        self.clear_items()
+        odds = _hl_odds(self.deck, RANK_VAL[self.current['r']])
+        for direction, label, emoji in [('higher', 'Plus haut', '⬆️'), ('lower', 'Plus bas', '⬇️'), ('equal', 'Égal', '⚖️')]:
+            count, mult = odds[direction]
+            btn = discord.ui.Button(
+                label=f"{label} (×{mult:.2f})" if mult else f"{label} (impossible)",
+                style=discord.ButtonStyle.primary if direction == 'higher'
+                      else discord.ButtonStyle.danger if direction == 'lower'
+                      else discord.ButtonStyle.secondary,
+                emoji=emoji, disabled=(mult is None)
+            )
+            btn.callback = self._make_guess_cb(direction)
+            self.add_item(btn)
+        cash_btn = discord.ui.Button(
+            label="💰 Encaisser", style=discord.ButtonStyle.success,
+            disabled=(self.rounds_won == 0), row=1
+        )
+        cash_btn.callback = self._cashout
+        self.add_item(cash_btn)
+
+    def _make_guess_cb(self, direction):
+        async def cb(interaction: discord.Interaction):
+            if interaction.user.id != self.author_id:
+                return await interaction.response.send_message("❌ Ce n'est pas votre partie !", ephemeral=True)
+            if self.game_over:
+                return await interaction.response.send_message("❌ Partie terminée.", ephemeral=True)
+            odds = _hl_odds(self.deck, RANK_VAL[self.current['r']])
+            count, mult = odds[direction]
+            if mult is None:
+                return await interaction.response.send_message("❌ Ce pari n'est plus possible.", ephemeral=True)
+
+            drawn = self.deck.pop()
+            cur_val, new_val = RANK_VAL[self.current['r']], RANK_VAL[drawn['r']]
+            if direction == 'higher': win = new_val > cur_val
+            elif direction == 'lower': win = new_val < cur_val
+            else: win = new_val == cur_val
+
+            self.history.append(self.current)
+            self.current = drawn
+
+            if win:
+                self.cumulative *= mult
+                self.rounds_won += 1
+                self._replenish_if_needed()
+                self._build_buttons()
+                await interaction.response.edit_message(
+                    embed=_hl_embed(self, result_text=f"✅ **Correct !** Multiplicateur : ×{self.cumulative:.2f}", color=0x2ecc71),
+                    view=self
+                )
+            else:
+                self.game_over = True
+                for item in self.children:
+                    item.disabled = True
+                await interaction.response.edit_message(
+                    embed=_hl_embed(self, result_text=f"💥 **Perdu !** Mise perdue : -{self.bet:,} coins", color=0xe74c3c),
+                    view=self
+                )
+        return cb
+
+    async def _cashout(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Ce n'est pas votre partie !", ephemeral=True)
+        if self.game_over:
+            return await interaction.response.send_message("❌ Partie déjà terminée.", ephemeral=True)
+        if self.rounds_won == 0:
+            return await interaction.response.send_message("❌ Gagnez au moins une manche avant d'encaisser !", ephemeral=True)
+        self.game_over = True
+        payout = int(self.bet * self.cumulative)
+        coins[self.author_id] += payout
+        save_data()
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            embed=_hl_embed(self, result_text=f"💰 **Encaissé !** +{payout - self.bet:,} coins (×{self.cumulative:.2f})", color=0xf1c40f),
+            view=self
+        )
+
+    async def on_timeout(self):
+        if not self.game_over and self.rounds_won > 0:
+            self.game_over = True
+            payout = int(self.bet * self.cumulative)
+            coins[self.author_id] += payout
+            save_data()
+
+
+@bot.hybrid_command(name="higherlower", aliases=["hl"])
+async def cmd_higherlower(ctx, mise: str):
+    mise, err = _resolve_mise(mise, ctx.author.id, 'higherlower')
+    if err: return await ctx.send(err)
+    coins[ctx.author.id] -= mise
+    save_data()
+    view = HigherLowerView(ctx.author.id, mise)
+    embed = discord.Embed(title="🎴 Higher or Lower", color=0x3498db, description=(
+        "Devinez si la prochaine carte sera **plus haute**, **plus basse**, ou **égale** !\n"
+        "Le multiplicateur augmente à chaque bonne réponse — encaissez à tout moment."
+    ))
+    await ctx.send(embed=_hl_embed(view), view=view)
 
 
 # ── Crypto ───────────────────────────────────────────────────────────────
