@@ -995,7 +995,7 @@ ALWAYS_ALLOWED_CMDS = {'gestion', 'permission', 'cooldown', 'cd', 'aide'}
 ADMIN_LOCKED_CMDS = {
     'giveaway', 'cancelgiveaway', 'gdt', 'prix_casino', 'ouvrir_course', 'lancer_course',
     'freeze_crypto', 'addcoins', 'removecoins', 'tournois', 'prix_tournoi',
-    'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter',
+    'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter', 'tournoi_deplacer',
     'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log',
     'ranked_sanction', 'ranked_ajuster', 'ranked_set',
 }
@@ -7787,6 +7787,43 @@ async def cmd_annuler_tournoi(ctx):
     del tournaments[gid]
     save_data()
     await ctx.send("✅ Le tournoi a été annulé.")
+
+@bot.command(name="tournoi_deplacer", aliases=["tournoi_move", "deplacer_tournoi"])
+async def cmd_tournoi_deplacer(ctx, channel: discord.TextChannel):
+    gid = str(ctx.guild.id)
+    t = tournaments.get(gid)
+    if not t:
+        return await ctx.send("❌ Aucun tournoi en cours.")
+    if t['status'] != 'registering':
+        return await ctx.send("❌ Impossible de déplacer un tournoi déjà lancé.")
+
+    ts = _team_size(t)
+    embed = _build_tournament_embed(t, gid)
+    embed.add_field(
+        name="⚙️ Configuration (Admin)",
+        value=(
+            "`!prix_tournoi <montant>` — Définir le prix\n"
+            "`!ouverture_tournoi` — Lancer et générer le tableau\n"
+            "`!tournoi_ajouter @m [équipe]` · `!tournoi_retirer @m` — Gérer les inscrits"
+        ),
+        inline=False
+    )
+    new_board = await channel.send(embed=embed, view=TournamentJoinView(gid, ts))
+
+    old_channel = ctx.guild.get_channel(t.get('channel_id'))
+    old_board_id = t.get('board_message_id')
+    if old_channel and old_board_id:
+        try:
+            old_msg = await old_channel.fetch_message(old_board_id)
+            await old_msg.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    t['channel_id'] = channel.id
+    t['board_message_id'] = new_board.id
+    save_data()
+    await ctx.send(f"✅ Tournoi déplacé vers {channel.mention} — toutes les équipes déjà inscrites sont conservées.")
+
 
 @bot.command(name="tournoi_retirer", aliases=["t_retirer", "tournoi_kick"])
 async def cmd_tournoi_retirer(ctx, membre: discord.Member):
