@@ -997,7 +997,7 @@ ADMIN_LOCKED_CMDS = {
     'freeze_crypto', 'addcoins', 'removecoins', 'tournois', 'prix_tournoi',
     'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter',
     'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log',
-    'ranked_sanction', 'ranked_ajuster',
+    'ranked_sanction', 'ranked_ajuster', 'ranked_set',
 }
 
 
@@ -10471,6 +10471,20 @@ async def cmd_ranked_ajuster(ctx, joueur: discord.Member, delta: int):
     await ctx.send(
         f"✅ Points de {joueur.mention} ajustés de {delta:+d} → "
         f"**{prof['points']} pts** ({_r1v1_tier_name(prof['points'])})."
+    )
+
+
+@bot.command(name="ranked_set")
+async def cmd_ranked_set(ctx, joueur: discord.Member, points: int, victoires: int, defaites: int):
+    """Fixe directement points/V/D d'un joueur (reconstruction manuelle après incident)."""
+    prof = _r1v1_profile(str(joueur.id))
+    prof['points'] = max(0, points)
+    prof['wins'] = max(0, victoires)
+    prof['losses'] = max(0, defaites)
+    save_data()
+    await ctx.send(
+        f"✅ {joueur.mention} fixé à **{prof['points']} pts** ({_r1v1_tier_name(prof['points'])}) "
+        f"— {prof['wins']}V/{prof['losses']}D."
     )
 
 
