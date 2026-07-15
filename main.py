@@ -425,7 +425,7 @@ def _r1v1_leaderboard_entries(guild, month=None):
 
 
 # ── Configuration prix / mises (modifiable par !prix_casino) ─────────────
-BOT_OWNER_ID = 1056848438270115900   # happy_gt3 — créateur du bot
+BOT_OWNER_IDS = {1056848438270115900, 550678866839207937}   # happy_gt3 & Clément — créateurs du bot
 MAX_FACTORY_WORKERS = 10
 DEFAULT_FACTORY_COSTS = [500, 1000, 2000, 5000, 7500, 10000, 15000, 25000, 55000, 100000]
 FACTORY_HIRE_COOLDOWN_HOURS = 24
@@ -455,8 +455,8 @@ casino_config = {
 
 
 def is_bot_owner(user) -> bool:
-    """Vérifie si l'utilisateur est le créateur du bot (happy_gt3)."""
-    return getattr(user, 'id', None) == BOT_OWNER_ID
+    """Vérifie si l'utilisateur est un créateur du bot (happy_gt3 ou Clément)."""
+    return getattr(user, 'id', None) in BOT_OWNER_IDS
 
 
 def cooldown_h(cmd: str) -> float:
@@ -10654,7 +10654,8 @@ async def cmd_ranked_set(ctx, joueur: discord.Member, points: int, victoires: in
     )
 
 
-@bot.command(name="commandes_admin", aliases=["modcommandes", "aide_admin", "admincommands"])
+@bot.hybrid_command(name="commandes_admin", aliases=["modcommandes", "aide_admin", "admincommands"])
+@discord.app_commands.default_permissions(administrator=True)
 async def cmd_commandes_admin(ctx):
     """Liste toutes les commandes de modération/admin — volontairement en préfixe only (pas de /),
     donc pas d'autocomplete Discord pour les retrouver : ce menu sert d'index."""
