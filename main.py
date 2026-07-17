@@ -166,7 +166,6 @@ CRYPTO_NEWS_DOWN = [
 SHOP_ITEMS = {
     1: {'name': '🍀 Porte-bonheur',       'price': 500,  'desc': 'Daily = 650 coins', 'unique': True},
     2: {'name': '⚒️ Équipement Pro',      'price': 1000, 'desc': 'Travail : 50–400 coins', 'unique': True},
-    3: {'name': '🛡️ Bouclier Anti-Vol',  'price': 800,  'desc': 'Bloque le prochain vol de coffre subi (max 1)', 'unique': True},
     4: {'name': '🎟️ Ticket à gratter',   'price': 200,  'desc': '1 ticket à gratter', 'unique': False},
     5: {'name': '💼 Pack ×5 Tickets',    'price': 5000,  'desc': '5 tickets à gratter', 'unique': False},
     6: {'name': '🏭 Amélioration Usine', 'price': 3000,    'desc': '+15% production usine (unique)', 'unique': True},
@@ -174,8 +173,20 @@ SHOP_ITEMS = {
     8: {'name': '🏪 Ouvrir Épicerie',    'price': 80_000,  'desc': 'Débloque l\'épicerie · Requiert : Usine 10/10 + améliorée', 'unique': True, 'biz': 'epicerie'},
     9: {'name': '🍔 Ouvrir Fast Food',   'price': 300_000, 'desc': 'Débloque le fast food · Requiert : Épicerie 8/8 + améliorée', 'unique': True, 'biz': 'fastfood'},
    10: {'name': '🍽️ Ouvrir Restaurant', 'price': 800_000, 'desc': 'Débloque le restaurant · Requiert : Fast Food 10/10 + amélioré', 'unique': True, 'biz': 'restaurant'},
-   11: {'name': '💊 Antivirus',         'price': 2_000,   'desc': 'Bloque automatiquement le prochain !hacker subi (consommable)', 'unique': True},
 }
+# Boucliers (remplace les anciens items 3 "Bouclier Anti-Vol" et 11 "Antivirus") :
+# protection active à durée fixe contre !voler/!rob/!hacker, achetée via !bouclier <durée>.
+# Ne se brise jamais suite à une attaque subie ; se brise uniquement si le porteur attaque
+# lui-même (!voler/!rob/!hacker), avec un cooldown de rachat qui scale avec la durée cassée.
+SHIELD_TIERS = {
+    '12h': {'hours': 12,  'price': 800,  'cooldown_min': 15},
+    '24h': {'hours': 24,  'price': 1500, 'cooldown_min': 30},
+    '72h': {'hours': 72,  'price': 3000, 'cooldown_min': 60},
+    '7j':  {'hours': 168, 'price': 5000, 'cooldown_min': 120},
+}
+SHIELD_STREAK_WINDOW_H = 2    # fenêtre pour considérer deux casses comme "rapprochées"
+SHIELD_STREAK_MULT     = 1.5  # multiplicateur du cooldown de rachat par casse rapprochée
+STEAL_GRACE_MIN        = 30   # protection minimale après avoir subi une attaque (remplace les 3h/6h)
 
 BIZ_DEFS = {
     'epicerie': {
@@ -249,7 +260,10 @@ miner_cooldowns  = {}   # str(uid) -> ISO
 hacker_cooldowns = {}   # str(uid) -> ISO
 risque_cooldowns = {}   # str(uid) -> ISO  (cooldown 3h)
 rob_cooldowns    = {}   # str(uid) -> ISO  (cooldown 12h)
-steal_immunity   = {}   # str(uid) -> ISO expiration (3h bouclier/antivirus, 6h vol/hack réussi)
+steal_immunity   = {}   # str(uid) -> ISO expiration (grâce de 30min après avoir subi une attaque)
+shield_active       = {}   # str(uid) -> {'tier','hours','until'} — bouclier payant en cours
+shield_cooldown     = {}   # str(uid) -> {'until','min_hours'} — verrou de rachat après une casse volontaire
+shield_break_streak = {}   # str(uid) -> {'count','last_break'} — escalade anti-spam d'attaques
 race_bets        = {}   # str(uid) -> {'driver': int, 'amount': int}
 race_drivers_live = [dict(d) for d in RACE_DRIVERS_BASE]
 race_accepting    = False
@@ -528,6 +542,7 @@ def load_data():
     global warns, mutes, silenced_users, coins, giveaway_data, daily_cooldowns, work_cooldowns
     global crypto_prices, price_history, crypto_trends, crypto_holdings, safes, factories, jobs_data, owned_items
     global theft_cooldowns, miner_cooldowns, hacker_cooldowns, risque_cooldowns, rob_cooldowns, steal_immunity
+    global shield_active, shield_cooldown, shield_break_streak
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
@@ -601,6 +616,9 @@ def load_data():
                 risque_cooldowns = data.get('risque_cooldowns', {})
                 rob_cooldowns    = data.get('rob_cooldowns', {})
                 steal_immunity   = data.get('steal_immunity', {})
+                shield_active       = data.get('shield_active', {})
+                shield_cooldown     = data.get('shield_cooldown', {})
+                shield_break_streak = data.get('shield_break_streak', {})
                 race_bets        = data.get('race_bets', {})
                 race_drivers_live = data.get('race_drivers_live', [dict(d) for d in RACE_DRIVERS_BASE])
                 race_accepting   = data.get('race_accepting', False)
@@ -659,19 +677,6 @@ def load_data():
                     casino_config['biz_overrides'] = loaded_cfg.get('biz_overrides', {}) or {}
 
                 logging.warning("Données chargées avec succès depuis %s", DATA_FILE)
-
-                # Migration : cap boucliers (item '3') à 1 pour tous sauf 730152107511906436
-                _BOUCLIER_EXEMPT = '730152107511906436'
-                _migrated = False
-                for _uid, _items in owned_items.items():
-                    if _uid == _BOUCLIER_EXEMPT:
-                        continue
-                    if isinstance(_items.get('3'), int) and _items['3'] > 1:
-                        logging.warning("Migration bouclier : %s avait %d → 1", _uid, _items['3'])
-                        _items['3'] = 1
-                        _migrated = True
-                if _migrated:
-                    save_data()
 
                 # Migration : reset tickets (items 4 et 5) + remboursement au prix d'achat
                 _ticket_migrated = False
@@ -754,6 +759,9 @@ def save_data():
     data_to_save['risque_cooldowns'] = risque_cooldowns
     data_to_save['rob_cooldowns']    = rob_cooldowns
     data_to_save['steal_immunity']   = steal_immunity
+    data_to_save['shield_active']       = shield_active
+    data_to_save['shield_cooldown']     = shield_cooldown
+    data_to_save['shield_break_streak'] = shield_break_streak
     data_to_save['race_bets']        = race_bets
     data_to_save['race_drivers_live'] = race_drivers_live
     data_to_save['race_accepting']   = race_accepting
@@ -1227,12 +1235,12 @@ def _build_help_categories(ctx):
                  "\n**Items disponibles :**\n"
                  "1. 🍀 Porte-bonheur — Daily = 650 coins\n"
                  "2. ⚒️ Équipement Pro — Travail : 50–400 coins\n"
-                 "3. 🛡️ Bouclier Anti-Vol — Bloque le prochain `!voler` subi\n"
                  "4/5. 🎟️ Ticket à gratter\n"
                  "6. 🏭 Amélioration Usine — +15% production\n"
                  "7. 📈 Cours de Trading — +15% gains ventes crypto\n"
                  "8/9/10. Commerces (Épicerie / Fast Food / Restaurant)\n"
-                 "11. 💊 Antivirus — Bloque automatiquement le prochain `!hacker` subi (consommable)"))
+                 "\n**Protection :** `!bouclier` — Protection totale contre `!voler`/`!rob`/`!hacker` "
+                 "pendant une durée choisie (12h/24h/72h/7j) ; se brise si tu attaques toi-même."))
     cats.append(("team", "👥 Clubs / Teams",
                  "Créer ou rejoindre un club de joueurs",
                  "`!team` (`!club`, `!guilde`) — Interface du club\n"
@@ -4043,6 +4051,94 @@ def _secs_to_hm(secs: float) -> str:
     m = rem // 60
     return f"{h}h {m}min"
 
+
+# ── Boucliers (protection active payante) ─────────────────────────────────
+
+def _shield_is_active(uid_str: str) -> bool:
+    s = shield_active.get(uid_str)
+    if not s:
+        return False
+    try:
+        until = datetime.fromisoformat(s['until'])
+    except (KeyError, ValueError, TypeError):
+        shield_active.pop(uid_str, None)
+        return False
+    if until <= datetime.now():
+        shield_active.pop(uid_str, None)  # expiré naturellement, aucune pénalité
+        return False
+    return True
+
+
+def _shield_remaining_str(uid_str: str):
+    s = shield_active.get(uid_str)
+    if not s:
+        return None
+    try:
+        rem = (datetime.fromisoformat(s['until']) - datetime.now()).total_seconds()
+    except (KeyError, ValueError, TypeError):
+        return None
+    return _secs_to_hm(rem) or None
+
+
+def _shield_break(uid_str: str):
+    """Casse volontairement le bouclier actif d'un joueur qui vient d'attaquer :
+    pose le cooldown de rachat (avec escalade si plusieurs casses rapprochées)."""
+    s = shield_active.pop(uid_str, None)
+    if not s:
+        return
+    tier_hours = s['hours']
+    base_min = next((t['cooldown_min'] for t in SHIELD_TIERS.values() if t['hours'] == tier_hours), 15)
+
+    now = datetime.now()
+    streak = shield_break_streak.get(uid_str)
+    if streak and (now - datetime.fromisoformat(streak['last_break'])).total_seconds() <= SHIELD_STREAK_WINDOW_H * 3600:
+        streak['count'] += 1
+    else:
+        streak = {'count': 1}
+    streak['last_break'] = now.isoformat()
+    shield_break_streak[uid_str] = streak
+
+    cooldown_minutes = base_min * (SHIELD_STREAK_MULT ** (streak['count'] - 1))
+    shield_cooldown[uid_str] = {
+        'until': (now + timedelta(minutes=cooldown_minutes)).isoformat(),
+        'min_hours': tier_hours,
+    }
+
+
+def _shield_can_buy(uid_str: str, tier_hours: int):
+    """(ok, wait_str|None). Bloque le rachat d'un palier plus court que celui qui vient de
+    péter, tant que le cooldown de ce palier n'est pas écoulé — un palier égal ou plus long
+    reste achetable immédiatement (le joueur prend alors un engagement au moins équivalent)."""
+    cd = shield_cooldown.get(uid_str)
+    if not cd:
+        return True, None
+    try:
+        until = datetime.fromisoformat(cd['until'])
+    except (KeyError, ValueError, TypeError):
+        return True, None
+    if until <= datetime.now() or tier_hours >= cd.get('min_hours', 0):
+        return True, None
+    return False, _secs_to_hm((until - datetime.now()).total_seconds())
+
+
+def _attack_guard(cible_id: int):
+    """Retourne un message d'erreur si la cible ne peut pas être attaquée, sinon None."""
+    uid_t = str(cible_id)
+    if _shield_is_active(uid_t):
+        return f"🛡️ Cible protégée par un bouclier actif (encore **{_shield_remaining_str(uid_t)}**) — impossible de l'attaquer."
+    imm_ok, imm_wait = _imm_ok(cible_id)
+    if not imm_ok:
+        return f"🛡️ Cible encore protégée {imm_wait} après une attaque récente."
+    return None
+
+
+def _attack_resolve(attacker_id: int, cible_id: int):
+    """À appeler une fois qu'une attaque (vol/rob/hack) a réellement eu lieu, succès ou échec :
+    accorde une grâce courte à la victime, et casse le bouclier de l'attaquant s'il en a un."""
+    _set_imm(cible_id, STEAL_GRACE_MIN / 60)
+    if _shield_is_active(str(attacker_id)):
+        _shield_break(str(attacker_id))
+
 def _factory_rate(workers: int, upgraded: bool) -> float:
     """Taux horaire total : 50+100+...+(workers×50) = 50×n×(n+1)/2"""
     base = 50 * workers * (workers + 1) / 2
@@ -5044,31 +5140,9 @@ async def cmd_hacker(ctx, cible: discord.Member):
         return await ctx.send(f"⏳ {ctx.author.mention}, système refroidi dans {wait}.")
     uid_t  = str(cible.id)
 
-    # Immunité après hack subi
-    imm_ok, imm_wait = _imm_ok(cible.id)
-    if not imm_ok:
-        return await ctx.send(f"🛡️ {cible.mention} est immunisé contre le hack pendant encore {imm_wait}.")
-
-    # Antivirus : bloque le hack, se consomme, pose l'immunité 6h
-    antivirus = owned_items.get(uid_t, {}).get('11', 0)
-    if antivirus > 0:
-        owned_items[uid_t]['11'] = antivirus - 1
-        if owned_items[uid_t]['11'] == 0:
-            del owned_items[uid_t]['11']
-        _set_imm(uid_t, 3)
-        hacker_cooldowns[ctx.author.id] = datetime.now().isoformat()
-        _theft_record(cible.id, False)
-        save_data()
-        await ctx.send(embed=discord.Embed(
-            title="💊 Hack bloqué !",
-            description=f"🛡️ {cible.mention} possède un **Antivirus** — l'attaque a été neutralisée et l'antivirus consommé.\n🛡️ Immunité de **3h** accordée.",
-            color=0xe74c3c
-        ))
-        try:
-            await cible.send(f"💊 **Antivirus activé !** {ctx.author.mention} a tenté de vous hacker — votre antivirus l'a bloqué et a été consommé. Vous êtes immunisé 3h.")
-        except discord.HTTPException:
-            pass
-        return
+    guard_err = _attack_guard(cible.id)
+    if guard_err:
+        return await ctx.send(guard_err)
 
     owned  = {s: q for s, q in crypto_holdings.get(uid_t, {}).items() if q > 0.000001}
     if not owned:
@@ -5083,15 +5157,16 @@ async def cmd_hacker(ctx, cible: discord.Member):
         crypto_holdings.setdefault(uid_a, {})
         crypto_holdings[uid_a][symbol]    = round(crypto_holdings[uid_a].get(symbol, 0) + stolen_qty, 8)
         val = int(stolen_qty * crypto_prices.get(symbol, 0))
-        _set_imm(uid_t, 6)
         _theft_record(cible.id, True)
+        _attack_resolve(ctx.author.id, cible.id)
         save_data()
         embed = discord.Embed(title="💻 Hack réussi !", color=0x2ecc71,
-            description=f"🔓 Volé **{stolen_qty:.6f} {symbol}** à {cible.mention}\nValeur ≈ **{val:,} coins**\n🛡️ {cible.mention} est immunisé **6h**.")
+            description=f"🔓 Volé **{stolen_qty:.6f} {symbol}** à {cible.mention}\nValeur ≈ **{val:,} coins**")
     else:
         fine = min(random.randint(200, 600), coins[ctx.author.id])
         coins[ctx.author.id] -= fine
         _theft_record(cible.id, False)
+        _attack_resolve(ctx.author.id, cible.id)
         save_data()
         embed = discord.Embed(title="💻 Hack échoué !", color=0xe74c3c,
             description=f"🚨 Vous vous êtes fait repérer ! Amende : **-{fine:,} coins**")
@@ -5556,17 +5631,9 @@ async def cmd_voler(ctx, cible: discord.Member):
     safe_cible = safes.get(str(cible.id), 0)
     if safe_cible < 300:
         return await ctx.send(f"❌ Le coffre de {cible.mention} est trop pauvre (min 300 coins dans le coffre).")
-    # Vérifier immunité
-    imm_ok, imm_wait = _imm_ok(cible.id)
-    if not imm_ok:
-        return await ctx.send(f"🛡️ {cible.mention} est protégé pendant encore {imm_wait} (immunité après vol subi).")
-    # Vérifier bouclier → bloque + immunité 3h
-    if _has_item(cible.id, 3):
-        _use_item(cible.id, 3)
-        _set_imm(cible.id, 3)
-        _theft_record(cible.id, False)
-        save_data()
-        return await ctx.send(f"🛡️ {cible.mention} possède un **Bouclier Anti-Vol** ! Le vol a été bloqué. (bouclier consommé · immunité 3h)")
+    guard_err = _attack_guard(cible.id)
+    if guard_err:
+        return await ctx.send(guard_err)
     base_rate = 0.55
     if _get_job(ctx.author.id) == 'escroc': base_rate += 0.20
     if random.random() < base_rate:
@@ -5576,8 +5643,8 @@ async def cmd_voler(ctx, cible: discord.Member):
         if _get_job(cible.id) == 'gardien': stolen //= 2
         safes[str(cible.id)] = safe_cible - stolen
         coins[ctx.author.id] += stolen
-        _set_imm(cible.id, 6)
         _theft_record(cible.id, True)
+        _attack_resolve(ctx.author.id, cible.id)
         save_data()
         embed = discord.Embed(title="🦹 Vol de coffre réussi !", color=0x2ecc71,
             description=(
@@ -5588,6 +5655,7 @@ async def cmd_voler(ctx, cible: discord.Member):
         fine = min(random.randint(100, 350), coins[ctx.author.id])
         coins[ctx.author.id] -= fine
         _theft_record(cible.id, False)
+        _attack_resolve(ctx.author.id, cible.id)
         save_data()
         embed = discord.Embed(title="🚨 Vol raté !", color=0xe74c3c,
             description=f"Vous vous êtes fait attraper en train de crocheter le coffre ! Amende : **-{fine:,} coins**\n💰 Solde : **{coins[ctx.author.id]:,} coins**")
@@ -5606,6 +5674,9 @@ async def cmd_rob(ctx, cible: discord.Member):
     cash_cible = coins[cible.id]
     if cash_cible < 200:
         return await ctx.send(f"❌ {cible.mention} n'a pas assez de cash à voler (min 200 coins en poche).")
+    guard_err = _attack_guard(cible.id)
+    if guard_err:
+        return await ctx.send(guard_err)
     if random.random() < 0.55:
         pct    = random.uniform(0.05, 0.15)
         stolen = int(cash_cible * pct)
@@ -5615,6 +5686,7 @@ async def cmd_rob(ctx, cible: discord.Member):
         coins[ctx.author.id] += stolen
         coins[cible.id]      -= stolen
         _theft_record(cible.id, True)
+        _attack_resolve(ctx.author.id, cible.id)
         save_data()
         escroc_bonus = " *(+20% escroc)*" if _get_job(ctx.author.id) == 'escroc' else ""
         embed = discord.Embed(title="🦹 Rob réussi !", color=0x2ecc71,
@@ -5628,6 +5700,7 @@ async def cmd_rob(ctx, cible: discord.Member):
         loss = min(loss, coins[ctx.author.id])
         coins[ctx.author.id] -= loss
         _theft_record(cible.id, False)
+        _attack_resolve(ctx.author.id, cible.id)
         save_data()
         embed = discord.Embed(title="🚨 Rob raté !", color=0xe74c3c,
             description=(
@@ -5636,6 +5709,68 @@ async def cmd_rob(ctx, cible: discord.Member):
                 f"⏳ Prochain rob dans **{cd_hours:g}h**."
             ))
     await ctx.send(embed=embed)
+
+
+_SHIELD_ALIASES = {
+    '12h': '12h',
+    '24h': '24h',
+    '72h': '72h', '3j': '72h', '3jours': '72h',
+    '7j': '7j', '7jours': '7j', '7d': '7j', '168h': '7j',
+}
+
+
+@bot.hybrid_command(name="bouclier", aliases=["shield"])
+async def cmd_bouclier(ctx, duree: str = None):
+    uid = str(ctx.author.id)
+
+    if not duree:
+        lines = [f"`!bouclier {k}` — **{v['price']:,} coins** *(cooldown de rachat si cassé : {v['cooldown_min']} min)*"
+                  for k, v in SHIELD_TIERS.items()]
+        desc = "\n".join(lines)
+        active = _shield_remaining_str(uid)
+        if active:
+            desc += f"\n\n🛡️ Bouclier actif : encore **{active}**."
+        return await ctx.send(embed=discord.Embed(
+            title="🛡️ Boucliers disponibles",
+            description=(
+                desc + "\n\nProtège totalement contre `!voler`, `!rob` et `!hacker` pendant sa durée.\n"
+                "⚠️ S'attaquer soi-même (`!voler`/`!rob`/`!hacker`) casse immédiatement son propre bouclier."
+            ),
+            color=0x3498db
+        ))
+
+    tier = _SHIELD_ALIASES.get(duree.lower().strip())
+    if not tier:
+        return await ctx.send("❌ Durée invalide. Options : `12h` `24h` `72h` `7j`.")
+
+    if _shield_is_active(uid):
+        return await ctx.send(f"❌ Tu as déjà un bouclier actif (encore **{_shield_remaining_str(uid)}**).")
+
+    info = SHIELD_TIERS[tier]
+    ok, wait = _shield_can_buy(uid, info['hours'])
+    if not ok:
+        return await ctx.send(
+            f"❌ Tu dois attendre encore **{wait}** avant de pouvoir racheter un bouclier de cette durée "
+            f"(tu viens de casser un bouclier plus long)."
+        )
+    if coins[ctx.author.id] < info['price']:
+        return await ctx.send(f"❌ Il te faut **{info['price']:,} coins** pour ce bouclier (tu as {coins[ctx.author.id]:,}).")
+
+    coins[ctx.author.id] -= info['price']
+    shield_active[uid] = {
+        'tier': tier, 'hours': info['hours'],
+        'until': (datetime.now() + timedelta(hours=info['hours'])).isoformat(),
+    }
+    save_data()
+    await ctx.send(embed=discord.Embed(
+        title="🛡️ Bouclier activé !",
+        description=(
+            f"Protégé pendant **{tier}** contre `!voler`, `!rob` et `!hacker`.\n"
+            f"💰 Solde : **{coins[ctx.author.id]:,} coins**\n\n"
+            f"⚠️ Si tu attaques quelqu'un pendant ce temps, ton bouclier se brise immédiatement."
+        ),
+        color=0x3498db
+    ))
 
 
 @bot.hybrid_command(name="top_voles", aliases=["classement_vol"])
@@ -6027,7 +6162,9 @@ def _build_cd_embed(uid_int, guild):
     lines.append(line("🦹", "!voler",   _cd_remaining_str(theft_cooldowns,  uid_int, cooldown_h('voler'))))
     lines.append(line("💸", "!rob",     _cd_remaining_str(rob_cooldowns,    uid_int, cooldown_h('rob'))))
     imm = _imm_remaining_str(uid_int)
-    lines.append(f"🛡️ Immunité vol — {'⏳ **' + imm + '** restantes' if imm else '❌ Inactive'}")
+    lines.append(f"🛡️ Grâce anti-vol — {'⏳ **' + imm + '** restantes' if imm else '❌ Inactive'}")
+    shield_rem = _shield_remaining_str(uid)
+    lines.append(f"🛡️ Bouclier — {'✅ **' + shield_rem + '** restant' if shield_rem else '❌ Aucun'}")
 
     lines.append("**── Jobs ──**")
     lines.append(line("⛏️", "!miner",  _cd_remaining_str(miner_cooldowns,  uid_int, cooldown_h('miner'))))
@@ -6142,12 +6279,11 @@ async def cmd_cibles(ctx):
         if total <= 0:
             continue
         imm_str     = _imm_remaining_str(uid_int)
-        nb_bouclier = owned_items.get(uid_str, {}).get('3', 0)
-        nb_antivirus= owned_items.get(uid_str, {}).get('11', 0)
+        shielded    = _shield_is_active(uid_str)
         job         = _get_job(uid_int)
         member      = ctx.guild.get_member(uid_int)
         name        = member.display_name if member else f"#{uid_int}"
-        rows.append((total, cash, coffre, crypto_val, hot_crypto, name, imm_str, nb_bouclier, nb_antivirus, job))
+        rows.append((total, cash, coffre, crypto_val, hot_crypto, name, imm_str, shielded, job))
     def _k(v):
         if v >= 1_000_000: return f"{v/1_000_000:.1f}M"
         if v >= 1_000:     return f"{v//1_000}k"
@@ -6155,13 +6291,13 @@ async def cmd_cibles(ctx):
 
     rows.sort(key=lambda x: -x[0])
     lines = []
-    for i, (total, cash, coffre, crypto_val, hot_crypto, name, imm, bouclier, antivirus, job) in enumerate(rows[:30], 1):
+    for i, (total, cash, coffre, crypto_val, hot_crypto, name, imm, shielded, job) in enumerate(rows[:30], 1):
         # Cash
         rob_str = f"💵{_k(cash)}" if cash >= 200 else f"~~💵~~"
 
         # Coffre
         if coffre > 0:
-            if bouclier > 0:   coffre_status = "🛡️"
+            if shielded:       coffre_status = "🛡️"
             elif imm:
                 h = imm.split('h')[0] if 'h' in imm else '?'
                 coffre_status = f"⏳{h}h"
@@ -6173,7 +6309,7 @@ async def cmd_cibles(ctx):
         # Crypto hackable
         if hot_crypto:
             syms_str = "·".join(hot_crypto.keys())
-            av_icon  = "💊" if antivirus > 0 else "🎯"
+            av_icon  = "🛡️" if shielded else "🎯"
             crypto_str = f"{av_icon}{_k(crypto_val)}·{syms_str}"
         else:
             crypto_str = ""
@@ -6184,7 +6320,7 @@ async def cmd_cibles(ctx):
 
     desc = "\n".join(lines) if lines else "Aucun joueur avec des fonds."
     embed = discord.Embed(title="🎯 Cibles", description=desc, color=0xe74c3c)
-    embed.set_footer(text="💵rob 🔒coffre 🎯=hackable 💊=antivirus ✅libre ⏳imm 🛡️bouclier")
+    embed.set_footer(text="💵rob 🔒coffre 🎯=hackable ✅libre ⏳imm 🛡️bouclier")
     try:
         await ctx.author.send(embed=embed)
     except discord.Forbidden:
@@ -8227,7 +8363,10 @@ async def cmd_profil(ctx, member: discord.Member = None):
     factory = factories.get(uid, {})
     workers = factory.get('workers', 0) if factory else 0
     imm_ok, imm_wait = _imm_ok(member.id)
-    imm_str = None if imm_ok else f"🛡️ Immunité vol active encore {imm_wait}"
+    imm_str = None if imm_ok else f"🛡️ Grâce anti-vol active encore {imm_wait}"
+    shield_rem = _shield_remaining_str(uid)
+    if shield_rem:
+        imm_str = (imm_str + "\n" if imm_str else "") + f"🛡️ Bouclier actif — **{shield_rem}** restant"
 
     embed = discord.Embed(
         title=f"👤 Profil de {member.display_name}",
