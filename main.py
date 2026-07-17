@@ -1005,7 +1005,7 @@ ADMIN_LOCKED_CMDS = {
     'freeze_crypto', 'addcoins', 'removecoins', 'tournois', 'prix_tournoi',
     'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter', 'tournoi_deplacer',
     'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log',
-    'ranked_sanction', 'ranked_ajuster', 'ranked_set',
+    'ranked_sanction', 'ranked_ajuster', 'ranked_set', 'reset_casino', 'reset_duels',
 }
 
 
@@ -10827,6 +10827,82 @@ async def cmd_ranked_set(ctx, joueur: discord.Member, points: int, victoires: in
     await ctx.send(
         f"✅ {joueur.mention} fixé à **{prof['points']} pts** ({_r1v1_tier_name(prof['points'])}) "
         f"— {prof['wins']}V/{prof['losses']}D."
+    )
+
+
+async def _confirm_action(ctx, warning: str) -> bool:
+    """Demande de taper CONFIRMER dans les 10s. Retourne True si confirmé, False sinon
+    (et envoie déjà le message d'annulation le cas échéant)."""
+    confirm_msg = await ctx.send(f"{warning}\nConfirmez en tapant `CONFIRMER` dans les 10 secondes.")
+
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel and m.content == "CONFIRMER"
+
+    try:
+        await bot.wait_for('message', check=check, timeout=10.0)
+    except asyncio.TimeoutError:
+        await ctx.send("❌ Annulé — vous n'avez pas confirmé à temps.")
+        return False
+    finally:
+        try:
+            await confirm_msg.delete()
+        except discord.HTTPException:
+            pass
+    return True
+
+
+@bot.command(name="reset_casino")
+async def cmd_reset_casino(ctx):
+    """Reset manuel de la saison casino : coins, coffres, usines, commerces et métiers repartent
+    à zéro. Les items achetés (boutique) et l'inventaire sont conservés."""
+    nb = len(set(coins.keys()) | {int(k) for k in safes.keys()} | {int(k) for k in factories.keys()}
+             | {int(k) for k in businesses.keys()} | {int(k) for k in jobs_data.keys()})
+    if not await _confirm_action(
+        ctx,
+        f"⚠️ **ATTENTION :** Ça va reset les coins, coffres, usines, commerces et métiers de **{nb} joueur(s)**. "
+        f"Irréversible (items/inventaire conservés)."
+    ):
+        return
+
+    coins.clear()
+    safes.clear()
+    factories.clear()
+    businesses.clear()
+    jobs_data.clear()
+    save_data()
+    await ctx.send(
+        f"✅ **Casino réinitialisé !** ({nb} joueur(s) concernés)\n"
+        f"Coins, coffres, usines, commerces et métiers repartent à zéro pour tout le monde.\n"
+        f"Les items achetés (boutique) et l'inventaire sont conservés."
+    )
+
+
+@bot.command(name="reset_duels")
+async def cmd_reset_duels(ctx):
+    """Reset manuel de la saison ranked 1v1 (même logique que le reset automatique mensuel,
+    déclenchée ici à la demande plutôt que d'attendre le changement de mois)."""
+    nb = sum(1 for p in ranked_1v1.values() if p.get('wins', 0) or p.get('losses', 0))
+    if not await _confirm_action(
+        ctx,
+        f"⚠️ **ATTENTION :** Ça va archiver et reset le classement 1v1 de **{nb} joueur(s)**. Irréversible."
+    ):
+        return
+
+    global ranked_season_month
+    ended_month = ranked_season_month or datetime.now().strftime('%Y-%m')
+    ranked_1v1_history[ended_month] = {
+        uid: {'points': p.get('points', 0), 'wins': p.get('wins', 0), 'losses': p.get('losses', 0)}
+        for uid, p in ranked_1v1.items() if p.get('wins', 0) or p.get('losses', 0)
+    }
+    for p in ranked_1v1.values():
+        p['points'] = 0
+        p['wins']   = 0
+        p['losses'] = 0
+    ranked_season_month = datetime.now().strftime('%Y-%m')
+    save_data()
+    await ctx.send(
+        f"✅ **Classement 1v1 réinitialisé !** L'ancienne saison ({_r1v1_month_label(ended_month)}) "
+        f"est archivée et consultable via `!classement_1v1`."
     )
 
 
