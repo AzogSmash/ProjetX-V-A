@@ -1244,7 +1244,16 @@ def _build_help_categories(ctx):
     cats.append(("team", "👥 Clubs / Teams",
                  "Créer ou rejoindre un club de joueurs",
                  "`!team` (`!club`, `!guilde`) — Interface du club\n"
-                 "`!gdt` — Compétitions inter-clubs"))
+                 "`!gdt` *(Admin)* — Compétitions inter-clubs"))
+    cats.append(("duel1v1", "⚔️ Ranked 1v1",
+                 "Défis 1v1 internes au serveur, classement par saison",
+                 "`!1v1` — Lance un défi ouvert (premier arrivé, premier servi)\n"
+                 "`!1v1 @membre` — Défie un membre précis\n"
+                 "`!1v1` (une fois le duel accepté) — Déclare le résultat (vote à 2)\n"
+                 "`!classement_1v1` (`!top_1v1`) — Classement, avec sélecteur de saisons passées\n"
+                 "`!signaler @membre <raison>` — Signaler un comportement pas fairplay au staff\n"
+                 "🛡️ `!bouclier <12h|24h|72h|7j>` — Protection totale contre vol/rob/hack "
+                 "(se brise si tu attaques toi-même)"))
     cats.append(("tournoi", "🏆 Tournois & Draft",
                  "Tournois, ELO et phase de ban Brawl Stars",
                  "`!tournois solo` · `2v2` · `3v3` · `4v4` · `5v5` *(Admin)*\n"
@@ -1292,17 +1301,28 @@ def _build_help_categories(ctx):
         cats.append(("admin", "⚙️ Administration",
                      "Outils admin du serveur",
                      "`!giveaway` `!cancelgiveaway`\n"
-                     "`!addcoins @membre <n>` (`!addc`) — Ajouter des coins\n"
-                     "`!removecoins @membre <n>` (`!rmc`) — Retirer des coins\n"
+                     "`!addcoins @membre <n> [cash|coffre]` (`!addc`) — Ajouter des coins (cash par défaut)\n"
+                     "`!removecoins @membre <n> [cash|coffre]` (`!rmc`) — Retirer des coins\n"
                      "`!prix_casino` (`!prixcasino`) — Prix shop/usine + mises min/max\n"
                      "`!gestion` (`!gest`, `!admin`) — Activer/désactiver des commandes\n"
+                     "`!permission` (`!perm`) — Restreindre/déléguer des commandes par rôle\n"
                      "`!cd_set` (`!cooldown_set`) — Modifier les cooldowns\n"
+                     "`!freeze_crypto` — Geler/dégeler le marché crypto\n"
                      "`!ouvrir_course` (`!oc`) / `!lancer_course` (`!lc`) — Courses\n"
                      "`!ouverture_tournoi` (`!bracket`) — Lancer le tournoi\n"
                      "`!annuler_tournoi` — Annuler le tournoi en cours\n"
+                     "`!prix_tournoi <montant>` — Définir la récompense du tournoi\n"
                      "`!tournoi_ajouter @m [équipe]` / `!tournoi_retirer @m` — Gérer les inscrits\n"
+                     "`!tournoi_deplacer #salon` — Déplacer le tableau du tournoi\n"
                      "`!set_admin_log #salon` (`!admin_log`) — Logs admin\n"
-                     "`!lock` / `!unlock` — Verrouiller un salon"))
+                     "`!lock` / `!unlock` — Verrouiller un salon\n"
+                     "`!commandes_admin` — Index complet des commandes admin/modération\n"
+                     "\n**Ranked 1v1 :**\n"
+                     "`!ranked_sanction @m` — Valider un signalement (réputation, ban auto si trop bas)\n"
+                     "`!ranked_ajuster @m <+/-N>` — Ajuster les points d'un joueur\n"
+                     "`!ranked_set @m <points> <V> <D>` — Fixer précisément points/V/D\n"
+                     "`!ranked_liberer @m` — Débloquer un défi/duel en attente coincé\n"
+                     "`!reset_casino` / `!reset_duels` — Reset manuel de saison (demande confirmation)"))
 
     if is_owner:
         cats.append(("owner", "👑 Créateur du Bot",
@@ -5208,11 +5228,12 @@ async def cmd_miner(ctx):
     embed.set_footer(text="Revenez dans 1 heure.")
     await ctx.send(embed=embed)
 
-@bot.command(name="coldwallet", aliases=["cwallet", "safe"])
-async def cmd_coldwallet(ctx, *args):
+@bot.hybrid_command(name="coldwallet", aliases=["cwallet", "safe"])
+async def cmd_coldwallet(ctx, arg1: str = None, arg2: str = None, arg3: str = None):
     uid = str(ctx.author.id)
     cw  = cold_wallets.setdefault(uid, {})
     now = datetime.now()
+    args = [a for a in (arg1, arg2, arg3) if a is not None]
 
     # !coldwallet → afficher le contenu
     if not args:
@@ -7452,7 +7473,18 @@ async def cmd_freeze_crypto(ctx):
 # ── Admin — gestion des coins ─────────────────────────────────────────────
 
 @bot.command(name="addcoins", aliases=["addc", "add_coins"])
-async def cmd_addcoins(ctx, member: discord.Member, amount: int):
+async def cmd_addcoins(ctx, member: discord.Member, amount: int, compte: str = "cash"):
+    if compte.lower().strip() in ("coffre", "banque", "safe", "coffre-fort"):
+        uid = str(member.id)
+        safes[uid] = safes.get(uid, 0) + amount
+        save_data()
+        verb = "ajouté au" if amount >= 0 else "retiré du"
+        embed = discord.Embed(title="⚙️ Modification du coffre", color=0x3498db,
+            description=f"**{abs(amount):,} coins** {verb} coffre de {member.mention}.\n🔒 Nouveau solde coffre : **{safes[uid]:,} coins**")
+        await ctx.send(embed=embed)
+        await _admin_log(ctx.guild, "addcoins (coffre)",
+            f"{member.mention} : **{amount:+,} coins** (coffre) → solde {safes[uid]:,}", author=ctx.author)
+        return
     coins[member.id] += amount
     save_data()
     verb = "ajouté à" if amount >= 0 else "retiré de"
@@ -7463,9 +7495,21 @@ async def cmd_addcoins(ctx, member: discord.Member, amount: int):
         f"{member.mention} : **+{amount:,} coins** → solde {coins[member.id]:,}", author=ctx.author)
 
 @bot.command(name="removecoins", aliases=["rmc", "remove_coins", "delcoins"])
-async def cmd_removecoins(ctx, member: discord.Member, amount: int):
+async def cmd_removecoins(ctx, member: discord.Member, amount: int, compte: str = "cash"):
     if amount <= 0:
         return await ctx.send("❌ Montant invalide.")
+    if compte.lower().strip() in ("coffre", "banque", "safe", "coffre-fort"):
+        uid = str(member.id)
+        current = safes.get(uid, 0)
+        taken = min(amount, current)
+        safes[uid] = current - taken
+        save_data()
+        embed = discord.Embed(title="⚙️ Modification du coffre", color=0xe74c3c,
+            description=f"**{taken:,} coins** retirés du coffre de {member.mention}.\n🔒 Nouveau solde coffre : **{safes[uid]:,} coins**")
+        await ctx.send(embed=embed)
+        await _admin_log(ctx.guild, "removecoins (coffre)",
+            f"{member.mention} : **-{taken:,} coins** (coffre) → solde {safes[uid]:,}", author=ctx.author)
+        return
     taken = min(amount, coins[member.id])
     coins[member.id] -= taken
     save_data()
@@ -8290,8 +8334,9 @@ async def cmd_annuler_punition(ctx, membre: discord.Member):
     await ctx.send(f"✅ La punition de {membre.mention} a été annulée.")
 
 
-@bot.command(name="snipe")
-async def cmd_snipe(ctx, *args):
+@bot.hybrid_command(name="snipe")
+async def cmd_snipe(ctx, arg1: str = None, arg2: str = None):
+    args = [a for a in (arg1, arg2) if a is not None]
     nb     = 1
     target = None
     for arg in args:
@@ -11180,11 +11225,12 @@ async def cmd_commandes_admin(ctx):
             "`!cd_set` — Modifier les cooldowns\n"
             "`!prix_casino` — Prix shop/usine + mises\n"
             "`!set_admin_log #salon` — Salon de logs admin\n"
-            "`!addcoins @m <n>` / `!removecoins @m <n>`\n"
+            "`!addcoins @m <n> [cash|coffre]` / `!removecoins @m <n> [cash|coffre]`\n"
             "`!giveaway` / `!cancelgiveaway`\n"
             "`!ouvrir_course` / `!lancer_course`\n"
             "`!ouverture_tournoi` / `!annuler_tournoi`\n"
             "`!tournoi_ajouter @m [équipe]` / `!tournoi_retirer @m`\n"
+            "`!tournoi_deplacer #salon` — Déplacer le tableau du tournoi\n"
             "`!prix_tournoi <montant>` / `!win <n°>`\n"
             "`!freeze_crypto` — Geler le marché crypto\n"
             "`!bs_famille ajouter/retirer <tag>` · `!bs_roles trophees/ranked <min> @role`"
@@ -11195,7 +11241,10 @@ async def cmd_commandes_admin(ctx):
         value=(
             "`!ranked_sanction @m` — Valider un signalement (baisse réputation, ban auto si trop bas)\n"
             "`!ranked_ajuster @m <+/-N>` — Ajuster les points\n"
-            "`!ranked_set @m <points> <V> <D>` — Fixer précisément points/V/D"
+            "`!ranked_set @m <points> <V> <D>` — Fixer précisément points/V/D\n"
+            "`!ranked_liberer @m` — Débloquer un défi/duel coincé (ex: après un redémarrage)\n"
+            "`!reset_casino` — Reset saison casino (coins/coffres/usines/commerces/métiers)\n"
+            "`!reset_duels` — Reset saison ranked 1v1 (archive + remet à zéro)"
         ), inline=False
     )
     if is_bot_owner(ctx.author):
