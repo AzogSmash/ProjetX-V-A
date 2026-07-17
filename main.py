@@ -1005,7 +1005,7 @@ ADMIN_LOCKED_CMDS = {
     'freeze_crypto', 'addcoins', 'removecoins', 'tournois', 'prix_tournoi',
     'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter', 'tournoi_deplacer',
     'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log',
-    'ranked_sanction', 'ranked_ajuster', 'ranked_set', 'reset_casino', 'reset_duels',
+    'ranked_sanction', 'ranked_ajuster', 'ranked_set', 'reset_casino', 'reset_duels', 'ranked_liberer',
 }
 
 
@@ -10904,8 +10904,16 @@ async def cmd_1v1(ctx, membre: discord.Member = None):
 
     await _r1v1_purge_stale_challenges(ctx.guild)
 
-    if any(ch.get('challenger') == author_id for ch in ranked_challenges.values()):
-        return await ctx.send("❌ Tu as déjà un défi en attente. Attends qu'il soit accepté ou retire-le.")
+    existing_id = next((cid for cid, ch in ranked_challenges.items() if ch.get('challenger') == author_id), None)
+    if existing_id:
+        # Réaffiche un bouton fonctionnel — si le bot a redémarré depuis la création du défi,
+        # l'ancien message a des boutons morts (les vues ne survivent pas à un redémarrage).
+        ch = ranked_challenges[existing_id]
+        view = RankedChallengeView(existing_id, author_id, ch.get('target'), ctx.guild.id if ctx.guild else None)
+        return await ctx.send(
+            "❌ Tu as déjà un défi en attente. Utilise les boutons ci-dessous pour l'accepter/annuler :",
+            view=view
+        )
 
     banned, wait = _r1v1_banned(str(author_id))
     if banned:
@@ -11110,6 +11118,26 @@ async def cmd_reset_duels(ctx):
         f"✅ **Classement 1v1 réinitialisé !** L'ancienne saison ({_r1v1_month_label(ended_month)}) "
         f"est archivée et consultable via `!classement_1v1`."
     )
+
+
+@bot.command(name="ranked_liberer", aliases=["ranked_unstuck", "duel_liberer"])
+async def cmd_ranked_liberer(ctx, joueur: discord.Member):
+    """Efface tout défi/duel en attente bloqué pour un joueur (ex: vue morte après un redémarrage du bot)."""
+    uid = joueur.id
+    removed = []
+    for cid in list(ranked_challenges.keys()):
+        if ranked_challenges[cid].get('challenger') == uid:
+            ranked_challenges.pop(cid, None)
+            removed.append('défi en attente')
+    for key in list(ranked_pending.keys()):
+        v = ranked_pending[key]
+        if uid in (v['p1'], v['p2']):
+            ranked_pending.pop(key, None)
+            removed.append('duel en attente de résultat')
+    if not removed:
+        return await ctx.send(f"ℹ️ {joueur.mention} n'a rien de bloqué en 1v1.")
+    save_data()
+    await ctx.send(f"✅ {joueur.mention} débloqué ({', '.join(removed)} effacé). Il peut relancer `!1v1`.")
 
 
 @bot.hybrid_command(name="commandes_admin", aliases=["modcommandes", "aide_admin", "admincommands"])
