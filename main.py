@@ -188,6 +188,17 @@ SHIELD_STREAK_WINDOW_H = 2    # fenêtre pour considérer deux casses comme "rap
 SHIELD_STREAK_MULT     = 1.5  # multiplicateur du cooldown de rachat par casse rapprochée
 STEAL_GRACE_MIN        = 30   # protection minimale après avoir subi une attaque (remplace les 3h/6h)
 
+# Les boucliers sont aussi achetables via !shop / !acheter (items 12-15) — même état
+# partagé (shield_active) que !bouclier, prix toujours pris depuis SHIELD_TIERS.
+SHOP_ITEMS.update({
+    12 + i: {
+        'name': f'🛡️ Bouclier {tier}', 'price': info['price'],
+        'desc': f"Protection totale {tier} contre vol/rob/hack — voir `!bouclier`",
+        'unique': False, 'shield_tier': tier,
+    }
+    for i, (tier, info) in enumerate(SHIELD_TIERS.items())
+})
+
 BIZ_DEFS = {
     'epicerie': {
         'name': 'Épicerie', 'emoji': '🏪', 'color': 0x27ae60,
@@ -1239,8 +1250,9 @@ def _build_help_categories(ctx):
                  "6. 🏭 Amélioration Usine — +15% production\n"
                  "7. 📈 Cours de Trading — +15% gains ventes crypto\n"
                  "8/9/10. Commerces (Épicerie / Fast Food / Restaurant)\n"
-                 "\n**Protection :** `!bouclier` — Protection totale contre `!voler`/`!rob`/`!hacker` "
-                 "pendant une durée choisie (12h/24h/72h/7j) ; se brise si tu attaques toi-même."))
+                 "12-15. 🛡️ Boucliers (12h/24h/72h/7j) — ou directement via `!bouclier <durée>`\n"
+                 "\n**Protection :** boucliers — protection totale contre `!voler`/`!rob`/`!hacker` "
+                 "pendant la durée choisie ; se brise si tu attaques toi-même."))
     cats.append(("team", "👥 Clubs / Teams",
                  "Créer ou rejoindre un club de joueurs",
                  "`!team` (`!club`, `!guilde`) — Interface du club\n"
@@ -6815,6 +6827,10 @@ def _shop_embed(author_id):
                 else:
                     tag   = f" 🔒 *(Requis : {reason})*"
                     value = info['desc']
+        elif info.get('shield_tier'):
+            active = _shield_remaining_str(uid)
+            tag   = f" 🛡️ *(actif — {active} restant)*" if active else ""
+            value = info['desc']
         else:
             cnt = items.get(str(iid), 0)
             tag = (" ✅ *(possédé)*" if info['unique'] and cnt > 0
@@ -6837,6 +6853,28 @@ def _do_purchase(author_id, item_id):
     info = SHOP_ITEMS[item_id]
     price = _shop_price(item_id)
     uid = str(author_id)
+    # Bouclier (état à durée dans shield_active, pas un item stockable dans owned_items)
+    if info.get('shield_tier'):
+        tier = info['shield_tier']
+        tier_info = SHIELD_TIERS[tier]
+        if _shield_is_active(uid):
+            return False, f"❌ Tu as déjà un bouclier actif (encore **{_shield_remaining_str(uid)}**)."
+        ok, wait = _shield_can_buy(uid, tier_info['hours'])
+        if not ok:
+            return False, f"❌ Tu dois attendre encore **{wait}** avant de racheter un bouclier de cette durée (tu viens de casser un bouclier plus long)."
+        if coins[author_id] < price:
+            return False, f"❌ Pas assez de coins. Prix : **{price:,}** | Solde : **{coins[author_id]:,}**"
+        coins[author_id] -= price
+        shield_active[uid] = {
+            'tier': tier, 'hours': tier_info['hours'],
+            'until': (datetime.now() + timedelta(hours=tier_info['hours'])).isoformat(),
+        }
+        save_data()
+        return True, (
+            f"🛡️ Bouclier **{tier}** activé ! Protégé contre `!voler`/`!rob`/`!hacker`.\n"
+            f"💰 Solde : **{coins[author_id]:,} coins**\n"
+            f"⚠️ S'attaquer soi-même casse le bouclier immédiatement."
+        )
     # Vérification unique pour les commerces (tracked via businesses, pas inventory)
     if info.get('biz'):
         bk = info['biz']
