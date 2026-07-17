@@ -2662,45 +2662,100 @@ def _bj_total(hand):
     return t
 
 class BlackjackGame:
+    """Supporte plusieurs mains simultanées (split) et l'assurance.
+    Chaque main est un dict {'cards','bet','done','busted','result'}."""
     def __init__(self, bet):
-        self.deck   = _new_deck()
-        self.bet    = bet
-        self.player = [self.deck.pop(), self.deck.pop()]
-        self.dealer = [self.deck.pop(), self.deck.pop()]
+        self.deck    = _new_deck()
+        self.bet     = bet  # mise initiale (référence pour l'assurance et l'affichage)
+        self.hands   = [{'cards': [self.deck.pop(), self.deck.pop()], 'bet': bet,
+                         'done': False, 'busted': False, 'result': None}]
+        self.dealer  = [self.deck.pop(), self.deck.pop()]
+        self.active_idx    = 0
+        self.insurance_bet = 0
 
-    def pt(self): return _bj_total(self.player)
-    def dt(self): return _bj_total(self.dealer)
+    def dt(self):
+        return _bj_total(self.dealer)
 
-    def hit(self):   self.player.append(self.deck.pop())
-    def stand(self):
+    def dealer_shows_ace(self) -> bool:
+        return self.dealer[0]['r'] == 'A'
+
+    def dealer_blackjack(self) -> bool:
+        return len(self.dealer) == 2 and self.dt() == 21
+
+    def player_natural(self) -> bool:
+        h = self.hands[0]
+        return len(self.hands) == 1 and len(h['cards']) == 2 and _bj_total(h['cards']) == 21
+
+    def current_hand(self):
+        return self.hands[self.active_idx] if self.active_idx < len(self.hands) else None
+
+    def hit_current(self):
+        h = self.current_hand()
+        h['cards'].append(self.deck.pop())
+        total = _bj_total(h['cards'])
+        if total >= 21:
+            h['done'] = True
+            h['busted'] = total > 21
+
+    def stand_current(self):
+        self.current_hand()['done'] = True
+
+    def can_split(self) -> bool:
+        if len(self.hands) != 1:  # un seul split autorisé (pas de re-split)
+            return False
+        h = self.current_hand()
+        return len(h['cards']) == 2 and _bj_val(h['cards'][0]) == _bj_val(h['cards'][1])
+
+    def split_current(self):
+        h = self.hands[self.active_idx]
+        c1, c2 = h['cards']
+        new_hand = {'cards': [c2, self.deck.pop()], 'bet': h['bet'], 'done': False, 'busted': False, 'result': None}
+        h['cards'] = [c1, self.deck.pop()]
+        total = _bj_total(h['cards'])
+        if total >= 21:
+            h['done'] = True
+            h['busted'] = total > 21
+        self.hands.insert(self.active_idx + 1, new_hand)
+
+    def advance(self) -> bool:
+        """Passe à la main suivante non terminée. False si toutes les mains sont jouées."""
+        while self.active_idx < len(self.hands) and self.hands[self.active_idx]['done']:
+            self.active_idx += 1
+        return self.active_idx < len(self.hands)
+
+    def play_dealer(self):
         while self.dt() < 17:
             self.dealer.append(self.deck.pop())
 
-    def natural(self): return self.pt() == 21 and len(self.player) == 2
-
-    def result(self):
-        pt, dt = self.pt(), self.dt()
-        if pt > 21:            return 'bust'
-        if dt > 21 or pt > dt: return 'win'
-        if pt == dt:           return 'push'
+    def resolve_hand(self, h) -> str:
+        if h['busted']:
+            return 'bust'
+        total, dt = _bj_total(h['cards']), self.dt()
+        if dt > 21 or total > dt: return 'win'
+        if total == dt:           return 'push'
         return 'lose'
 
-def _bj_embed(game, reveal=False, title="🃏 Blackjack"):
+
+def _bj_embed(game, reveal=False, title="🃏 Blackjack", note=None):
     if reveal:
         dealer_info = f"{_hand(game.dealer)} ({game.dt()})"
     else:
         dealer_info = f"{_card(game.dealer[0])} 🂠"
     embed = discord.Embed(title=title, color=0x27ae60)
     embed.add_field(name="🎩 Croupier", value=dealer_info, inline=False)
-    embed.add_field(name=f"🃏 Votre main ({game.pt()})", value=_hand(game.player), inline=False)
-    embed.add_field(name="💰 Mise", value=f"{game.bet:,} coins", inline=True)
+    multi = len(game.hands) > 1
+    for i, h in enumerate(game.hands):
+        marker = " 👉" if (not reveal and i == game.active_idx) else ""
+        label = f"🃏 Main {i + 1} ({_bj_total(h['cards'])}){marker}" if multi else f"🃏 Votre main ({_bj_total(h['cards'])}){marker}"
+        embed.add_field(name=label, value=_hand(h['cards']), inline=False)
+    total_bet = sum(h['bet'] for h in game.hands) + game.insurance_bet
+    embed.add_field(name="💰 Mise totale", value=f"{total_bet:,} coins", inline=True)
+    if note:
+        embed.add_field(name="Résultat", value=note, inline=False)
     if not reveal:
         embed.set_footer(text="Utilisez les boutons ci-dessous pour jouer.")
     return embed
 
-def _resolve_bj(uid, game, r):
-    if r == 'win':  coins[uid] += game.bet * 2
-    elif r == 'push': coins[uid] += game.bet
 
 _BJ_RESULT = {
     'win':  (0x2ecc71, "🎉 **Gagné !**"),
@@ -2708,6 +2763,26 @@ _BJ_RESULT = {
     'lose': (0xe74c3c, "😢 **Perdu !**"),
     'bust': (0xe74c3c, "💥 **Bust !**"),
 }
+
+
+def _bj_build_deal_result(uid, key, game):
+    """Après la donne (et l'assurance éventuelle, si le croupier n'a pas blackjack) :
+    renvoie (embed, view). view est None si la partie est déjà terminée (blackjack naturel)."""
+    if game.player_natural():
+        winnings = int(game.bet * 2.5)
+        coins[uid] += winnings
+        active_bj.pop(key, None)
+        save_data()
+        embed = _bj_embed(game, reveal=True, title="🃏 Blackjack — BLACKJACK NATUREL !")
+        embed.color = 0xf1c40f
+        embed.add_field(name="🎉 Blackjack naturel !", value=f"+{winnings - game.bet:,} coins (×2.5)", inline=False)
+        embed.add_field(name="💳 Solde", value=f"{coins[uid]:,} coins", inline=True)
+        return embed, None
+
+    view = BlackjackView(uid, key, game)
+    if coins[uid] < game.bet:
+        view.double_btn.disabled = True
+    return _bj_embed(game), view
 
 
 # ---- Évaluateur de main poker ----
@@ -3179,6 +3254,13 @@ class BlackjackView(discord.ui.View):
         self.author_id = author_id
         self.key = key
         self.game = game
+        self._sync_buttons()
+
+    def _sync_buttons(self):
+        game = self.game
+        h = game.current_hand()
+        self.double_btn.disabled = len(h['cards']) != 2 or coins[self.author_id] < h['bet']
+        self.split_btn.disabled = not game.can_split() or coins[self.author_id] < h['bet']
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -3191,83 +3273,209 @@ class BlackjackView(discord.ui.View):
         for item in self.children:
             item.disabled = True
 
-    async def _finish(self, interaction, title, color, result_text):
+    async def _advance_or_finish(self, interaction: discord.Interaction):
+        game = self.game
+        if game.advance():
+            self._sync_buttons()
+            await interaction.response.edit_message(embed=_bj_embed(game), view=self)
+            return
+        await self._finish_all(interaction)
+
+    async def _finish_all(self, interaction: discord.Interaction):
+        game = self.game
+        uid = self.author_id
         self._disable_all()
-        embed = _bj_embed(self.game, reveal=True, title=title)
+        if any(not h['busted'] for h in game.hands):
+            game.play_dealer()
+        lines, total_payout, total_bet = [], 0, 0
+        multi = len(game.hands) > 1
+        for i, h in enumerate(game.hands):
+            r = game.resolve_hand(h)
+            total_bet += h['bet']
+            payout = h['bet'] * 2 if r == 'win' else h['bet'] if r == 'push' else 0
+            total_payout += payout
+            col, txt = _BJ_RESULT[r]
+            sign = '+' if r in ('win', 'push') else '-'
+            label = f"**Main {i + 1}**" if multi else "**Résultat**"
+            lines.append(f"{label} : {txt} ({sign}{h['bet']:,} coins)")
+        coins[uid] += total_payout
+        active_bj.pop(self.key, None)
+        save_data()
+        color = 0x2ecc71 if total_payout > total_bet else (0x95a5a6 if total_payout == total_bet else 0xe74c3c)
+        embed = _bj_embed(game, reveal=True, title="🃏 Blackjack — Résultat")
         embed.color = color
-        embed.add_field(name="Résultat", value=result_text, inline=False)
-        embed.add_field(name="💳 Solde", value=f"{coins[self.author_id]:,} coins", inline=True)
+        embed.add_field(name="Détail", value="\n".join(lines), inline=False)
+        embed.add_field(name="💳 Solde", value=f"{coins[uid]:,} coins", inline=True)
         await interaction.response.edit_message(embed=embed, view=self)
         self.stop()
 
     @discord.ui.button(label="Tirer", style=discord.ButtonStyle.primary, emoji="🃏")
     async def hit_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         game = self.game
-        uid = self.author_id
-        game.hit()
-        if game.pt() > 21:
-            active_bj.pop(self.key, None); save_data()
-            await self._finish(interaction, "🃏 Blackjack — Bust !", 0xe74c3c,
-                               f"💥 **Bust !** (-{game.bet:,} coins)")
-        elif game.pt() == 21:
-            game.stand(); r = game.result()
-            active_bj.pop(self.key, None); _resolve_bj(uid, game, r); save_data()
-            col, txt = _BJ_RESULT[r]
-            sign = '+' if r in ('win', 'push') else '-'
-            await self._finish(interaction, "🃏 Blackjack — 21 !", col,
-                               f"{txt} ({sign}{game.bet:,} coins)")
+        game.hit_current()
+        if game.current_hand()['done']:
+            await self._advance_or_finish(interaction)
         else:
-            self.double_btn.disabled = True
+            self._sync_buttons()
+            self.double_btn.disabled = True  # plus possible de doubler après avoir tiré
             await interaction.response.edit_message(embed=_bj_embed(game), view=self)
 
     @discord.ui.button(label="Rester", style=discord.ButtonStyle.success, emoji="✋")
     async def stand_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        game = self.game
-        uid = self.author_id
-        game.stand(); r = game.result()
-        active_bj.pop(self.key, None); _resolve_bj(uid, game, r); save_data()
-        col, txt = _BJ_RESULT[r]
-        titles = {'win': 'Gagné !', 'push': 'Égalité', 'lose': 'Perdu', 'bust': 'Bust !'}
-        sign = '+' if r in ('win', 'push') else '-'
-        await self._finish(interaction, f"🃏 Blackjack — {titles[r]}", col,
-                           f"{txt} ({sign}{game.bet:,} coins)")
+        self.game.stand_current()
+        await self._advance_or_finish(interaction)
 
     @discord.ui.button(label="Doubler", style=discord.ButtonStyle.danger, emoji="💰")
     async def double_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         game = self.game
         uid = self.author_id
-        if len(game.player) != 2:
+        h = game.current_hand()
+        if len(h['cards']) != 2:
             return await interaction.response.send_message(
                 "❌ Le double n'est possible qu'avec 2 cartes.", ephemeral=True)
-        if coins[uid] < game.bet:
+        if coins[uid] < h['bet']:
             return await interaction.response.send_message(
                 "❌ Pas assez de coins pour doubler.", ephemeral=True)
-        coins[uid] -= game.bet
-        game.bet *= 2
-        game.hit(); game.stand(); r = game.result()
-        active_bj.pop(self.key, None); _resolve_bj(uid, game, r); save_data()
-        col, txt = _BJ_RESULT[r]
-        sign = '+' if r in ('win', 'push') else '-'
-        await self._finish(interaction, "🃏 Blackjack — Double", col,
-                           f"{txt} ({sign}{game.bet:,} coins)")
+        coins[uid] -= h['bet']
+        h['bet'] *= 2
+        game.hit_current()
+        h['done'] = True
+        await self._advance_or_finish(interaction)
+
+    @discord.ui.button(label="Split", style=discord.ButtonStyle.primary, emoji="✂️")
+    async def split_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        game = self.game
+        uid = self.author_id
+        h = game.current_hand()
+        if not game.can_split():
+            return await interaction.response.send_message("❌ Split impossible ici.", ephemeral=True)
+        if coins[uid] < h['bet']:
+            return await interaction.response.send_message("❌ Pas assez de coins pour split.", ephemeral=True)
+        coins[uid] -= h['bet']
+        game.split_current()
+        if game.current_hand()['done']:
+            await self._advance_or_finish(interaction)
+        else:
+            self._sync_buttons()
+            await interaction.response.edit_message(embed=_bj_embed(game), view=self)
 
     @discord.ui.button(label="Abandonner", style=discord.ButtonStyle.secondary, emoji="🏳️")
     async def quit_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         game = self.game
         uid  = self.author_id
-        half = game.bet // 2
+        half = sum(h['bet'] for h in game.hands) // 2
         coins[uid] += half
         active_bj.pop(self.key, None); save_data()
-        await self._finish(interaction, "🃏 Blackjack — Abandon", 0x95a5a6,
-                           f"🏳️ **Abandon.** +{half:,} coins remboursés (moitié de la mise)")
+        self._disable_all()
+        embed = _bj_embed(game, reveal=True, title="🃏 Blackjack — Abandon")
+        embed.color = 0x95a5a6
+        embed.add_field(name="Résultat", value=f"🏳️ **Abandon.** +{half:,} coins remboursés (moitié de la mise)", inline=False)
+        embed.add_field(name="💳 Solde", value=f"{coins[uid]:,} coins", inline=True)
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.stop()
 
     async def on_timeout(self):
         if self.key in active_bj:
             game = active_bj.pop(self.key)
-            game.stand(); r = game.result()
-            _resolve_bj(self.author_id, game, r)
+            for h in game.hands:
+                h['done'] = True
+            if any(not h['busted'] for h in game.hands):
+                game.play_dealer()
+            payout = 0
+            for h in game.hands:
+                r = game.resolve_hand(h)
+                payout += h['bet'] * 2 if r == 'win' else h['bet'] if r == 'push' else 0
+            coins[self.author_id] += payout
             save_data()
         self._disable_all()
+
+
+class InsuranceView(discord.ui.View):
+    """Proposée quand le croupier montre un As : assurance (moitié de la mise, payée ×2 si
+    le croupier a effectivement blackjack), puis peek automatique et arrêt immédiat si oui."""
+    def __init__(self, author_id: int, key, game):
+        super().__init__(timeout=15)
+        self.author_id = author_id
+        self.key = key
+        self.game = game
+        self.message = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "❌ Ce n'est pas votre partie de blackjack !", ephemeral=True)
+            return False
+        return True
+
+    def _settle_dealer_blackjack(self):
+        """Calcule le résultat quand le croupier a effectivement blackjack. Retourne l'embed final."""
+        game = self.game
+        uid = self.author_id
+        payout = game.insurance_bet * 3 if game.insurance_bet else 0
+        lines = []
+        if game.insurance_bet:
+            lines.append(f"🛡️ Assurance payée : +{game.insurance_bet * 2:,} coins")
+        if game.player_natural():
+            payout += game.bet
+            lines.append("🤝 Vous aviez aussi blackjack — mise principale remboursée (push).")
+        else:
+            lines.append(f"😢 Perdu sur la mise principale (-{game.bet:,} coins)")
+        coins[uid] += payout
+        active_bj.pop(self.key, None)
+        save_data()
+        embed = _bj_embed(game, reveal=True, title="🃏 Blackjack — Le croupier avait blackjack !")
+        embed.color = 0x95a5a6 if game.player_natural() else 0xe74c3c
+        embed.add_field(name="Résultat", value="\n".join(lines), inline=False)
+        embed.add_field(name="💳 Solde", value=f"{coins[uid]:,} coins", inline=True)
+        return embed
+
+    async def _resolve(self, interaction: discord.Interaction, took_insurance: bool):
+        game = self.game
+        uid = self.author_id
+
+        if took_insurance:
+            cost = game.bet // 2
+            if coins[uid] < cost:
+                return await interaction.response.send_message(
+                    "❌ Pas assez de coins pour l'assurance.", ephemeral=True)
+            coins[uid] -= cost
+            game.insurance_bet = cost
+
+        for item in self.children:
+            item.disabled = True
+
+        if game.dealer_blackjack():
+            embed = self._settle_dealer_blackjack()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            embed, view = _bj_build_deal_result(uid, self.key, game)
+            await interaction.response.edit_message(embed=embed, view=view)
+        self.stop()
+
+    @discord.ui.button(label="Assurance", style=discord.ButtonStyle.danger, emoji="🛡️")
+    async def insure_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._resolve(interaction, True)
+
+    @discord.ui.button(label="Non merci", style=discord.ButtonStyle.secondary)
+    async def decline_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._resolve(interaction, False)
+
+    async def on_timeout(self):
+        """Pas de réponse = assurance déclinée par défaut."""
+        if self.key not in active_bj or not self.message:
+            return
+        game = self.game
+        for item in self.children:
+            item.disabled = True
+        try:
+            if game.dealer_blackjack():
+                embed = self._settle_dealer_blackjack()
+                await self.message.edit(embed=embed, view=self)
+            else:
+                embed, view = _bj_build_deal_result(self.author_id, self.key, game)
+                await self.message.edit(embed=embed, view=view)
+        except discord.HTTPException:
+            pass
 
 
 @bot.hybrid_command(name="bj", aliases=["blackjack"])
@@ -3299,23 +3507,21 @@ async def cmd_bj(ctx, mise: str = None):
     active_bj[key] = game
     save_data()
 
-    if game.natural():
-        winnings = int(mise * 2.5)
-        coins[uid] += winnings
-        active_bj.pop(key, None); save_data()
-        embed = _bj_embed(game, reveal=True, title="🃏 Blackjack — BLACKJACK NATUREL !")
-        embed.color = 0xf1c40f
-        embed.add_field(name="🎉 Blackjack naturel !",
-                        value=f"+{winnings - mise:,} coins (×2.5)", inline=False)
-        embed.add_field(name="💳 Solde", value=f"{coins[uid]:,} coins", inline=True)
-        await ctx.send(embed=embed)
+    if game.dealer_shows_ace():
+        view = InsuranceView(uid, key, game)
+        embed = _bj_embed(game, reveal=False, title="🃏 Blackjack — Le croupier montre un As !")
+        embed.add_field(
+            name="🛡️ Assurance ?",
+            value=f"Voulez-vous prendre une assurance pour **{mise // 2:,} coins** "
+                  f"(payée ×2 si le croupier a effectivement blackjack) ?",
+            inline=False
+        )
+        msg = await ctx.send(embed=embed, view=view)
+        view.message = msg
         return
 
-    view = BlackjackView(uid, key, game)
-    # Si le solde ne permet pas de doubler, on désactive le bouton dès le départ
-    if coins[uid] < game.bet:
-        view.double_btn.disabled = True
-    await ctx.send(embed=_bj_embed(game), view=view)
+    embed, view = _bj_build_deal_result(uid, key, game)
+    await ctx.send(embed=embed, view=view)
 
 
 @bot.hybrid_command(name="coinflip", aliases=["cf"])
