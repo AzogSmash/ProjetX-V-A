@@ -179,10 +179,10 @@ SHOP_ITEMS = {
 # Ne se brise jamais suite à une attaque subie ; se brise uniquement si le porteur attaque
 # lui-même (!voler/!rob/!hacker), avec un cooldown de rachat qui scale avec la durée cassée.
 SHIELD_TIERS = {
-    '12h': {'hours': 12,  'price': 800,  'cooldown_min': 15},
-    '24h': {'hours': 24,  'price': 1500, 'cooldown_min': 30},
-    '72h': {'hours': 72,  'price': 3000, 'cooldown_min': 60},
-    '7j':  {'hours': 168, 'price': 5000, 'cooldown_min': 120},
+    '12h': {'hours': 12,  'price': 1000, 'cooldown_min': 15},
+    '24h': {'hours': 24,  'price': 2000, 'cooldown_min': 30},
+    '72h': {'hours': 72,  'price': 4000, 'cooldown_min': 60},
+    '7j':  {'hours': 168, 'price': 7000, 'cooldown_min': 120},
 }
 SHIELD_STREAK_WINDOW_H = 2    # fenêtre pour considérer deux casses comme "rapprochées"
 SHIELD_STREAK_MULT     = 1.5  # multiplicateur du cooldown de rachat par casse rapprochée
