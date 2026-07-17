@@ -1251,9 +1251,7 @@ def _build_help_categories(ctx):
                  "`!1v1 @membre` — Défie un membre précis\n"
                  "`!1v1` (une fois le duel accepté) — Déclare le résultat (vote à 2)\n"
                  "`!classement_1v1` (`!top_1v1`) — Classement, avec sélecteur de saisons passées\n"
-                 "`!signaler @membre <raison>` — Signaler un comportement pas fairplay au staff\n"
-                 "🛡️ `!bouclier <12h|24h|72h|7j>` — Protection totale contre vol/rob/hack "
-                 "(se brise si tu attaques toi-même)"))
+                 "`!signaler @membre <raison>` — Signaler un comportement pas fairplay au staff"))
     cats.append(("tournoi", "🏆 Tournois & Draft",
                  "Tournois, ELO et phase de ban Brawl Stars",
                  "`!tournois solo` · `2v2` · `3v3` · `4v4` · `5v5` *(Admin)*\n"
@@ -3506,7 +3504,15 @@ async def cmd_bj(ctx, mise: str = None):
     key = (gid, uid)
 
     if key in active_bj:
-        await ctx.send("❌ Vous avez déjà une partie en cours !")
+        # Réaffiche une vue fraîche sur la partie existante — si le bot a redémarré depuis
+        # le lancement, l'ancien message a des boutons morts (les vues ne survivent pas
+        # à un redémarrage) mais la partie (et la mise déjà déduite) reste bien là.
+        game = active_bj[key]
+        view = BlackjackView(uid, key, game)
+        await ctx.send(
+            "❌ Tu as déjà une partie en cours — en voici une version fraîche si les anciens boutons ne répondaient plus :",
+            embed=_bj_embed(game), view=view
+        )
         return
 
     if not mise:
