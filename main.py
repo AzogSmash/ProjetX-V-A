@@ -188,15 +188,17 @@ SHIELD_STREAK_WINDOW_H = 2    # fenêtre pour considérer deux casses comme "rap
 SHIELD_STREAK_MULT     = 1.5  # multiplicateur du cooldown de rachat par casse rapprochée
 STEAL_GRACE_MIN        = 30   # protection minimale après avoir subi une attaque (remplace les 3h/6h)
 
-# Les boucliers sont aussi achetables via !shop / !acheter (items 12-15) — même état
-# partagé (shield_active) que !bouclier, prix toujours pris depuis SHIELD_TIERS.
+# Les boucliers sont aussi achetables via !shop / !acheter (items 3, 11-13 — comble les
+# trous laissés par les anciens items 3/11 retirés) — même état partagé (shield_active)
+# que !bouclier, prix toujours pris depuis SHIELD_TIERS.
+_SHIELD_ITEM_IDS = {'12h': 3, '24h': 11, '72h': 12, '7j': 13}
 SHOP_ITEMS.update({
-    12 + i: {
+    _SHIELD_ITEM_IDS[tier]: {
         'name': f'🛡️ Bouclier {tier}', 'price': info['price'],
-        'desc': f"Protection totale {tier} contre vol/rob/hack — voir `!bouclier`",
+        'desc': f"Protection totale {tier} contre vol/rob/hack — voir `!bouclier` (cooldown si cassé : {info['cooldown_min']} min)",
         'unique': False, 'shield_tier': tier,
     }
-    for i, (tier, info) in enumerate(SHIELD_TIERS.items())
+    for tier, info in SHIELD_TIERS.items()
 })
 
 BIZ_DEFS = {
@@ -1250,9 +1252,10 @@ def _build_help_categories(ctx):
                  "6. 🏭 Amélioration Usine — +15% production\n"
                  "7. 📈 Cours de Trading — +15% gains ventes crypto\n"
                  "8/9/10. Commerces (Épicerie / Fast Food / Restaurant)\n"
-                 "12-15. 🛡️ Boucliers (12h/24h/72h/7j) — ou directement via `!bouclier <durée>`\n"
+                 "3/11/12/13. 🛡️ Boucliers (12h/24h/72h/7j) — ou directement via `!bouclier <durée>`\n"
                  "\n**Protection :** boucliers — protection totale contre `!voler`/`!rob`/`!hacker` "
-                 "pendant la durée choisie ; se brise si tu attaques toi-même."))
+                 "pendant la durée choisie ; se brise si **tu attaques quelqu'un** pendant qu'il est actif "
+                 "(le cooldown de rachat dépend du palier cassé — voir `!bouclier`)."))
     cats.append(("team", "👥 Clubs / Teams",
                  "Créer ou rejoindre un club de joueurs",
                  "`!team` (`!club`, `!guilde`) — Interface du club\n"
@@ -5978,8 +5981,11 @@ async def cmd_bouclier(ctx, duree: str = None):
         return await ctx.send(embed=discord.Embed(
             title="🛡️ Boucliers disponibles",
             description=(
-                desc + "\n\nProtège totalement contre `!voler`, `!rob` et `!hacker` pendant sa durée.\n"
-                "⚠️ S'attaquer soi-même (`!voler`/`!rob`/`!hacker`) casse immédiatement son propre bouclier."
+                desc + "\n\nProtège totalement contre `!voler`, `!rob` et `!hacker` pendant sa durée — "
+                "**une attaque reçue ne casse jamais ton bouclier.**\n"
+                "⚠️ Par contre, si **tu attaques quelqu'un** (`!voler`/`!rob`/`!hacker`) pendant qu'il est actif, "
+                "ton propre bouclier se brise immédiatement, et tu dois attendre le cooldown de rachat "
+                "correspondant au palier cassé (voir ci-dessus) avant d'en reprendre un."
             ),
             color=0x3498db
         ))
@@ -6012,7 +6018,8 @@ async def cmd_bouclier(ctx, duree: str = None):
         description=(
             f"Protégé pendant **{tier}** contre `!voler`, `!rob` et `!hacker`.\n"
             f"💰 Solde : **{coins[ctx.author.id]:,} coins**\n\n"
-            f"⚠️ Si tu attaques quelqu'un pendant ce temps, ton bouclier se brise immédiatement."
+            f"⚠️ Si **tu attaques quelqu'un** pendant ce temps, ton bouclier se brise immédiatement "
+            f"— cooldown de rachat ensuite : **{info['cooldown_min']} min**."
         ),
         color=0x3498db
     ))
@@ -6873,7 +6880,8 @@ def _do_purchase(author_id, item_id):
         return True, (
             f"🛡️ Bouclier **{tier}** activé ! Protégé contre `!voler`/`!rob`/`!hacker`.\n"
             f"💰 Solde : **{coins[author_id]:,} coins**\n"
-            f"⚠️ S'attaquer soi-même casse le bouclier immédiatement."
+            f"⚠️ Si **tu attaques quelqu'un** pendant qu'il est actif, ton bouclier se brise immédiatement "
+            f"— cooldown de rachat ensuite : **{tier_info['cooldown_min']} min**."
         )
     # Vérification unique pour les commerces (tracked via businesses, pas inventory)
     if info.get('biz'):
