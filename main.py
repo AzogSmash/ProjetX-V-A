@@ -707,6 +707,23 @@ def load_data():
                     ticket_purchases.clear()
                     save_data()
 
+                # Migration : anciens items 3 "Bouclier Anti-Vol" (800) et 11 "Antivirus" (2000)
+                # retirés du shop, leurs IDs réattribués aux nouveaux boucliers à durée — sans ce
+                # nettoyage un résidu s'affichait comme un faux bouclier permanent dans !inventaire.
+                _shield_migrated = False
+                _OLD_SHIELD_PRICES = {'3': 800, '11': 2000}
+                for _uid, _items in owned_items.items():
+                    for _iid, _old_price in _OLD_SHIELD_PRICES.items():
+                        _cnt = _items.get(_iid, 0)
+                        if _cnt > 0:
+                            _refund = _cnt * _old_price
+                            coins[int(_uid)] += _refund
+                            _items.pop(_iid, None)
+                            logging.warning("Migration boucliers : %s — %d× item %s remboursé (%d coins)", _uid, _cnt, _iid, _refund)
+                            _shield_migrated = True
+                if _shield_migrated:
+                    save_data()
+
             except json.JSONDecodeError as e:
                 logging.warning("ERREUR JSON dans %s : %s — données réinitialisées", DATA_FILE, e)
                 warns = {}
@@ -6986,7 +7003,9 @@ async def cmd_inventaire(ctx, member: discord.Member = None):
     lines  = []
     for iid_str, cnt in items.items():
         iid = int(iid_str)
-        if iid in SHOP_ITEMS and cnt > 0:
+        # Les boucliers ne sont jamais stockés ici — juste un résidu possible des anciens
+        # items 3/11 (ré-attribués aux nouveaux boucliers) : on l'ignore à l'affichage.
+        if iid in SHOP_ITEMS and cnt > 0 and not SHOP_ITEMS[iid].get('shield_tier'):
             lines.append(f"• {SHOP_ITEMS[iid]['name']} ×{cnt}")
     title = f"🎒 Inventaire de {target.display_name}" if member else "🎒 Inventaire"
     empty_msg = f"{target.display_name} n'a aucun objet." if member else "Votre inventaire est vide. Achetez des objets avec `!shop` !"
