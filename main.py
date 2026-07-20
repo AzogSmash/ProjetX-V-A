@@ -543,6 +543,95 @@ async def _maybe_azog_ping_reaction(message):
         pass
 
 
+DEV_ROLE_ID = 1513110804595998789  # rôle Technicien Discord (développeurs du bot)
+DEV_PING_CHANCE = 0.30
+DEV_PING_COOLDOWN_MIN = 10
+_dev_ping_last = None  # datetime | None — cooldown global anti-spam, pas persisté (purement cosmétique)
+DEV_PING_LINES = [
+    "Allez on se réveille les mangeurs de carte graphique, ça coince encore.",
+    "Y'a un bug quelque part, sortez de vos grottes.",
+    "Le café refroidit pendant que vous debug depuis 3h.",
+    "Encore un stack overflow à l'horizon les gars.",
+    "Quelqu'un a encore oublié un point-virgule ?",
+    "Les devs sont réveillés ou ils dorment sur leur clavier ?",
+    "Ça sent le `git blame` qui va faire mal.",
+    "Un ping technicien = quelqu'un a encore tout cassé.",
+    "Sortez la caféine, ça va être une longue nuit.",
+    "Encore une erreur 404 dans vos vies sociales ?",
+    "Le serveur va bien merci de demander, vous par contre...",
+    "Qui a touché au code sans tester avant de push ?",
+    "Ambiance 'ça marchait sur ma machine' dans 3, 2, 1...",
+    "Les mangeurs de RGB sont convoqués.",
+    "On dirait qu'il y a encore une exception non catchée.",
+    "Debug mode activé, plaignez-vous après.",
+    "Un problème dans le Matrix, sortez de vos IDE.",
+    "Ça pue le rollback dans les prochaines minutes.",
+    "Vos souris ont trop chauffé, on dirait.",
+    "Nouvelle mission : trouvez le bug avant qu'il vous trouve.",
+]
+DEV_PING_POSITIVE_LINES = [
+    "Ah enfin un peu d'amour pour les mangeurs de carte graphique 🥹",
+    "Merci à vous, les héros de l'ombre du code.",
+    "Une ovation méritée pour l'équipe technique !",
+    "On applaudit les artisans du bug-free (ou presque).",
+    "Enfin un ping qui fait plaisir au cœur des devs.",
+    "Les développeurs rougissent de fierté.",
+    "Ça fait chaud au cœur, merci !",
+    "Une tape dans le dos pour ceux qui codent la nuit.",
+    "Le café n'aura pas été bu pour rien aujourd'hui.",
+    "Un +1 pour l'équipe technique, bien mérité.",
+    "Les mangeurs de carte graphique apprécient la reconnaissance.",
+    "Ça fait plaisir de voir que ça tourne bien !",
+    "Merci, ça motive à continuer de coder.",
+    "L'équipe technique reçoit vos louanges avec fierté.",
+    "Un peu de gratitude, ça fait toujours plaisir aux devs.",
+    "Bravo à vous aussi d'avoir remarqué le travail bien fait.",
+    "Les développeurs se sentent (enfin) valorisés.",
+    "Merci, on va pouvoir dormir l'esprit tranquille ce soir.",
+    "Une petite victoire de plus pour l'équipe.",
+    "Ça fait plaisir, merci du soutien !",
+]
+DEV_PING_POSITIVE_KEYWORDS = [
+    'merci', 'bravo', 'nickel', 'parfait', 'top', 'gg', 'super', 'génial', 'genial',
+    'incroyable', 'ça marche', 'ca marche', 'stylé', 'style', 'bien joué', 'bien joue',
+    'félicit', 'felicit', 'excellent', 'propre', 'clean', 'énorme', 'enorme', 'fier', 'love',
+]
+DEV_PING_NEGATIVE_KEYWORDS = [
+    'bug', 'marche pas', 'marche plus', 'cassé', 'casse', 'erreur', 'plante', 'planté',
+    'down', 'lag', 'déconne', 'deconne', 'problème', 'probleme', 'souci', 'ça bug', 'ca bug',
+    'crash', 'nul', 'chiant', 'relou', 'buggé', 'bugge', 'foutu', 'marche toujours pas',
+]
+
+
+def _dev_ping_pick_lines(content: str) -> list:
+    """Choisit la banque positive ou négative selon des mots-clés simples dans le message.
+    Ambigu ou aucun mot-clé -> banque négative (le ton d'origine, le plus fréquent en pratique)."""
+    lower = content.lower()
+    is_negative = any(k in lower for k in DEV_PING_NEGATIVE_KEYWORDS)
+    is_positive = any(k in lower for k in DEV_PING_POSITIVE_KEYWORDS)
+    if is_positive and not is_negative:
+        return DEV_PING_POSITIVE_LINES
+    return DEV_PING_LINES
+
+
+async def _maybe_dev_ping_reaction(message):
+    """Réaction surprise (30%, cooldown 10 min) quand le rôle Technicien est mentionné —
+    banque positive ou négative choisie selon le ton du message."""
+    global _dev_ping_last
+    if not any(r.id == DEV_ROLE_ID for r in message.role_mentions):
+        return
+    now = datetime.now()
+    if _dev_ping_last and (now - _dev_ping_last).total_seconds() < DEV_PING_COOLDOWN_MIN * 60:
+        return
+    if random.random() > DEV_PING_CHANCE:
+        return
+    _dev_ping_last = now
+    try:
+        await message.channel.send(random.choice(_dev_ping_pick_lines(message.content)))
+    except Exception:
+        pass
+
+
 MAX_FACTORY_WORKERS = 10
 DEFAULT_FACTORY_COSTS = [500, 1000, 2000, 5000, 7500, 10000, 15000, 25000, 55000, 100000]
 FACTORY_HIRE_COOLDOWN_HOURS = 24
@@ -8784,6 +8873,7 @@ async def on_message(message):
 
     if not message.content.startswith("!"):
         await _maybe_azog_ping_reaction(message)
+        await _maybe_dev_ping_reaction(message)
 
     await bot.process_commands(message)
     
