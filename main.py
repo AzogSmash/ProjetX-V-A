@@ -470,6 +470,79 @@ async def _check_protected_target(ctx, member: discord.Member) -> bool:
         await ctx.send("😤 Tu veux punir le **GOAT Azog** mais t'es fada toi ?")
         return True
     return False
+
+# ── Réactions Azog : surprises cosmétiques sur mention/commandes, aucun blocage ──────────
+AZOG_PING_LINES = [
+    "Quelqu'un a osé prononcer le nom du GOAT 🐐",
+    "👑 Le roi a été invoqué.",
+    "Attention, présence du patron détectée.",
+    "On m'a sonné ?",
+    "💀 Vous parlez du boss dans son dos ?",
+    "Azog voit tout. Azog sait tout.",
+    "🐐 Le GOAT passait par là.",
+    "Chuuut, on ne réveille pas la légende pour rien.",
+    "Chaque mention de son nom ajoute +1 à sa légende.",
+    "Le serveur tremble légèrement.",
+    "😤 Qui a osé ?",
+    "Le patron a des yeux partout.",
+]
+AZOG_PING_EMOJIS = ['🐐', '👑', '💀', '😤', '🔥', '👀']
+AZOG_PING_CHANCE = 0.22
+AZOG_PING_COOLDOWN_MIN = 12
+_azog_ping_last = None  # datetime | None — cooldown global anti-spam, pas persisté (purement cosmétique)
+
+AZOG_VICTIM_SUCCESS_LINES = [
+    "😱 Quelqu'un vient de braquer le **GOAT**... courage {attacker}, t'en auras besoin.",
+    "🚨 Alerte générale : le patron vient de se faire voler. Priez pour {attacker}.",
+    "💀 {attacker} vient peut-être de signer son arrêt de mort en s'attaquant à Azog.",
+    "Personne ne sort indemne d'un coup contre le GOAT... bonne chance {attacker}.",
+]
+AZOG_VICTIM_FAIL_LINES = [
+    "😂 {attacker} a essayé de toucher au **GOAT**. Résultat prévisible.",
+    "Le patron ne se laisse pas faire aussi facilement, {attacker}.",
+    "🐐 On ne s'attaque pas à la légende impunément, {attacker}.",
+    "Tentative... courageuse de {attacker} sur le boss. Raté.",
+]
+AZOG_DUEL_WIN_LINES = [
+    "🐐 Sans surprise, le **GOAT** l'emporte encore.",
+    "👑 Une victoire de plus pour la légende.",
+]
+AZOG_DUEL_LOSE_LINES = [
+    "😱 Le **GOAT** vient de tomber ! Journée historique.",
+    "Même les légendes trébuchent parfois... suspect.",
+]
+AZOG_GIFT_LINES = [
+    "🙏 Un tribut digne du **GOAT**.",
+    "👑 Offrande acceptée par sa majesté Azog.",
+]
+
+
+def _azog_flavor(lines, **kwargs) -> str:
+    return random.choice(lines).format(**kwargs)
+
+
+async def _maybe_azog_ping_reaction(message):
+    """Réaction surprise (rare, cooldownée) quand Azog est mentionné dans un message normal."""
+    global _azog_ping_last
+    if message.author.id == PROTECTED_FROM_PUNISH_ID:
+        return
+    if not any(m.id == PROTECTED_FROM_PUNISH_ID for m in message.mentions):
+        return
+    now = datetime.now()
+    if _azog_ping_last and (now - _azog_ping_last).total_seconds() < AZOG_PING_COOLDOWN_MIN * 60:
+        return
+    if random.random() > AZOG_PING_CHANCE:
+        return
+    _azog_ping_last = now
+    try:
+        if random.random() < 0.5:
+            await message.add_reaction(random.choice(AZOG_PING_EMOJIS))
+        else:
+            await message.channel.send(random.choice(AZOG_PING_LINES))
+    except Exception:
+        pass
+
+
 MAX_FACTORY_WORKERS = 10
 DEFAULT_FACTORY_COSTS = [500, 1000, 2000, 5000, 7500, 10000, 15000, 25000, 55000, 100000]
 FACTORY_HIRE_COOLDOWN_HOURS = 24
@@ -3330,6 +3403,8 @@ async def cmd_give(ctx, member: discord.Member, amount: str):
         description=f"{ctx.author.mention} a envoyé **{amount:,} 🪙 coins** à {member.mention} !",
         color=0x2ecc71
     )
+    if member.id == PROTECTED_FROM_PUNISH_ID:
+        embed.add_field(name="🐐", value=_azog_flavor(AZOG_GIFT_LINES), inline=False)
     await ctx.send(embed=embed)
 
 
@@ -3818,6 +3893,10 @@ async def cmd_duel(ctx, member: discord.Member, mise: str):
     )
     embed.add_field(name=f"💰 {ctx.author.display_name}", value=f"{coins[ctx.author.id]:,} coins", inline=True)
     embed.add_field(name=f"💰 {member.display_name}",     value=f"{coins[member.id]:,} coins",     inline=True)
+    if winner.id == PROTECTED_FROM_PUNISH_ID:
+        embed.add_field(name="🐐", value=_azog_flavor(AZOG_DUEL_WIN_LINES), inline=False)
+    elif loser.id == PROTECTED_FROM_PUNISH_ID:
+        embed.add_field(name="🐐", value=_azog_flavor(AZOG_DUEL_LOSE_LINES), inline=False)
     await ctx.send(embed=embed)
 
 
@@ -5583,6 +5662,8 @@ async def cmd_hacker(ctx, cible: discord.Member):
         save_data()
         embed = discord.Embed(title="💻 Hack réussi !", color=0x2ecc71,
             description=f"🔓 Volé **{stolen_qty:.6f} {symbol}** à {cible.mention}\nValeur ≈ **{val:,} coins**")
+        if cible.id == PROTECTED_FROM_PUNISH_ID:
+            embed.add_field(name="⚠️", value=_azog_flavor(AZOG_VICTIM_SUCCESS_LINES, attacker=ctx.author.mention), inline=False)
     else:
         fine = min(random.randint(200, 600), coins[ctx.author.id])
         coins[ctx.author.id] -= fine
@@ -5591,6 +5672,8 @@ async def cmd_hacker(ctx, cible: discord.Member):
         save_data()
         embed = discord.Embed(title="💻 Hack échoué !", color=0xe74c3c,
             description=f"🚨 Vous vous êtes fait repérer ! Amende : **-{fine:,} coins**")
+        if cible.id == PROTECTED_FROM_PUNISH_ID:
+            embed.add_field(name="🐐", value=_azog_flavor(AZOG_VICTIM_FAIL_LINES, attacker=ctx.author.mention), inline=False)
     await ctx.send(embed=embed)
 
 
@@ -6072,6 +6155,8 @@ async def cmd_voler(ctx, cible: discord.Member):
                 f"Vous avez crocheté le coffre de {cible.mention} et volé **{stolen:,} coins** "
                 f"({pct*100:.1f}% du coffre) !\n💰 Solde : **{coins[ctx.author.id]:,} coins**"
             ))
+        if cible.id == PROTECTED_FROM_PUNISH_ID:
+            embed.add_field(name="⚠️", value=_azog_flavor(AZOG_VICTIM_SUCCESS_LINES, attacker=ctx.author.mention), inline=False)
     else:
         fine = min(random.randint(100, 350), coins[ctx.author.id])
         coins[ctx.author.id] -= fine
@@ -6080,6 +6165,8 @@ async def cmd_voler(ctx, cible: discord.Member):
         save_data()
         embed = discord.Embed(title="🚨 Vol raté !", color=0xe74c3c,
             description=f"Vous vous êtes fait attraper en train de crocheter le coffre ! Amende : **-{fine:,} coins**\n💰 Solde : **{coins[ctx.author.id]:,} coins**")
+        if cible.id == PROTECTED_FROM_PUNISH_ID:
+            embed.add_field(name="🐐", value=_azog_flavor(AZOG_VICTIM_FAIL_LINES, attacker=ctx.author.mention), inline=False)
     await ctx.send(embed=embed)
 
 
@@ -6116,6 +6203,8 @@ async def cmd_rob(ctx, cible: discord.Member):
                 f"💰 Solde : **{coins[ctx.author.id]:,} coins**\n"
                 f"⏳ Prochain rob dans **{cd_hours:g}h**."
             ))
+        if cible.id == PROTECTED_FROM_PUNISH_ID:
+            embed.add_field(name="⚠️", value=_azog_flavor(AZOG_VICTIM_SUCCESS_LINES, attacker=ctx.author.mention), inline=False)
     else:
         loss = random.randint(0, 300)
         loss = min(loss, coins[ctx.author.id])
@@ -6129,6 +6218,8 @@ async def cmd_rob(ctx, cible: discord.Member):
                 f"💰 Solde : **{coins[ctx.author.id]:,} coins**\n"
                 f"⏳ Prochain rob dans **{cd_hours:g}h**."
             ))
+        if cible.id == PROTECTED_FROM_PUNISH_ID:
+            embed.add_field(name="🐐", value=_azog_flavor(AZOG_VICTIM_FAIL_LINES, attacker=ctx.author.mention), inline=False)
     await ctx.send(embed=embed)
 
 
@@ -8691,6 +8782,9 @@ async def on_message(message):
             await message.channel.send(embed=embed)
             return
 
+    if not message.content.startswith("!"):
+        await _maybe_azog_ping_reaction(message)
+
     await bot.process_commands(message)
     
     
@@ -10661,11 +10755,13 @@ async def sync_family_ranked():
 
 BS_HISTORY_RETENTION_DAYS = 90
 
-@tasks.loop(hours=24)
+@tasks.loop(hours=1)
 async def sync_trophy_history():
-    """Enregistre un instantané quotidien des trophées de tous les membres de la famille de clans
-    (par tag Brawl Stars, pas besoin de !bslink) pour alimenter !evolution_trophees.
-    Réutilise _bs_fetch_club (déjà appelé par sync_family_ranked) : aucun coût API supplémentaire notable."""
+    """Rafraîchit toutes les heures le point du jour des trophées de tous les membres de la famille
+    de clans (par tag Brawl Stars, pas besoin de !bslink) pour alimenter !evolution_trophees.
+    Une seule entrée par jour est conservée (mise à jour en place, pas de doublon) — tourner plus
+    souvent rend juste la valeur de fin de saison archivée par check_bs_season plus précise, sans
+    faire grossir data.json. Réutilise _bs_fetch_club (déjà appelé par sync_family_ranked)."""
     if not bs_family_clubs:
         return
 
@@ -11234,6 +11330,10 @@ class RankedResultView(discord.ui.View):
         )
         if by_admin:
             desc += "\n*(résultat tranché par un admin)*"
+        if winner_id == PROTECTED_FROM_PUNISH_ID:
+            desc += "\n" + _azog_flavor(AZOG_DUEL_WIN_LINES)
+        elif loser_id == PROTECTED_FROM_PUNISH_ID:
+            desc += "\n" + _azog_flavor(AZOG_DUEL_LOSE_LINES)
         embed = discord.Embed(title="⚔️ Duel 1v1 — Résultat", description=desc, color=0x2ecc71)
         await interaction.response.edit_message(content=None, embed=embed, view=self)
         if guild:
