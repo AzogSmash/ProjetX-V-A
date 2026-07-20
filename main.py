@@ -13,6 +13,7 @@ import unicodedata
 from collections import defaultdict
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont
 
 load_dotenv()
@@ -47,6 +48,7 @@ giveaway_data = {}
 giveaway_tasks = {}
 daily_cooldowns = {}    # str(user_id) -> ISO datetime
 work_cooldowns = {}     # str(user_id) -> ISO datetime
+beg_cooldowns = {}      # str(user_id) -> ISO datetime
 active_bj = {}          # (guild_id, user_id) -> BlackjackGame
 poker_games = {}        # guild_id -> PokerGame
 
@@ -298,6 +300,7 @@ bs_role_config   = {'trophies': {}, 'ranked': {}}  # 'trophies': {str(min): role
 bs_family_clubs         = []   # [{'tag','name','slug','alias'}, ...] — slug/alias = commande dédiée au clan
 bs_family_ranked_cache  = {}   # str(tag_joueur) -> {'name','club','ranked_pts','ranked_tier'}
 bs_family_ranked_updated_at = None  # str affichable, ex '02/07 21:40'
+bs_trophy_history = {}  # str(tag_joueur) -> {'name','club','first_seen':'YYYY-MM-DD','history':[{'date','trophies'}, ...]}
 ADMIN_LOG_CHANNEL_ID = 0  # à configurer via !set_admin_log <channel_id>
 draft_sessions       = {}   # channel_id -> session dict (phase de ban Brawl Stars)
 theft_stats           = {}   # str(uid_victim) -> {'attempts': int, 'success': int}
@@ -318,6 +321,11 @@ ranked_reports    = {}   # str(target_uid) -> [{'reporter','reason','guild_id','
 ranked_report_cooldowns = {}  # "reporter_target" -> ISO datetime
 ranked_1v1_history = {}   # "YYYY-MM" -> {uid_str: {'points','wins','losses'}} — saisons archivées
 ranked_season_month = None  # "YYYY-MM" — mois de la saison en cours
+casino_season_month = None  # "YYYY-MM" — dernier mois où le casino a été reset automatiquement
+BS_SEASON_TZ = ZoneInfo("Europe/Paris")
+bs_season_month = None        # "YYYY-MM" — dernier mois où une saison Brawl Stars a démarré (1er jeudi 10h)
+bs_season_start_date = None   # "YYYY-MM-DD" — date de début de la saison BS en cours (borne pour !evolution_trophees)
+bs_trophy_evolution_history = {}  # "YYYY-MM" -> {tag: {'name','club','start','end','delta'}} — saisons de push archivées
 RANKED_CHALLENGE_CHANNEL_ID = 1526529629974695977  # #commandes... — tableau des défis 1v1
 RANKED_LOG_CHANNEL_ID       = 1526529856421105715  # #chat-duels — log public des résultats validés
 RANKED_1V1_TIERS = [
@@ -469,7 +477,11 @@ DEFAULT_COOLDOWNS_H = {
     'hacker':    1,
     'rob':       12,
     'embaucher': 24,
+    'mendier':   0.5,
 }
+
+BEG_THRESHOLD = 50   # solde max pour pouvoir mendier
+BEG_MIN, BEG_MAX = 20, 80
 
 casino_config = {
     'shop_prices':   {},  # str(item_id) -> int
@@ -552,17 +564,18 @@ def _resolve_data_path():
 
 # --- Fonctions de chargement et de sauvegarde des données ---
 def load_data():
-    global warns, mutes, silenced_users, coins, giveaway_data, daily_cooldowns, work_cooldowns
+    global warns, mutes, silenced_users, coins, giveaway_data, daily_cooldowns, work_cooldowns, beg_cooldowns
     global crypto_prices, price_history, crypto_trends, crypto_holdings, safes, factories, jobs_data, owned_items
     global theft_cooldowns, miner_cooldowns, hacker_cooldowns, risque_cooldowns, rob_cooldowns, steal_immunity
     global shield_active, shield_cooldown, shield_break_streak
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
-    global bs_accounts, bs_role_config, bs_family_clubs, bs_family_ranked_cache, bs_family_ranked_updated_at
+    global bs_accounts, bs_role_config, bs_family_clubs, bs_family_ranked_cache, bs_family_ranked_updated_at, bs_trophy_history
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
-    global ranked_1v1_history, ranked_season_month, slash_global_purged
+    global ranked_1v1_history, ranked_season_month, slash_global_purged, casino_season_month
+    global bs_season_month, bs_season_start_date, bs_trophy_evolution_history
     load_path = _resolve_data_path()
     if os.path.exists(load_path):
         with open(load_path, 'r', encoding='utf-8-sig') as f:
@@ -610,6 +623,7 @@ def load_data():
 
                 daily_cooldowns  = data.get('daily_cooldowns', {})
                 work_cooldowns   = data.get('work_cooldowns', {})
+                beg_cooldowns    = data.get('beg_cooldowns', {})
                 crypto_prices    = data.get('crypto_prices', dict(CRYPTO_BASE))
                 # Clamp les prix dans la fourchette par crypto au redémarrage
                 for _s, _b in CRYPTO_BASE.items():
@@ -657,6 +671,10 @@ def load_data():
                 bs_family_clubs         = data.get('bs_family_clubs', [])
                 bs_family_ranked_cache  = data.get('bs_family_ranked_cache', {})
                 bs_family_ranked_updated_at = data.get('bs_family_ranked_updated_at')
+                bs_trophy_history       = data.get('bs_trophy_history', {})
+                bs_season_month         = data.get('bs_season_month')
+                bs_season_start_date    = data.get('bs_season_start_date')
+                bs_trophy_evolution_history = data.get('bs_trophy_evolution_history', {})
                 businesses           = data.get('businesses', {})
                 theft_stats           = data.get('theft_stats', {})
                 daily_sell_volume     = data.get('daily_sell_volume', {})
@@ -679,6 +697,7 @@ def load_data():
                 ranked_report_cooldowns = data.get('ranked_report_cooldowns', {})
                 ranked_1v1_history  = data.get('ranked_1v1_history', {})
                 ranked_season_month = data.get('ranked_season_month')
+                casino_season_month = data.get('casino_season_month')
                 slash_global_purged = data.get('slash_global_purged', False)
                 loaded_cfg = data.get('casino_config', {})
                 if isinstance(loaded_cfg, dict):
@@ -775,6 +794,7 @@ def save_data():
 
     data_to_save['daily_cooldowns']  = daily_cooldowns
     data_to_save['work_cooldowns']   = work_cooldowns
+    data_to_save['beg_cooldowns']    = beg_cooldowns
     data_to_save['crypto_prices']    = crypto_prices
     data_to_save['price_history']    = price_history
     data_to_save['crypto_trends']    = crypto_trends
@@ -813,6 +833,10 @@ def save_data():
     data_to_save['bs_family_clubs']  = bs_family_clubs
     data_to_save['bs_family_ranked_cache']      = bs_family_ranked_cache
     data_to_save['bs_family_ranked_updated_at'] = bs_family_ranked_updated_at
+    data_to_save['bs_trophy_history']           = bs_trophy_history
+    data_to_save['bs_season_month']              = bs_season_month
+    data_to_save['bs_season_start_date']         = bs_season_start_date
+    data_to_save['bs_trophy_evolution_history']  = bs_trophy_evolution_history
     data_to_save['businesses']           = businesses
     data_to_save['theft_stats']           = theft_stats
     data_to_save['daily_sell_volume']     = daily_sell_volume
@@ -830,6 +854,7 @@ def save_data():
     data_to_save['ranked_report_cooldowns'] = ranked_report_cooldowns
     data_to_save['ranked_1v1_history']  = ranked_1v1_history
     data_to_save['ranked_season_month'] = ranked_season_month
+    data_to_save['casino_season_month'] = casino_season_month
     data_to_save['slash_global_purged'] = slash_global_purged
 
     try:
@@ -995,8 +1020,14 @@ async def on_ready():
         sync_bs_roles.start()
     if not sync_family_ranked.is_running():
         sync_family_ranked.start()
+    if not sync_trophy_history.is_running():
+        sync_trophy_history.start()
     if not check_ranked_season.is_running():
         check_ranked_season.start()
+    if not check_casino_season.is_running():
+        check_casino_season.start()
+    if not check_bs_season.is_running():
+        check_bs_season.start()
 
     global _slash_synced, slash_global_purged
     if not _slash_synced:
@@ -1090,7 +1121,7 @@ bot.remove_command("help")
 COMMAND_USAGE = {
     'coins':         '`!coins` — Voir votre solde\n`!coins @membre` — Voir le solde d\'un autre',
     'give':          '`!give @membre <montant|all>`\nEx : `!give @Ami 1000` · `!give @Ami all`',
-    'roulette':      '`!roulette <mise|all> <choix>`\nChoix : `rouge` `noir` `pair` `impair` ou un numéro `0-36`\nEx : `!roulette 200 rouge` · `!roulette all 15`',
+    'roulette':      '`!roulette <mise|all> <choix>`\nChoix : `rouge` `noir` `pair` `impair` `manque` `passe` `1-12` `13-24` `25-36` `voisins` `tiers` `orphelins` ou un numéro `0-36`\nEx : `!roulette 200 rouge` · `!roulette all 15` · plusieurs paris : `!roulette 100 rouge 50 17`',
     'slots':         '`!slots <mise|all>`\nEx : `!slots 150` · `!slots all`',
     'bj':            '`!bj <mise|all>` — Démarrer une partie (jouez ensuite avec les boutons)\nEx : `!bj 100` · `!bj all`',
     'blackjack':     '`!bj <mise|all>` — Démarrer une partie (boutons : Tirer / Rester / Doubler / Abandonner)',
@@ -1107,6 +1138,7 @@ COMMAND_USAGE = {
     'bs_roles':      '`!bs_roles trophees <min> @role` · `!bs_roles ranked <min_points> @role` · `!bs_roles liste` *(Admin)*',
     'bs_famille':    '`!bs_famille ajouter <tag_clan>` · `!bs_famille retirer <tag_clan>` · `!bs_famille liste` *(Admin)*',
     'classement_trophees_famille': '`!classement_trophees_famille` (alias `!ctf`, `!top_famille`)',
+    'evolution_trophees': '`!evolution_trophees` (alias `!evo`, `!evolution`) — Progression de trophées de la saison BS en cours, sélecteur de saisons passées et filtre par clan',
     'classement_ranked_famille':   '`!classement_ranked_famille` (alias `!crf`, `!top_ranked_famille`)',
     'famille_stats': '`!famille_stats` (alias `!fs`, `!stats_famille`) — Vue d\'ensemble de la famille',
     'graphique':     '`!graphique <SYM>`\nSymboles disponibles : `BTC` `ETH` `DOGE` `SOL` `XRP`\nEx : `!graphique BTC`',
@@ -1204,6 +1236,7 @@ def _build_help_categories(ctx):
                  "`!coins` (`!bal`, `!solde`) — Voir votre solde\n"
                  "`!daily` (`!d`) — 500 coins/jour + bonus streak\n"
                  "`!travail` (`!trav`, `!work`) — Travailler (cooldown 1h)\n"
+                 "`!mendier` (`!beg`) — Filet de sécurité si solde ≤ 50 et daily/travail épuisés\n"
                  "`!risque` (`!risk`) — Coup risqué x2 ou rien *(cooldown 3h)*\n"
                  "`!give @membre <montant|all>` — Donner des coins\n"
                  "`!coffre` (`!banque`, `!vault`) — Coffre-fort (Déposer/Retirer)\n"
@@ -1213,7 +1246,7 @@ def _build_help_categories(ctx):
                  "Slots, blackjack, roulette, poker, course, gratter…",
                  "`!slots <mise>` (`!sl`, `!machine`) — Machine à sous\n"
                  "`!coinflip <mise> <pile|face>` (`!cf`) — Pile ou face\n"
-                 "`!roulette <mise> <rouge|noir|pair|impair|0-36>` (`!rou`)\n"
+                 "`!roulette <mise> <rouge|noir|pair|impair|voisins|tiers|orphelins|0-36>` (`!rou`) — plusieurs paris possibles en une commande\n"
                  "`!bj <mise>` (`!blackjack`) — Blackjack (boutons)\n"
                  "`!duel @membre <mise>` (`!pvp`) — Duel\n"
                  "`!mines <mise>` (`!mn`) — Mines\n"
@@ -1303,6 +1336,7 @@ def _build_help_categories(ctx):
                  "*(Admin)* `!bs_roles ranked <min_points> @role` — Palier de points classé → rôle\n"
                  "*(Admin)* `!bs_roles liste` — Voir la configuration\n"
                  "`!classement_trophees_famille` (`!ctf`) — Classement trophées de la famille de clans\n"
+                 "`!evolution_trophees` (`!evo`) — Progression de trophées depuis le début de la saison BS en cours (+ historique des saisons passées, par membre/clan)\n"
                  "`!classement_ranked_famille` (`!crf`) — Classement classé de la famille (mis à jour ttes les 4h)\n"
                  "`!famille_stats` (`!fs`) — Vue d'ensemble : membres, trophées, répartition par clan/rang\n"
                  "*(Admin)* `!bs_famille ajouter/retirer <tag_clan>` — Gérer les clans de la famille\n"
@@ -2675,6 +2709,50 @@ RANKS    = ['2','3','4','5','6','7','8','9','10','J','Q','K','A']
 RANK_VAL = {r: i for i, r in enumerate(RANKS, 2)}
 RED_SUITS = {'♥', '♦'}
 ROULETTE_RED = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
+
+# Mises annoncées (basées sur la position réelle des numéros sur le cylindre européen)
+ROULETTE_VOISINS   = {0,2,3,4,7,12,15,18,19,21,22,25,26,28,29,32,35}
+ROULETTE_TIERS     = {5,8,10,11,13,16,23,24,27,30,33,36}
+ROULETTE_ORPHELINS = {1,20,14,31,9,17,34,6}
+ROULETTE_ANNONCES = {
+    'voisins':   ('Voisins du zéro', ROULETTE_VOISINS),
+    'tiers':     ('Tiers du cylindre', ROULETTE_TIERS),
+    'orphelins': ('Orphelins', ROULETTE_ORPHELINS),
+}
+
+
+def _roulette_parse_choix(choix: str):
+    """Valide un choix de pari roulette. Retourne (label, mult_base, check_fn) ou None si invalide.
+    check_fn(numero) -> bool indique si le numéro tiré fait gagner ce pari."""
+    if   choix in ('rouge', 'red'):
+        return ("Rouge 🔴", 2, lambda n: n in ROULETTE_RED)
+    elif choix in ('noir', 'black'):
+        return ("Noir ⚫", 2, lambda n: n != 0 and n not in ROULETTE_RED)
+    elif choix in ('pair', 'even'):
+        return ("Pair", 2, lambda n: n != 0 and n % 2 == 0)
+    elif choix in ('impair', 'odd'):
+        return ("Impair", 2, lambda n: n % 2 == 1)
+    elif choix in ('manque', '1-18'):
+        return ("Manque (1–18)", 2, lambda n: 1 <= n <= 18)
+    elif choix in ('passe', '19-36'):
+        return ("Passe (19–36)", 2, lambda n: 19 <= n <= 36)
+    elif choix in ('1-12', '1ere', '1ère'):
+        return ("1ère douzaine", 3, lambda n: 1 <= n <= 12)
+    elif choix in ('13-24', '2eme', '2ème'):
+        return ("2ème douzaine", 3, lambda n: 13 <= n <= 24)
+    elif choix in ('25-36', '3eme', '3ème'):
+        return ("3ème douzaine", 3, lambda n: 25 <= n <= 36)
+    elif choix in ROULETTE_ANNONCES:
+        label, group = ROULETTE_ANNONCES[choix]
+        return (label, 36 / len(group), lambda n, g=group: n in g)
+    else:
+        try:
+            t = int(choix)
+        except ValueError:
+            return None
+        if 0 <= t <= 36:
+            return (f"Numéro {t}", 36, lambda n, t=t: n == t)
+        return None
 SLOT_SYMS = ['🍒','🍋','🍊','🍇','🍉','⭐','💎']
 SLOT_W    = [30, 25, 20, 15, 10, 5, 2]
 HAND_NAMES = ['Carte Haute','Paire','Double Paire','Brelan',
@@ -3135,6 +3213,28 @@ async def cmd_travail(ctx):
     await ctx.send(embed=embed)
 
 
+@bot.hybrid_command(name="mendier", aliases=["beg"])
+async def cmd_mendier(ctx):
+    uid = ctx.author.id
+    if coins[uid] > BEG_THRESHOLD:
+        return await ctx.send(f"❌ Vous avez encore plus de **{BEG_THRESHOLD} coins**, pas besoin de mendier.")
+    if not (_cd_remaining_str(daily_cooldowns, uid, cooldown_h('daily')) and _cd_remaining_str(work_cooldowns, uid, cooldown_h('travail'))):
+        return await ctx.send("❌ Utilisez d'abord `!daily` ou `!travail` s'ils sont disponibles.")
+    ok, wait = _cd_ok(beg_cooldowns, uid, cooldown_h('mendier'))
+    if not ok:
+        return await ctx.send(f"⏳ {ctx.author.mention}, revenez dans {wait}.")
+    amount = random.randint(BEG_MIN, BEG_MAX)
+    coins[uid] += amount
+    save_data()
+    embed = discord.Embed(
+        title="🙏 Manche effectuée",
+        description=f"{ctx.author.mention} a récolté **{amount:,} 🪙 coins** en mendiant.\n💰 Solde : **{coins[uid]:,} coins**",
+        color=0x95a5a6
+    )
+    embed.set_footer(text=f"Disponible à nouveau dans {int(cooldown_h('mendier') * 60)} min.")
+    await ctx.send(embed=embed)
+
+
 @bot.hybrid_command(name="risque", aliases=["risk", "roulette_russe"])
 async def cmd_risque(ctx):
     uid = ctx.author.id
@@ -3216,52 +3316,91 @@ async def cmd_give(ctx, member: discord.Member, amount: str):
     await ctx.send(embed=embed)
 
 
+ROULETTE_HELP = (
+    "Options : `rouge` `noir` `pair` `impair` `manque` `passe` `1-12` `13-24` `25-36` "
+    "`voisins` `tiers` `orphelins` ou un numéro (0–36)."
+)
+
 @bot.hybrid_command(name="roulette", aliases=["rou"])
-async def cmd_roulette(ctx, mise: str, *, choix: str):
-    choix = choix.lower().strip()
-    mise, err = _resolve_mise(mise, ctx.author.id, 'roulette')
-    if err: return await ctx.send(err)
+async def cmd_roulette(ctx, *, args: str):
+    tokens = args.split()
+    if len(tokens) < 2 or len(tokens) % 2 != 0:
+        await ctx.send(
+            "❌ Format : `!roulette <mise> <choix>`, ou plusieurs paris sur le même spin : "
+            "`!roulette 100 rouge 50 17 30 voisins`.\n" + ROULETTE_HELP
+        )
+        return
+
+    pairs = [(tokens[i], tokens[i + 1].lower()) for i in range(0, len(tokens), 2)]
+
+    # Valide tous les choix avant de toucher au solde
+    parsed = []
+    for mise_raw, choix in pairs:
+        desc = _roulette_parse_choix(choix)
+        if desc is None:
+            await ctx.send(f"❌ Pari invalide : `{choix}`.\n" + ROULETTE_HELP)
+            return
+        parsed.append((mise_raw, desc))
+
+    paris = []  # (mise:int, label:str, mult_base:float, check_fn)
+    if len(parsed) == 1:
+        mise_raw, (label, mult_base, check_fn) = parsed[0]
+        mise, err = _resolve_mise(mise_raw, ctx.author.id, 'roulette')
+        if err: return await ctx.send(err)
+        paris.append((mise, label, mult_base, check_fn))
+    else:
+        total = 0
+        for mise_raw, (label, mult_base, check_fn) in parsed:
+            if mise_raw.lower() in ('all', 'tout'):
+                await ctx.send("❌ `all`/`tout` n'est utilisable que pour un pari unique.")
+                return
+            try:
+                mise = int(mise_raw)
+            except ValueError:
+                await ctx.send(f"❌ Mise invalide : `{mise_raw}`.")
+                return
+            if mise <= 0:
+                await ctx.send("❌ Chaque mise doit être supérieure à 0.")
+                return
+            err = _check_bet_limits('roulette', mise)
+            if err:
+                await ctx.send(err)
+                return
+            total += mise
+            paris.append((mise, label, mult_base, check_fn))
+        if coins[ctx.author.id] < total:
+            await ctx.send(f"❌ Pas assez de coins. Solde : **{coins[ctx.author.id]:,} coins** (total misé : {total:,}).")
+            return
 
     numero    = random.randint(0, 36)
     is_red    = numero in ROULETTE_RED
-    is_black  = numero != 0 and not is_red
     col_emoji = '🔴' if is_red else ('🟢' if numero == 0 else '⚫')
 
-    mult = 0; bet_desc = ""
-    if   choix in ('rouge','red'):     bet_desc = "Rouge 🔴";              mult = 2 if is_red   else 0
-    elif choix in ('noir','black'):    bet_desc = "Noir ⚫";               mult = 2 if is_black else 0
-    elif choix in ('pair','even'):     bet_desc = "Pair";                  mult = 2 if (numero != 0 and numero % 2 == 0) else 0
-    elif choix in ('impair','odd'):    bet_desc = "Impair";                mult = 2 if numero % 2 == 1 else 0
-    elif choix in ('manque','1-18'):   bet_desc = "Manque (1–18)";         mult = 2 if 1  <= numero <= 18 else 0
-    elif choix in ('passe','19-36'):   bet_desc = "Passe (19–36)";         mult = 2 if 19 <= numero <= 36 else 0
-    elif choix in ('1-12','1ere','1ère'):  bet_desc = "1ère douzaine";     mult = 3 if 1  <= numero <= 12 else 0
-    elif choix in ('13-24','2eme','2ème'): bet_desc = "2ème douzaine";     mult = 3 if 13 <= numero <= 24 else 0
-    elif choix in ('25-36','3eme','3ème'): bet_desc = "3ème douzaine";     mult = 3 if 25 <= numero <= 36 else 0
-    else:
-        try:
-            t = int(choix)
-            if 0 <= t <= 36: bet_desc = f"Numéro {t}"; mult = 36 if numero == t else 0
-            else: await ctx.send("❌ Numéro invalide (0–36)."); return
-        except ValueError:
-            await ctx.send(
-                "❌ Pari invalide.\n"
-                "Options : `rouge` `noir` `pair` `impair` `manque` `passe` `1-12` `13-24` `25-36` ou un numéro (0–36)."
-            ); return
+    total_mise = sum(m for m, _, _, _ in paris)
+    coins[ctx.author.id] -= total_mise
 
-    coins[ctx.author.id] -= mise
-    if mult > 0:
-        gain = mise * mult; coins[ctx.author.id] += gain
-        net = gain - mise; result_text = f"🎉 **Gagné !** +{net:,} coins"; color = 0x2ecc71
-    else:
-        result_text = f"😢 **Perdu !** -{mise:,} coins"; color = 0xe74c3c
+    lines = []
+    total_gain = 0
+    for mise, label, mult_base, check_fn in paris:
+        if check_fn(numero):
+            gain = int(round(mise * mult_base))
+            total_gain += gain
+            lines.append(f"✅ {label} ({mise:,}) → **+{gain:,}**")
+        else:
+            lines.append(f"❌ {label} ({mise:,}) → perdu")
+
+    coins[ctx.author.id] += total_gain
+    net = total_gain - total_mise
     save_data()
 
+    color = 0x2ecc71 if net >= 0 else 0xe74c3c
+    net_text = f"+{net:,} coins" if net >= 0 else f"{net:,} coins"
     embed = discord.Embed(title="🎡 Roulette", color=color)
-    embed.add_field(name="🎯 Numéro sorti", value=f"{col_emoji} **{numero}**", inline=True)
-    embed.add_field(name="🎲 Votre pari",   value=bet_desc,                   inline=True)
-    embed.add_field(name="📊 Résultat",      value=result_text,                inline=False)
-    embed.add_field(name="💰 Solde",         value=f"{coins[ctx.author.id]:,} coins", inline=True)
-    embed.set_footer(text="Rouge/Noir/Pair/Impair = ×2 | Douzaine = ×3 | Numéro plein = ×36")
+    embed.add_field(name="🎯 Numéro sorti",  value=f"{col_emoji} **{numero}**", inline=True)
+    embed.add_field(name="💰 Solde",          value=f"{coins[ctx.author.id]:,} coins", inline=True)
+    embed.add_field(name="🎲 Paris",          value="\n".join(lines), inline=False)
+    embed.add_field(name="📊 Résultat net",   value=net_text, inline=False)
+    embed.set_footer(text="Rouge/Noir/Pair/Impair = ×2 | Douzaine = ×3 | Numéro plein = ×36 | Voisins ≈×2.1 | Tiers ×3 | Orphelins ×4.5")
     await ctx.send(embed=embed)
 
 
@@ -10246,6 +10385,225 @@ async def cmd_classement_trophees_famille(ctx):
     await ctx.send(embed=view.build_embed(), view=view)
 
 
+async def _bs_evolution_current_entries():
+    """Calcule l'évolution en direct depuis le début de la saison Brawl Stars en cours
+    (bs_season_start_date, borne posée par check_bs_season au 1er jeudi 10h heure de Paris)."""
+    start_date = bs_season_start_date or datetime.now(BS_SEASON_TZ).strftime('%Y-%m-%d')
+    all_members, errors = [], []
+    for club in bs_family_clubs:
+        data, err = await _bs_fetch_club(club['tag'])
+        if err:
+            errors.append(f"`#{club['tag']}` : {err}")
+            continue
+        for m in data['members']:
+            if not m['tag']:
+                continue
+            hist_entry = bs_trophy_history.get(m['tag'])
+            if not hist_entry or not hist_entry['history']:
+                continue  # pas encore de snapshot pour ce membre
+            season_hist = [h for h in hist_entry['history'] if h['date'] >= start_date]
+            if not season_hist:
+                continue  # membre connu mais aucun point depuis le début de la saison en cours
+            baseline = season_hist[0]
+            delta = m['trophies'] - baseline['trophies']
+            joined_note = None
+            if baseline['date'] != start_date:
+                d = baseline['date']
+                joined_note = f"depuis le {d[8:10]}/{d[5:7]}"
+            all_members.append({'name': m['name'], 'club': data['name'], 'delta': delta, 'joined_note': joined_note})
+
+    all_members.sort(key=lambda m: m['delta'], reverse=True)
+    clubs = list(dict.fromkeys(m['club'] for m in all_members))
+    note = "Depuis le début de la saison Brawl Stars en cours"
+    if errors:
+        note += f" · {len(errors)} clan(s) injoignable(s)"
+    return all_members, clubs, note
+
+
+def _bs_evolution_archived_entries(month: str):
+    """Relit une saison de push archivée (aucun appel API, juste bs_trophy_evolution_history)."""
+    archived = bs_trophy_evolution_history.get(month, {})
+    entries = [
+        {'name': v['name'], 'club': v['club'], 'delta': v['delta'], 'joined_note': None}
+        for v in archived.values()
+    ]
+    entries.sort(key=lambda e: e['delta'], reverse=True)
+    clubs = list(dict.fromkeys(e['club'] for e in entries))
+    note = f"Saison archivée : {_r1v1_month_label(month)}"
+    return entries, clubs, note
+
+
+class BsEvolutionView(discord.ui.View):
+    """Évolution des trophées : sélecteur de saison (actuelle en direct ou archivée) + filtre
+    par clan + pagination. Même esprit que BsFamilyLeaderboardView (podium/pagination/clan) et
+    RankedLeaderboardView (sélecteur de saisons passées), combinés pour ce cas précis."""
+    PAGE_SIZE = 30
+
+    def __init__(self, entries, clubs, month, note, club_filter=None, page=0):
+        super().__init__(timeout=300)
+        self.entries = entries
+        self.clubs = clubs
+        self.month = month  # None = saison en cours
+        self.note = note
+        self.club_filter = club_filter
+
+        self.filtered = [e for e in entries if club_filter is None or e['club'] == club_filter]
+        self.total_pages = max(1, (len(self.filtered) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        self.page = max(0, min(page, self.total_pages - 1))
+
+        past_seasons = sorted(bs_trophy_evolution_history.keys(), reverse=True)
+        if past_seasons:
+            season_options = [discord.SelectOption(label="📅 Saison actuelle", value="__current__", default=(month is None))]
+            for m in past_seasons[:24]:
+                season_options.append(discord.SelectOption(label=_r1v1_month_label(m)[:100], value=m, default=(m == month)))
+            self.season_select = discord.ui.Select(placeholder="📅 Choisir une saison…", options=season_options)
+            self.season_select.callback = self._on_season
+            self.add_item(self.season_select)
+
+        if len(clubs) > 1:
+            club_options = [discord.SelectOption(label="🌐 Tous les clans", value="__all__", default=(club_filter is None))]
+            for c in clubs[:24]:
+                club_options.append(discord.SelectOption(label=c[:100], value=c, default=(c == club_filter)))
+            self.club_select = discord.ui.Select(placeholder="Filtrer par clan…", options=club_options, row=1)
+            self.club_select.callback = self._on_club
+            self.add_item(self.club_select)
+
+        if self.page > 0:
+            prev_btn = discord.ui.Button(label="◀ Précédent", style=discord.ButtonStyle.secondary, row=2)
+            prev_btn.callback = self._prev
+            self.add_item(prev_btn)
+        if self.page < self.total_pages - 1:
+            next_btn = discord.ui.Button(label="Suivant ▶", style=discord.ButtonStyle.secondary, row=2)
+            next_btn.callback = self._next
+            self.add_item(next_btn)
+
+    def build_embed(self) -> discord.Embed:
+        month_label = "Saison actuelle" if self.month is None else _r1v1_month_label(self.month)
+        embed = discord.Embed(title=f"📈 Évolution des Trophées — {month_label}", color=0x3498db)
+        start = self.page * self.PAGE_SIZE
+        page_entries = self.filtered[start:start + self.PAGE_SIZE]
+
+        if self.page == 0:
+            medals = ['🥇', '🥈', '🥉']
+            for i, e in enumerate(self.filtered[:3]):
+                value_line = f"**{e['delta']:+,} 🏆**"
+                if e.get('joined_note'):
+                    value_line = f"{e['joined_note']}\n{value_line}"
+                embed.add_field(name=f"{medals[i]} {e['name']}", value=f"{value_line}\n*{e['club']}*", inline=True)
+            rest, rank_offset = page_entries[3:], 4
+        else:
+            rest, rank_offset = page_entries, start + 1
+
+        if rest:
+            lines = []
+            for i, e in enumerate(rest):
+                rank = rank_offset + i
+                extra = f"{e['joined_note']} · " if e.get('joined_note') else ""
+                lines.append(f"**{rank}.** {e['name']} — {extra}{e['delta']:+,} 🏆 *({e['club']})*")
+            for i in range(0, len(lines), 10):
+                embed.add_field(name=chr(8203), value="\n".join(lines[i:i + 10]), inline=False)
+        elif not self.filtered:
+            embed.description = "Aucune donnée pour cette période."
+
+        club_txt = self.club_filter or "tous les clans"
+        club_total = sum(e['delta'] for e in self.filtered)
+        footer = f"{len(self.filtered)} membre(s) ({club_txt}) · Total {club_total:+,} 🏆 · Page {self.page + 1}/{self.total_pages}"
+        if self.note:
+            footer += f" · {self.note}"
+        embed.set_footer(text=footer)
+        return embed
+
+    async def _on_season(self, interaction: discord.Interaction):
+        value = self.season_select.values[0]
+        if value == "__current__":
+            await interaction.response.defer()
+            entries, clubs, note = await _bs_evolution_current_entries()
+            view = BsEvolutionView(entries, clubs, None, note, club_filter=self.club_filter, page=0)
+            await interaction.edit_original_response(embed=view.build_embed(), view=view)
+        else:
+            entries, clubs, note = _bs_evolution_archived_entries(value)
+            view = BsEvolutionView(entries, clubs, value, note, club_filter=self.club_filter, page=0)
+            await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    async def _on_club(self, interaction: discord.Interaction):
+        value = self.club_select.values[0]
+        view = BsEvolutionView(self.entries, self.clubs, self.month, self.note,
+                                club_filter=None if value == "__all__" else value, page=0)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    async def _prev(self, interaction: discord.Interaction):
+        view = BsEvolutionView(self.entries, self.clubs, self.month, self.note, self.club_filter, self.page - 1)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    async def _next(self, interaction: discord.Interaction):
+        view = BsEvolutionView(self.entries, self.clubs, self.month, self.note, self.club_filter, self.page + 1)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+
+@bot.hybrid_command(name="evolution_trophees", aliases=["evo", "evolution"])
+async def cmd_evolution_trophees(ctx):
+    if not bs_family_clubs:
+        return await ctx.send("❌ Aucun clan configuré. Utilise `!bs_famille ajouter <tag>` (Admin).")
+    if not bs_trophy_history:
+        return await ctx.send("❌ Pas encore d'historique enregistré, réessaie plus tard (le suivi vient de démarrer).")
+
+    await ctx.typing()
+    entries, clubs, note = await _bs_evolution_current_entries()
+    if not entries:
+        return await ctx.send("❌ Pas assez de données pour calculer une évolution.")
+
+    view = BsEvolutionView(entries, clubs, None, note)
+    await ctx.send(embed=view.build_embed(), view=view)
+
+
+@tasks.loop(minutes=30)
+async def check_bs_season():
+    """Détecte le début d'une nouvelle saison Brawl Stars (1er jeudi du mois, à partir de 10h
+    heure de Paris — avec rattrapage si le bot était hors ligne pendant toute la fenêtre) et
+    archive la progression de trophées de la saison qui se termine dans bs_trophy_evolution_history."""
+    await bot.wait_until_ready()
+    global bs_season_month, bs_season_start_date
+    if not bs_family_clubs:
+        return
+
+    now = datetime.now(BS_SEASON_TZ)
+    current_month = now.strftime('%Y-%m')
+    today = now.strftime('%Y-%m-%d')
+
+    if bs_season_month is None:
+        bs_season_month = current_month
+        bs_season_start_date = today
+        save_data()
+        return
+    if current_month == bs_season_month:
+        return
+
+    is_first_thursday = now.day <= 7 and now.weekday() == 3
+    if not ((is_first_thursday and now.hour >= 10) or now.day > 7):
+        return
+
+    ended_month = bs_season_month
+    start_date = bs_season_start_date or today
+    archive = {}
+    for tag, entry in bs_trophy_history.items():
+        hist = entry.get('history') or []
+        season_hist = [h for h in hist if h['date'] >= start_date]
+        if not season_hist:
+            continue
+        baseline = season_hist[0]
+        end_val = hist[-1]['trophies']
+        archive[tag] = {
+            'name': entry['name'], 'club': entry['club'],
+            'start': baseline['trophies'], 'end': end_val, 'delta': end_val - baseline['trophies'],
+        }
+    if archive:
+        bs_trophy_evolution_history[ended_month] = archive
+
+    bs_season_month = current_month
+    bs_season_start_date = today
+    save_data()
+
+
 @tasks.loop(hours=4)
 async def sync_family_ranked():
     """Rafraîchit le cache des points classés de toute la famille en arrière-plan.
@@ -10277,6 +10635,44 @@ async def sync_family_ranked():
         bs_family_ranked_cache.clear()
         bs_family_ranked_cache.update(new_cache)
         bs_family_ranked_updated_at = datetime.now().strftime('%d/%m %H:%M')
+        save_data()
+
+
+BS_HISTORY_RETENTION_DAYS = 90
+
+@tasks.loop(hours=24)
+async def sync_trophy_history():
+    """Enregistre un instantané quotidien des trophées de tous les membres de la famille de clans
+    (par tag Brawl Stars, pas besoin de !bslink) pour alimenter !evolution_trophees.
+    Réutilise _bs_fetch_club (déjà appelé par sync_family_ranked) : aucun coût API supplémentaire notable."""
+    if not bs_family_clubs:
+        return
+
+    today = datetime.now().strftime('%Y-%m-%d')
+    cutoff = (datetime.now() - timedelta(days=BS_HISTORY_RETENTION_DAYS)).strftime('%Y-%m-%d')
+    changed = False
+    for club in bs_family_clubs:
+        data, err = await _bs_fetch_club(club['tag'])
+        if err:
+            continue
+        for m in data['members']:
+            if not m['tag']:
+                continue
+            entry = bs_trophy_history.setdefault(
+                m['tag'], {'name': m['name'], 'club': data['name'], 'first_seen': today, 'history': []}
+            )
+            entry['name'] = m['name']
+            entry['club'] = data['name']
+            hist = entry['history']
+            if hist and hist[-1]['date'] == today:
+                hist[-1]['trophies'] = m['trophies']  # déjà un snapshot aujourd'hui (redémarrage bot) : on le met à jour
+            else:
+                hist.append({'date': today, 'trophies': m['trophies']})
+                changed = True
+            entry['history'] = [h for h in hist if h['date'] >= cutoff]
+        await asyncio.sleep(0.3)
+
+    if changed:
         save_data()
 
 
@@ -11181,6 +11577,16 @@ async def _confirm_action(ctx, warning: str) -> bool:
     return True
 
 
+def _reset_casino_state():
+    """Remet à zéro coins/coffres/usines/commerces/métiers pour tout le monde.
+    Ne sauvegarde pas — à l'appelant de save_data() une fois toutes les mises à jour faites."""
+    coins.clear()
+    safes.clear()
+    factories.clear()
+    businesses.clear()
+    jobs_data.clear()
+
+
 @bot.command(name="reset_casino")
 async def cmd_reset_casino(ctx):
     """Reset manuel de la saison casino : coins, coffres, usines, commerces et métiers repartent
@@ -11194,17 +11600,32 @@ async def cmd_reset_casino(ctx):
     ):
         return
 
-    coins.clear()
-    safes.clear()
-    factories.clear()
-    businesses.clear()
-    jobs_data.clear()
+    _reset_casino_state()
     save_data()
     await ctx.send(
         f"✅ **Casino réinitialisé !** ({nb} joueur(s) concernés)\n"
         f"Coins, coffres, usines, commerces et métiers repartent à zéro pour tout le monde.\n"
         f"Les items achetés (boutique) et l'inventaire sont conservés."
     )
+
+
+@tasks.loop(hours=6)
+async def check_casino_season():
+    """Reset automatique et silencieux du casino au changement de mois calendaire —
+    même logique que check_ranked_season (duels), indépendant des saisons Brawl Stars."""
+    await bot.wait_until_ready()
+    global casino_season_month
+    current_month = datetime.now().strftime('%Y-%m')
+    if casino_season_month is None:
+        casino_season_month = current_month
+        save_data()
+        return
+    if current_month == casino_season_month:
+        return
+
+    _reset_casino_state()
+    casino_season_month = current_month
+    save_data()
 
 
 @bot.command(name="reset_duels")
