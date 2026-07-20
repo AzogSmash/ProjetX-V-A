@@ -461,6 +461,15 @@ def _r1v1_leaderboard_entries(guild, month=None):
 
 # ── Configuration prix / mises (modifiable par !prix_casino) ─────────────
 BOT_OWNER_IDS = {1056848438270115900, 550678866839207937}   # happy_gt3 & Clément — créateurs du bot
+PROTECTED_FROM_PUNISH_ID = 550678866839207937  # Azog — immunisé aux commandes de modération négatives (warn/mute/ban/silence/punition/morse)
+
+async def _check_protected_target(ctx, member: discord.Member) -> bool:
+    """Bloque une commande de modération négative visant PROTECTED_FROM_PUNISH_ID.
+    Retourne True si la commande doit s'arrêter là."""
+    if member and member.id == PROTECTED_FROM_PUNISH_ID:
+        await ctx.send("😤 Tu veux punir le **GOAT Azog** mais t'es fada toi ?")
+        return True
+    return False
 MAX_FACTORY_WORKERS = 10
 DEFAULT_FACTORY_COSTS = [500, 1000, 2000, 5000, 7500, 10000, 15000, 25000, 55000, 100000]
 FACTORY_HIRE_COOLDOWN_HOURS = 24
@@ -1752,6 +1761,8 @@ async def rename(ctx, member: discord.Member, *, new_nickname: str):
 @bot.command()
 @commands.has_permissions(manage_messages=True)
 async def silence(ctx, member: discord.Member):
+    if await _check_protected_target(ctx, member):
+        return
     guild_id = ctx.guild.id
     if guild_id not in silenced_users:
         silenced_users[guild_id] = []
@@ -1983,6 +1994,8 @@ async def dmall(ctx, *, message):
 @bot.command()
 @commands.has_permissions(manage_messages=True)
 async def warn(ctx, member: discord.Member, *, reason: str = "Aucune raison spécifiée"):
+    if await _check_protected_target(ctx, member):
+        return
     guild_id = ctx.guild.id
     user_id = member.id
 
@@ -2488,6 +2501,8 @@ async def construction(ctx):
 @bot.command()
 @commands.has_permissions(manage_messages=True)
 async def mute(ctx, member: discord.Member, duration: str = None, *, reason: str = "Aucune raison spécifiée"):
+    if await _check_protected_target(ctx, member):
+        return
     guild = ctx.guild
     mute_role = discord.utils.get(guild.roles, name="Muted")
 
@@ -2627,6 +2642,8 @@ async def unmute(ctx, member: discord.Member):
 @bot.command()
 @commands.has_permissions(ban_members=True)
 async def ban(ctx, member: discord.Member, *, reason=None):
+    if await _check_protected_target(ctx, member):
+        return
     if member.id == ctx.author.id:
         await ctx.send("❌ Vous ne pouvez pas vous bannir vous-même.")
         return
@@ -8486,6 +8503,8 @@ async def cmd_tournoi_ajouter(ctx, membre: discord.Member, *, team_name: str = N
 
 @bot.command(name="punition", aliases=["pun", "punir"])
 async def cmd_punition(ctx, nombre: int, membre: discord.Member):
+    if await _check_protected_target(ctx, membre):
+        return
     if nombre <= 0:
         return await ctx.send("❌ Le nombre doit être supérieur à 0.")
     
@@ -8719,8 +8738,10 @@ morse_punitions = {}
 
 @bot.command(name="morse")
 async def cmd_morse(ctx, membre: discord.Member):
+    if await _check_protected_target(ctx, membre):
+        return
     guild = ctx.guild
-    
+
     if str(membre.id) in morse_punitions:
         return await ctx.send(f"❌ {membre.mention} est déjà en punition morse !")
     
