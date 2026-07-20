@@ -614,6 +614,34 @@ def _dev_ping_pick_lines(content: str) -> list:
     return DEV_PING_LINES
 
 
+RUSH_USER_ID = 602807768046632971  # seul autorisé à taper !rush — se retourne contre lui
+
+@bot.hybrid_command(name="rush")
+async def cmd_rush(ctx):
+    if ctx.author.id != RUSH_USER_ID:
+        return await ctx.send("❌ Cette commande est réservée à Rush (et rien qu'à lui, désolé).")
+    embed = discord.Embed(
+        title="📜 Biographie officielle de Rush",
+        description=(
+            "**Naissance :** un soir de pluie, dans une poubelle derrière un kebab fermé "
+            "pour cause d'hygiène douteuse — la boucle était bouclée avant même de commencer.\n\n"
+            "**Odeur caractéristique :** un savant mélange de fromage oublié, de chaussettes "
+            "de sport et de désespoir ambiant.\n\n"
+            "**Domicile :** un carton légèrement humide, noté 1 étoile sur Booking "
+            "*(\"au moins ça pue moins que lui\" — un voisin anonyme)*.\n\n"
+            "**Régime alimentaire :** kebabs périmés récupérés à la fermeture, eau de flaque "
+            "artisanale filtrée maison.\n\n"
+            "**Palmarès :** champion incontesté et non-disputé du « j'ai encore oublié de me "
+            "doucher cette semaine ».\n\n"
+            "**Dernières paroles célèbres :** *\"Je vais tellement saucer avec cette commande\"* "
+            "— quelques secondes avant de lire ceci."
+        ),
+        color=0x6b4226
+    )
+    embed.set_footer(text="Merci d'avoir tapé !rush, Rush. Vraiment. Merci.")
+    await ctx.send(embed=embed)
+
+
 async def _maybe_dev_ping_reaction(message):
     """Réaction surprise (30%, cooldown 10 min) quand le rôle Technicien est mentionné —
     banque positive ou négative choisie selon le ton du message."""
