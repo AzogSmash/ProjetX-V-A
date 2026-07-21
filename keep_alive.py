@@ -130,6 +130,44 @@ def api_member(discord_id):
     return jsonify({"role_ids": member["role_ids"], "is_admin": member["is_admin"]})
 
 
+@app.route("/api/staff/panel")
+@_require_internal_secret
+def api_staff_panel():
+    """Panel staff : arrivées récentes (guild.members, en direct — pas besoin
+    de le stocker), avertissements et signalements ranked (encore en mémoire
+    côté bot, pas migrés vers Supabase — voir warns/ranked_reports)."""
+    main = _bot()
+    guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    recent_members = []
+    if guild:
+        dated = [
+            {"name": m.name, "joined_at": m.joined_at.isoformat()}
+            for m in guild.members if not m.bot and m.joined_at
+        ]
+        recent_members = sorted(dated, key=lambda m: m["joined_at"], reverse=True)[:15]
+
+    warns_flat = [
+        {"user_id": str(uid), **w}
+        for users in main.warns.values()
+        for uid, entries in users.items()
+        for w in entries
+    ]
+    warns_flat.sort(key=lambda w: w.get("timestamp") or "", reverse=True)
+
+    reports_flat = [
+        {"target": target, **r}
+        for target, entries in main.ranked_reports.items()
+        for r in entries
+    ]
+    reports_flat.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+
+    return jsonify({
+        "recent_members": recent_members,
+        "warns": warns_flat[:20],
+        "reports": reports_flat[:20],
+    })
+
+
 def run():
     try:
         app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
