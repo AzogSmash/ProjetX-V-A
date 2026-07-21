@@ -876,6 +876,7 @@ def load_data():
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
     global ranked_1v1_history, ranked_season_month, slash_global_purged, casino_season_month
+    global punitions, morse_punitions
     load_path = _resolve_data_path()
     if os.path.exists(load_path):
         with open(load_path, 'r', encoding='utf-8-sig') as f:
@@ -982,6 +983,12 @@ def load_data():
                         if isinstance(_wallet[_sym], dict):
                             _wallet[_sym] = [_wallet[_sym]]
                 ADMIN_LOG_CHANNEL_ID = data.get('admin_log_channel_id', 0)
+                # punitions/morse_punitions : voir incident du 21/07/2026, un redémarrage en
+                # pleine punition laissait le membre bloqué dans tous les salons (les
+                # restrictions Discord survivent au redémarrage, mais plus le dict en mémoire
+                # qui permet à !annuler_punition de savoir qu'il faut les lever).
+                punitions       = data.get('punitions', {})
+                morse_punitions = data.get('morse_punitions', {})
                 ranked_1v1        = data.get('ranked_1v1', {})
                 ranked_challenges = data.get('ranked_challenges', {})
                 ranked_pending    = data.get('ranked_pending', {})
@@ -1154,6 +1161,8 @@ def save_data(force: bool = False):
     data_to_save['crypto_hold_since']     = crypto_hold_since
     data_to_save['cold_wallets']         = cold_wallets
     data_to_save['admin_log_channel_id'] = ADMIN_LOG_CHANNEL_ID
+    data_to_save['punitions']       = punitions
+    data_to_save['morse_punitions'] = morse_punitions
     data_to_save['ranked_1v1']        = ranked_1v1
     data_to_save['ranked_challenges'] = ranked_challenges
     data_to_save['ranked_pending']    = ranked_pending
@@ -8891,7 +8900,8 @@ async def cmd_punition(ctx, nombre: int, membre: discord.Member):
         'actuel': 0,
         'guild_id': guild.id
     }
-    
+    save_data()
+
     await salon.send(
         f"🔒 {membre.mention} tu es en **punition** !\n"
         f"Tu dois compter de **1** jusqu'à **{nombre}** sans faire de faute.\n"
@@ -8970,7 +8980,8 @@ async def _liberer_membre(guild, membre):
             pass
     
     del punitions[uid]
-    
+    save_data()
+
     try:
         await membre.send(f"✅ Ta punition sur **{guild.name}** est terminée, tu as retrouvé accès aux salons !")
     except:
@@ -9119,7 +9130,8 @@ async def cmd_morse(ctx, membre: discord.Member):
         'morse': morse,
         'attempts': 0
     }
-    
+    save_data()
+
     buf = _morse_to_image(morse, word)
     await salon.send(
         f"🔒 {membre.mention} tu es en **punition morse** !\n"
@@ -9154,6 +9166,7 @@ async def _liberer_membre_morse(guild, membre):
         except:
             pass
     del morse_punitions[uid]
+    save_data()
     try:
         await membre.send(f"✅ Ta punition morse sur **{guild.name}** est terminée !")
     except:
