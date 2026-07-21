@@ -467,13 +467,34 @@ def _r1v1_leaderboard_entries(guild, month=None):
 
 # ── Configuration prix / mises (modifiable par !prix_casino) ─────────────
 BOT_OWNER_IDS = {1056848438270115900, 550678866839207937}   # happy_gt3 & Clément — créateurs du bot
-PROTECTED_FROM_PUNISH_ID = 550678866839207937  # Azog — immunisé aux commandes de modération négatives (warn/mute/ban/silence/punition/morse)
+PROTECTED_FROM_PUNISH_ID = 550678866839207937  # Azog — utilisé par les réactions cosmétiques (ping/jeux) et !rush
+
+# Immunisés aux commandes de modération négatives (warn/mute/ban/silence/punition/morse) : Azog + Vynaro (happy_gt3)
+MOD_IMMUNE_IDS = {550678866839207937, 1056848438270115900}
+
+PROTECTED_REJECT_LINES = [
+    "😤 Tu veux punir {target} ? Mais t'es fada toi.",
+    "❌ Niet. {target} est increvable ici.",
+    "🚫 {target} est intouchable, retente ta chance sur quelqu'un d'autre.",
+    "😂 Punir {target} ? Dans tes rêves.",
+    "👑 On ne touche pas à la royauté ({target}).",
+    "🛡️ {target} a une immunité divine, désolé pour toi.",
+    "💀 Tu vas t'attirer des ennuis en t'attaquant à {target}.",
+    "🐐 {target} est au-dessus de ces lois, circule.",
+    "🙅 Sanction refusée : {target} est protégé par décret royal.",
+    "😤 T'as cru quoi là, sanctionner {target} ? Non non non.",
+    "🚨 Alerte : tentative de punition sur {target} détectée et bloquée.",
+    "👀 {target} te regarde essayer de le punir, ça ne marchera pas.",
+    "🔒 Accès refusé — {target} est verrouillé contre toute sanction.",
+    "😎 {target} esquive encore une fois, comme toujours.",
+    "🐐 Le GOAT {target} ne se laisse pas faire.",
+]
 
 async def _check_protected_target(ctx, member: discord.Member) -> bool:
-    """Bloque une commande de modération négative visant PROTECTED_FROM_PUNISH_ID.
+    """Bloque une commande de modération négative visant un membre de MOD_IMMUNE_IDS.
     Retourne True si la commande doit s'arrêter là."""
-    if member and member.id == PROTECTED_FROM_PUNISH_ID:
-        await ctx.send("😤 Tu veux punir le **GOAT Azog** mais t'es fada toi ?")
+    if member and member.id in MOD_IMMUNE_IDS:
+        await ctx.send(random.choice(PROTECTED_REJECT_LINES).format(target=member.mention))
         return True
     return False
 
@@ -3764,8 +3785,11 @@ class BlackjackView(discord.ui.View):
     def _sync_buttons(self):
         game = self.game
         h = game.current_hand()
-        self.double_btn.disabled = len(h['cards']) != 2 or coins[self.author_id] < h['bet']
-        self.split_btn.disabled = not game.can_split() or coins[self.author_id] < h['bet']
+        # Ne pas se baser sur le solde ici : il peut changer entre-temps (ex. retrait du coffre
+        # après un `!bj all`), et ce bouton ne serait alors plus jamais réactivé. Le solde est
+        # revérifié à jour au moment du clic dans double_btn/split_btn ci-dessous.
+        self.double_btn.disabled = len(h['cards']) != 2
+        self.split_btn.disabled = not game.can_split()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
