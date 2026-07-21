@@ -1,6 +1,7 @@
 from flask import Flask, jsonify
 from threading import Thread
 import logging
+import sys
 
 app = Flask("")
 
@@ -21,20 +22,28 @@ def health():
 
 # ── API famille Brawl Stars ──
 # Lecture seule des dicts déjà en mémoire dans main.py (alimentés par les
-# tâches de fond du bot). Import différé pour éviter tout souci d'import
-# circulaire (main.py importe ce module au chargement) et parce que ces
-# routes ne sont de toute façon appelées qu'une fois le bot démarré.
+# tâches de fond du bot). main.py est lancé en `python main.py`, donc il vit
+# dans sys.modules sous le nom "__main__" — PAS "main". Un `import main`
+# ici déclencherait un tout nouvel import (main.py n'a jamais été chargé
+# sous ce nom), qui ré-exécute tout le fichier depuis une autre thread
+# jusqu'à un second bot.run(token) qui bloque indéfiniment — deadlock,
+# et pire, une deuxième connexion Discord. On récupère donc directement
+# le module déjà en cours d'exécution via sys.modules.
 # Voir SITE_FAMILLE_BS_CONTEXT.md pour le détail des structures.
+
+def _bot():
+    return sys.modules["__main__"]
+
 
 @app.route("/api/famille/clans")
 def api_famille_clans():
-    import main
+    main = _bot()
     return jsonify(main.bs_family_clubs)
 
 
 @app.route("/api/famille/trophees")
 def api_famille_trophees():
-    import main
+    main = _bot()
     players = []
     for tag, data in main.bs_trophy_history.items():
         history = data.get("history") or []
@@ -54,7 +63,7 @@ def api_famille_trophees():
 
 @app.route("/api/famille/ranked")
 def api_famille_ranked():
-    import main
+    main = _bot()
     return jsonify({
         "players": main.bs_family_ranked_cache,
         "updated_at": main.bs_family_ranked_updated_at,
@@ -63,7 +72,7 @@ def api_famille_ranked():
 
 @app.route("/api/famille/evolution")
 def api_famille_evolution():
-    import main
+    main = _bot()
     start_date = main.bs_season_start_date
     players = []
     for tag, data in main.bs_trophy_history.items():
@@ -92,7 +101,7 @@ def api_famille_evolution():
 
 @app.route("/api/famille/evolution/<mois>")
 def api_famille_evolution_mois(mois):
-    import main
+    main = _bot()
     data = main.bs_trophy_evolution_history.get(mois)
     if data is None:
         return {"error": "saison introuvable"}, 404
@@ -101,7 +110,7 @@ def api_famille_evolution_mois(mois):
 
 @app.route("/api/famille/saisons")
 def api_famille_saisons():
-    import main
+    main = _bot()
     return jsonify(sorted(main.bs_trophy_evolution_history.keys()))
 
 
