@@ -114,6 +114,16 @@ def api_famille_saisons():
     return jsonify(sorted(main.bs_trophy_evolution_history.keys()))
 
 
+@app.route("/api/famille/clan/<tag>")
+def api_famille_clan_detail(tag):
+    main = _bot()
+    clean = tag.strip().lstrip("#").upper()
+    data = main.bs_family_club_details.get(clean)
+    if data is None:
+        return {"error": "club introuvable ou pas encore synchronisé"}, 404
+    return jsonify(data)
+
+
 def run():
     try:
         app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)

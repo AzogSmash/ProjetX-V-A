@@ -302,6 +302,11 @@ bs_family_clubs         = []   # [{'tag','name','slug','alias'}, ...] — slug/a
 bs_family_ranked_cache  = {}   # str(tag_joueur) -> {'name','club','ranked_pts','ranked_tier'}
 bs_family_ranked_updated_at = None  # str affichable, ex '02/07 21:40'
 bs_trophy_history = {}  # str(tag_joueur) -> {'name','club','first_seen':'YYYY-MM-DD','history':[{'date','trophies'}, ...]}
+# str(tag_clan) -> {'name','description','type','requiredTrophies','trophies','members':[{tag,name,trophies,role}]}
+# — volontairement PAS persisté dans data.json : entièrement reconstruit depuis l'API
+# officielle à chaque sync_trophy_history (toutes les heures), donc une valeur périmée
+# après un redémarrage n'a aucun intérêt à être gardée sur disque.
+bs_family_club_details = {}
 ADMIN_LOG_CHANNEL_ID = 0  # à configurer via !set_admin_log <channel_id>
 draft_sessions       = {}   # channel_id -> session dict (phase de ban Brawl Stars)
 theft_stats           = {}   # str(uid_victim) -> {'attempts': int, 'success': int}
@@ -10110,6 +10115,7 @@ async def _bs_fetch_club(tag: str):
             'tag': (m.get('tag') or '').lstrip('#').upper(),
             'name': _bs_strip_markup(m.get('name')) or '?',
             'trophies': m.get('trophies', 0),
+            'role': m.get('role', 'member'),
         }
         for m in club.get('members', [])
     ]
@@ -10117,6 +10123,9 @@ async def _bs_fetch_club(tag: str):
         'tag': club.get('tag', f"#{clean}"),
         'name': _bs_strip_markup(club.get('name')) or '?',
         'trophies': club.get('trophies', 0),
+        'description': club.get('description', ''),
+        'type': club.get('type', 'open'),
+        'requiredTrophies': club.get('requiredTrophies', 0),
         'members': members,
     }, None
 
@@ -10891,6 +10900,19 @@ async def sync_trophy_history():
         data, err = await _bs_fetch_club(club['tag'])
         if err:
             continue
+
+        bs_family_club_details[club['tag']] = {
+            'name': data['name'],
+            'description': data.get('description', ''),
+            'type': data.get('type', 'open'),
+            'requiredTrophies': data.get('requiredTrophies', 0),
+            'trophies': data['trophies'],
+            'members': [
+                {'tag': m['tag'], 'name': m['name'], 'trophies': m['trophies'], 'role': m.get('role', 'member')}
+                for m in data['members'] if m['tag']
+            ],
+        }
+
         for m in data['members']:
             if not m['tag']:
                 continue
