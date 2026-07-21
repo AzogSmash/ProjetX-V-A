@@ -620,25 +620,22 @@ def _dev_ping_pick_lines(content: str) -> list:
     return DEV_PING_LINES
 
 
-RUSH_USER_ID = 602807768046632971  # seul autorisé à taper !rush — se retourne contre lui
+RUSH_USER_ID = 602807768046632971  # se retourne contre lui — aussi autorisé : créateurs du bot + Azog
 
 @bot.hybrid_command(name="rush")
 async def cmd_rush(ctx):
-    if ctx.author.id != RUSH_USER_ID:
+    if ctx.author.id != RUSH_USER_ID and not is_bot_owner(ctx.author) and ctx.author.id != PROTECTED_FROM_PUNISH_ID:
         return await ctx.send("❌ Cette commande est réservée à Rush (et rien qu'à lui, désolé).")
     embed = discord.Embed(
         title="📜 Biographie officielle de Rush",
         description=(
-            "**Naissance :** un soir de pluie, dans une poubelle derrière un kebab fermé "
-            "pour cause d'hygiène douteuse — la boucle était bouclée avant même de commencer.\n\n"
-            "**Odeur caractéristique :** un savant mélange de fromage oublié, de chaussettes "
-            "de sport et de désespoir ambiant.\n\n"
-            "**Domicile :** un carton légèrement humide, noté 1 étoile sur Booking "
-            "*(\"au moins ça pue moins que lui\" — un voisin anonyme)*.\n\n"
-            "**Régime alimentaire :** kebabs périmés récupérés à la fermeture, eau de flaque "
-            "artisanale filtrée maison.\n\n"
-            "**Palmarès :** champion incontesté et non-disputé du « j'ai encore oublié de me "
-            "doucher cette semaine ».\n\n"
+            "**Certitude inébranlable :** persuadé d'avoir « coffré » sa meuf, pendant qu'elle "
+            "fait le tour de tout Bullcity.\n\n"
+            "**Confiance en lui :** 100/100. **Lucidité :** 0/100.\n\n"
+            "**Talent principal :** perdre en 1v1 contre à peu près tout le monde, bots inclus.\n\n"
+            "**Rang Brawl Stars :** \"en cours de calcul\" depuis trois saisons.\n\n"
+            "**Radinerie :** a déjà demandé un remboursement pour un `!give` de 1 coin.\n\n"
+            "**Palmarès :** champion incontesté et non-disputé du déni total.\n\n"
             "**Dernières paroles célèbres :** *\"Je vais tellement saucer avec cette commande\"* "
             "— quelques secondes avant de lire ceci."
         ),
