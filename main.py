@@ -10152,7 +10152,10 @@ def _bs_alias(slug: str, reserved: set) -> str:
 
 
 async def _bs_fetch_ranked_pts(session: aiohttp.ClientSession, clean_tag: str):
-    """Points classés depuis api.rnt.dev (source tierce, best-effort). Retourne (pts, tier) ou (None, None)."""
+    """Points classés (actuels ET record all-time) depuis api.rnt.dev (source tierce,
+    best-effort) — stats id 24 = CurrentRankedPoints, id 25 = HighestRankedPoints.
+    Retourne (pts, tier, highest_pts, highest_tier), chaque valeur pouvant être None
+    si indisponible individuellement."""
     try:
         async with session.get(
             f"{RNT_API_BASE}?tag={clean_tag}", timeout=aiohttp.ClientTimeout(total=10)
@@ -10161,11 +10164,14 @@ async def _bs_fetch_ranked_pts(session: aiohttp.ClientSession, clean_tag: str):
                 rnt_data = await rnt_resp.json(content_type=None)
                 stats = (rnt_data.get('result') or {}).get('stats', [])
                 val = next((s.get('value') for s in stats if s.get('id') == 24), None)
-                if val is not None:
-                    return val, _ranked_tier_name(val)
+                highest_val = next((s.get('value') for s in stats if s.get('id') == 25), None)
+                return (
+                    val, _ranked_tier_name(val) if val is not None else None,
+                    highest_val, _ranked_tier_name(highest_val) if highest_val is not None else None,
+                )
     except Exception:
         pass  # Rang classé indisponible (API tierce down) — pas bloquant pour l'appelant
-    return None, None
+    return None, None, None, None
 
 
 async def _bs_fetch_player(tag: str):
@@ -10197,7 +10203,7 @@ async def _bs_fetch_player(tag: str):
                     return None, f"❌ Erreur inattendue de l'API Brawl Stars ({resp.status})."
                 player = await resp.json(content_type=None)
 
-            ranked_pts, ranked_tier = await _bs_fetch_ranked_pts(session, clean)
+            ranked_pts, ranked_tier, highest_ranked_pts, highest_ranked_tier = await _bs_fetch_ranked_pts(session, clean)
     except Exception as e:
         logging.warning(f"[bs] erreur réseau API Brawl Stars pour tag '{clean}': {type(e).__name__}: {e}")
         return None, "🌐 Impossible de contacter l'API Brawl Stars. Réessaie plus tard."
@@ -10208,6 +10214,8 @@ async def _bs_fetch_player(tag: str):
         'trophies': player.get('trophies', 0),
         'ranked_pts': ranked_pts,
         'ranked_tier': ranked_tier,
+        'highest_ranked_pts': highest_ranked_pts,
+        'highest_ranked_tier': highest_ranked_tier,
         'club': _bs_strip_markup((player.get('club') or {}).get('name')),
     }, None
 
@@ -11034,11 +11042,12 @@ async def sync_family_ranked():
             for m in data['members']:
                 if not m['tag']:
                     continue
-                ranked_pts, ranked_tier = await _bs_fetch_ranked_pts(session, m['tag'])
+                ranked_pts, ranked_tier, highest_ranked_pts, highest_ranked_tier = await _bs_fetch_ranked_pts(session, m['tag'])
                 if ranked_pts is not None:
                     new_cache.append({
                         'tag': m['tag'], 'name': m['name'], 'club': data['name'],
                         'ranked_pts': ranked_pts, 'ranked_tier': ranked_tier,
+                        'highest_ranked_pts': highest_ranked_pts, 'highest_ranked_tier': highest_ranked_tier,
                     })
                 await asyncio.sleep(0.6)
 
