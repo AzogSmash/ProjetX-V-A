@@ -6,3 +6,4 @@ aiohttp
 Pillow
 staticmap
 flask
+supabase
