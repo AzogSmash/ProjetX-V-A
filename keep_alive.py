@@ -180,8 +180,10 @@ def api_member(discord_id):
 @_require_internal_secret
 def api_staff_panel():
     """Panel staff : arrivées récentes (guild.members, en direct — pas besoin
-    de le stocker), avertissements et signalements ranked (encore en mémoire
-    côté bot, pas migrés vers Supabase — voir warns/ranked_reports)."""
+    de le stocker), journal d'audit de modération (moderation_log — warn/mute/
+    ban/silence/punition/morse, voir _log_moderation côté bot) et signalements
+    ranked (catégorie à part, ce sont des signalements de joueurs entre eux,
+    pas des actions de modérateur)."""
     main = _bot()
     guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
     recent_members = []
@@ -192,13 +194,9 @@ def api_staff_panel():
         ]
         recent_members = sorted(dated, key=lambda m: m["joined_at"], reverse=True)[:15]
 
-    warns_flat = [
-        {"user_id": str(uid), **w}
-        for users in main.warns.values()
-        for uid, entries in users.items()
-        for w in entries
-    ]
-    warns_flat.sort(key=lambda w: w.get("timestamp") or "", reverse=True)
+    moderation_log = sorted(
+        main.moderation_log, key=lambda e: e.get("timestamp") or "", reverse=True
+    )[:30]
 
     reports_flat = [
         {"target": target, **r}
@@ -209,7 +207,7 @@ def api_staff_panel():
 
     return jsonify({
         "recent_members": recent_members,
-        "warns": warns_flat[:20],
+        "moderation_log": moderation_log,
         "reports": reports_flat[:20],
     })
 

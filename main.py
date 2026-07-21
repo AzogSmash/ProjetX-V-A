@@ -58,6 +58,13 @@ punitions = {}
 morse_punitions = {}
 mutes = {}
 silenced_users = {}
+# Journal d'audit des actions de modération (warn/mute/ban/silence/punition/morse) —
+# contrairement à warns/mutes/punitions qui ne décrivent que l'état ACTUEL (et perdent
+# toute trace une fois résolus/levés), ce journal est append-only : chaque action y
+# laisse une entrée permanente. Voir _log_moderation. Plafonné (MODERATION_LOG_MAX)
+# pour ne pas grossir data.json indéfiniment.
+moderation_log = []
+MODERATION_LOG_MAX = 300
 coins = defaultdict(int)
 giveaway_data = {}
 giveaway_tasks = {}
@@ -510,6 +517,23 @@ async def _check_protected_target(ctx, member: discord.Member) -> bool:
         return True
     return False
 
+
+def _log_moderation(action: str, target, moderator, reason: str = None, extra: str = None):
+    """Ajoute une entrée au journal d'audit (voir moderation_log) — n'appelle PAS
+    save_data() lui-même, à faire par l'appelant juste après (comme pour toute
+    autre mutation d'état)."""
+    moderation_log.append({
+        'action': action,
+        'target_id': str(target.id),
+        'target_name': target.display_name,
+        'moderator': moderator.display_name,
+        'reason': reason,
+        'extra': extra,
+        'timestamp': datetime.now().isoformat(),
+    })
+    if len(moderation_log) > MODERATION_LOG_MAX:
+        moderation_log[:] = moderation_log[-MODERATION_LOG_MAX:]
+
 # ── Réactions Azog : surprises cosmétiques sur mention/commandes, aucun blocage ──────────
 AZOG_PING_LINES = [
     "Quelqu'un a osé prononcer le nom du GOAT 🐐",
@@ -876,7 +900,7 @@ def load_data():
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
     global ranked_1v1_history, ranked_season_month, slash_global_purged, casino_season_month
-    global punitions, morse_punitions
+    global punitions, morse_punitions, moderation_log
     load_path = _resolve_data_path()
     if os.path.exists(load_path):
         with open(load_path, 'r', encoding='utf-8-sig') as f:
@@ -989,6 +1013,7 @@ def load_data():
                 # qui permet à !annuler_punition de savoir qu'il faut les lever).
                 punitions       = data.get('punitions', {})
                 morse_punitions = data.get('morse_punitions', {})
+                moderation_log  = data.get('moderation_log', [])
                 ranked_1v1        = data.get('ranked_1v1', {})
                 ranked_challenges = data.get('ranked_challenges', {})
                 ranked_pending    = data.get('ranked_pending', {})
@@ -1163,6 +1188,7 @@ def save_data(force: bool = False):
     data_to_save['admin_log_channel_id'] = ADMIN_LOG_CHANNEL_ID
     data_to_save['punitions']       = punitions
     data_to_save['morse_punitions'] = morse_punitions
+    data_to_save['moderation_log']  = moderation_log
     data_to_save['ranked_1v1']        = ranked_1v1
     data_to_save['ranked_challenges'] = ranked_challenges
     data_to_save['ranked_pending']    = ranked_pending
@@ -2108,6 +2134,7 @@ async def silence(ctx, member: discord.Member):
         return
 
     silenced_users[guild_id].append(member.id)
+    _log_moderation('silence', member, ctx.author)
     save_data()
     await ctx.send(f"🔇 Tous les messages de {member.mention} seront désormais automatiquement supprimés.")
     fields = [
@@ -2341,6 +2368,7 @@ async def warn(ctx, member: discord.Member, *, reason: str = "Aucune raison spé
         warns[guild_id][user_id] = []
 
     warns[guild_id][user_id].append({"reason": reason, "moderator": ctx.author.name, "timestamp": datetime.now().isoformat()})
+    _log_moderation('warn', member, ctx.author, reason=reason)
     save_data()
 
     num_warns = len(warns[guild_id][user_id])
@@ -2904,6 +2932,7 @@ async def mute(ctx, member: discord.Member, duration: str = None, *, reason: str
         if guild_id not in mutes:
             mutes[guild_id] = {}
         mutes[guild_id][user_id] = {"end_time": end_time, "reason": reason}
+        _log_moderation('mute', member, ctx.author, reason=reason, extra=log_duration_text)
         save_data()
 
         await ctx.send(f"{member.mention} a été mute pour {log_duration_text} (Raison : {reason}).")
@@ -2995,6 +3024,8 @@ async def ban(ctx, member: discord.Member, *, reason=None):
 
     try:
         await member.ban(reason=reason)
+        _log_moderation('ban', member, ctx.author, reason=reason)
+        save_data()
         await ctx.send(f"{member.mention} a été banni. Raison : {reason if reason else 'Non spécifiée'}")
 
         try:
@@ -8900,6 +8931,7 @@ async def cmd_punition(ctx, nombre: int, membre: discord.Member):
         'actuel': 0,
         'guild_id': guild.id
     }
+    _log_moderation('punition', membre, ctx.author, extra=f"compter jusqu'à {nombre}")
     save_data()
 
     await salon.send(
@@ -8917,7 +8949,7 @@ async def cmd_annuler_punition(ctx, membre: discord.Member):
     if uid not in punitions:
         return await ctx.send(f"❌ {membre.mention} n'est pas en punition.")
 
-    await _liberer_membre(ctx.guild, membre)
+    await _liberer_membre(ctx.guild, membre, resolved_by=ctx.author)
     await ctx.send(f"✅ La punition de {membre.mention} a été annulée.")
 
 
@@ -8960,26 +8992,32 @@ async def cmd_snipe(ctx, arg1: str = None, arg2: str = None):
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
-async def _liberer_membre(guild, membre):
+async def _liberer_membre(guild, membre, resolved_by=None):
+    """resolved_by : membre qui a tapé !annuler_punition, ou None si la punition
+    s'est terminée toute seule (compte réussi jusqu'au bout)."""
     uid = str(membre.id)
     if uid not in punitions:
         return
-    
+
     data = punitions[uid]
-    
+
     # Supprimer le salon de punition
     salon = guild.get_channel(data['salon_id'])
     if salon:
         await salon.delete()
-    
+
     # Rendre l'accès aux salons
     for channel in guild.channels:
         try:
             await channel.set_permissions(membre, overwrite=None)
         except:
             pass
-    
+
     del punitions[uid]
+    _log_moderation(
+        'punition_fin', membre, resolved_by or guild.me,
+        extra="annulée manuellement" if resolved_by else "terminée en comptant jusqu'au bout",
+    )
     save_data()
 
     try:
@@ -9130,6 +9168,7 @@ async def cmd_morse(ctx, membre: discord.Member):
         'morse': morse,
         'attempts': 0
     }
+    _log_moderation('morse', membre, ctx.author)
     save_data()
 
     buf = _morse_to_image(morse, word)
@@ -9152,7 +9191,7 @@ async def cmd_morse(ctx, membre: discord.Member):
     await ctx.send(f"✅ {membre.mention} est en punition morse !")
 
 
-async def _liberer_membre_morse(guild, membre):
+async def _liberer_membre_morse(guild, membre, resolved_by=None):
     uid = str(membre.id)
     if uid not in morse_punitions:
         return
@@ -9166,6 +9205,10 @@ async def _liberer_membre_morse(guild, membre):
         except:
             pass
     del morse_punitions[uid]
+    _log_moderation(
+        'morse_fin', membre, resolved_by or guild.me,
+        extra="annulée manuellement" if resolved_by else "code résolu",
+    )
     save_data()
     try:
         await membre.send(f"✅ Ta punition morse sur **{guild.name}** est terminée !")
@@ -9177,7 +9220,7 @@ async def _liberer_membre_morse(guild, membre):
 async def cmd_annuler_morse(ctx, membre: discord.Member):
     if str(membre.id) not in morse_punitions:
         return await ctx.send(f"❌ {membre.mention} n'est pas en punition morse.")
-    await _liberer_membre_morse(ctx.guild, membre)
+    await _liberer_membre_morse(ctx.guild, membre, resolved_by=ctx.author)
     await ctx.send(f"✅ Punition morse de {membre.mention} annulée.")
     
 # =======================================================================
