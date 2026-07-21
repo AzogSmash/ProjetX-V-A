@@ -647,23 +647,7 @@ RUSH_USER_ID = 602807768046632971  # se retourne contre lui — aussi autorisé 
 async def cmd_rush(ctx):
     if ctx.author.id != RUSH_USER_ID and not is_bot_owner(ctx.author) and ctx.author.id != PROTECTED_FROM_PUNISH_ID:
         return await ctx.send("❌ Cette commande est réservée à Rush (et rien qu'à lui, désolé).")
-    embed = discord.Embed(
-        title="📜 Biographie officielle de Rush",
-        description=(
-            "**Certitude inébranlable :** persuadé d'avoir « coffré » sa meuf, pendant qu'elle "
-            "fait le tour de tout Bullcity.\n\n"
-            "**Confiance en lui :** 100/100. **Lucidité :** 0/100.\n\n"
-            "**Talent principal :** perdre en 1v1 contre à peu près tout le monde, bots inclus.\n\n"
-            "**Rang Brawl Stars :** \"en cours de calcul\" depuis trois saisons.\n\n"
-            "**Radinerie :** a déjà demandé un remboursement pour un `!give` de 1 coin.\n\n"
-            "**Palmarès :** champion incontesté et non-disputé du déni total.\n\n"
-            "**Dernières paroles célèbres :** *\"Je vais tellement saucer avec cette commande\"* "
-            "— quelques secondes avant de lire ceci."
-        ),
-        color=0x6b4226
-    )
-    embed.set_footer(text="Merci d'avoir tapé !rush, Rush. Vraiment. Merci.")
-    await ctx.send(embed=embed)
+    await ctx.send("Juste une phrase")
 
 
 async def _maybe_dev_ping_reaction(message):
