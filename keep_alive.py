@@ -1,7 +1,13 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from threading import Thread
+from functools import wraps
 import logging
+import os
+import secrets
 import sys
+
+import db_bs
+import db_members
 
 app = Flask("")
 
@@ -21,15 +27,12 @@ def health():
 
 
 # ── API famille Brawl Stars ──
-# Lecture seule des dicts déjà en mémoire dans main.py (alimentés par les
-# tâches de fond du bot). main.py est lancé en `python main.py`, donc il vit
-# dans sys.modules sous le nom "__main__" — PAS "main". Un `import main`
-# ici déclencherait un tout nouvel import (main.py n'a jamais été chargé
-# sous ce nom), qui ré-exécute tout le fichier depuis une autre thread
-# jusqu'à un second bot.run(token) qui bloque indéfiniment — deadlock,
-# et pire, une deuxième connexion Discord. On récupère donc directement
-# le module déjà en cours d'exécution via sys.modules.
-# Voir SITE_FAMILLE_BS_CONTEXT.md pour le détail des structures.
+# Le tracking BS (clans, historique de trophées, cache ranked, saisons) vit
+# dans Supabase (voir db_bs.py) — ces routes lisent donc directement la base,
+# sans dépendre de l'état en mémoire du process bot. Seule /api/famille/clan/<tag>
+# reste sur sys.modules["__main__"] : elle sert bs_family_club_details, un cache
+# volontairement PAS persisté (voir commentaire dans main.py), reconstruit à
+# chaque sync_trophy_history depuis l'API officielle Brawl Stars.
 
 def _bot():
     return sys.modules["__main__"]
@@ -37,63 +40,39 @@ def _bot():
 
 @app.route("/api/famille/clans")
 def api_famille_clans():
-    main = _bot()
-    return jsonify(main.bs_family_clubs)
+    return jsonify(db_bs.list_family_clubs())
 
 
 @app.route("/api/famille/trophees")
 def api_famille_trophees():
-    main = _bot()
-    players = []
-    for tag, data in main.bs_trophy_history.items():
-        history = data.get("history") or []
-        if not history:
-            continue
-        last = history[-1]
-        players.append({
-            "tag": tag,
-            "name": data.get("name"),
-            "club": data.get("club"),
-            "trophies": last.get("trophies"),
-            "date": last.get("date"),
-        })
+    players = db_bs.get_latest_trophies()
     players.sort(key=lambda p: p["trophies"] or 0, reverse=True)
     return jsonify(players)
 
 
 @app.route("/api/famille/ranked")
 def api_famille_ranked():
-    main = _bot()
+    players = {
+        p["tag"]: {
+            "name": p["name"], "club": p["club"],
+            "ranked_pts": p["ranked_pts"], "ranked_tier": p["ranked_tier"],
+        }
+        for p in db_bs.get_ranked_cache()
+    }
     return jsonify({
-        "players": main.bs_family_ranked_cache,
-        "updated_at": main.bs_family_ranked_updated_at,
+        "players": players,
+        "updated_at": db_bs.get_ranked_updated_at(),
     })
 
 
 @app.route("/api/famille/evolution")
 def api_famille_evolution():
-    main = _bot()
-    start_date = main.bs_season_start_date
-    players = []
-    for tag, data in main.bs_trophy_history.items():
-        history = data.get("history") or []
-        if not history:
-            continue
-        last = history[-1]
-        eligible = [h for h in history if start_date and h.get("date") and h["date"] >= start_date]
-        first = eligible[0] if eligible else history[0]
-        delta = (last.get("trophies") or 0) - (first.get("trophies") or 0)
-        players.append({
-            "tag": tag,
-            "name": data.get("name"),
-            "club": data.get("club"),
-            "start": first.get("trophies"),
-            "end": last.get("trophies"),
-            "delta": delta,
-        })
+    state = db_bs.get_season_state()
+    start_date = state["season_start_date"]
+    players = db_bs.get_season_evolution(start_date) if start_date else []
     players.sort(key=lambda p: p["delta"], reverse=True)
     return jsonify({
-        "season_month": main.bs_season_month,
+        "season_month": state["season_month"],
         "season_start_date": start_date,
         "players": players,
     })
@@ -101,17 +80,19 @@ def api_famille_evolution():
 
 @app.route("/api/famille/evolution/<mois>")
 def api_famille_evolution_mois(mois):
-    main = _bot()
-    data = main.bs_trophy_evolution_history.get(mois)
-    if data is None:
+    entries = db_bs.get_archived_season(mois)
+    if not entries:
         return {"error": "saison introuvable"}, 404
+    data = {
+        e["tag"]: {"name": e["name"], "club": e["club"], "start": e["start"], "end": e["end"], "delta": e["delta"]}
+        for e in entries
+    }
     return jsonify(data)
 
 
 @app.route("/api/famille/saisons")
 def api_famille_saisons():
-    main = _bot()
-    return jsonify(sorted(main.bs_trophy_evolution_history.keys()))
+    return jsonify(db_bs.list_archived_seasons())
 
 
 @app.route("/api/famille/clan/<tag>")
@@ -122,6 +103,31 @@ def api_famille_clan_detail(tag):
     if data is None:
         return {"error": "club introuvable ou pas encore synchronisé"}, 404
     return jsonify(data)
+
+
+# ── Niveaux d'accès du site (voir supabase/003_discord_members.sql) ──
+# Contrairement au reste de l'API famille (public, données de classement),
+# is_admin/role_ids sert à décider qui voit le panel staff/admin du site —
+# donc protégé par un secret partagé site<->bot plutôt que laissé ouvert.
+
+def _require_internal_secret(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        expected = os.environ.get("INTERNAL_API_SECRET")
+        got = request.headers.get("X-Internal-Secret", "")
+        if not expected or not secrets.compare_digest(got, expected):
+            return {"error": "unauthorized"}, 401
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+@app.route("/api/member/<discord_id>")
+@_require_internal_secret
+def api_member(discord_id):
+    member = db_members.get_member(discord_id)
+    if member is None:
+        return {"error": "pas membre du serveur"}, 404
+    return jsonify({"role_ids": member["role_ids"], "is_admin": member["is_admin"]})
 
 
 def run():

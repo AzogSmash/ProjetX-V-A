@@ -16,8 +16,22 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont
 from keep_alive import keep_alive
+import db_bs
+import db_members
 
 load_dotenv()
+
+
+def _format_ranked_updated_at(iso_ts: str | None) -> str | None:
+    """Formate le timestamptz renvoyé par Supabase (bs_ranked_cache.updated_at)
+    en '%d/%m %H:%M', comme l'ancien bs_family_ranked_updated_at fabriqué à la main."""
+    if not iso_ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_ts.replace('Z', '+00:00'))
+    except ValueError:
+        return iso_ts
+    return dt.astimezone(BS_SEASON_TZ).strftime('%d/%m %H:%M')
 
 # Récupération des IDs des salons de logs depuis les variables d'environnement
 LOG_MODERATION_CHANNEL_ID = os.getenv("1515780858483576923")
@@ -298,10 +312,9 @@ crypto_alerts    = {}   # str(uid) -> [{'symbol': str, 'target': float, 'directi
 tournament_elo   = {}   # str(uid) -> int (score ELO tournoi)
 bs_accounts      = {}   # str(uid) -> {'tag','name','trophies','ranked_pts','ranked_tier'}
 bs_role_config   = {'trophies': {}, 'ranked': {}}  # 'trophies': {str(min): role_id}, 'ranked': {tier_name: role_id}
-bs_family_clubs         = []   # [{'tag','name','slug','alias'}, ...] — slug/alias = commande dédiée au clan
-bs_family_ranked_cache  = {}   # str(tag_joueur) -> {'name','club','ranked_pts','ranked_tier'}
-bs_family_ranked_updated_at = None  # str affichable, ex '02/07 21:40'
-bs_trophy_history = {}  # str(tag_joueur) -> {'name','club','first_seen':'YYYY-MM-DD','history':[{'date','trophies'}, ...]}
+# bs_family_clubs, bs_family_ranked_cache, bs_family_ranked_updated_at et
+# bs_trophy_history vivent désormais dans Supabase (voir db_bs.py) — plus de
+# globals ni de persistance JSON pour ces champs.
 # str(tag_clan) -> {'name','description','type','requiredTrophies','trophies','members':[{tag,name,trophies,role}]}
 # — volontairement PAS persisté dans data.json : entièrement reconstruit depuis l'API
 # officielle à chaque sync_trophy_history (toutes les heures), donc une valeur périmée
@@ -329,9 +342,8 @@ ranked_1v1_history = {}   # "YYYY-MM" -> {uid_str: {'points','wins','losses'}} �
 ranked_season_month = None  # "YYYY-MM" — mois de la saison en cours
 casino_season_month = None  # "YYYY-MM" — dernier mois où le casino a été reset automatiquement
 BS_SEASON_TZ = ZoneInfo("Europe/Paris")
-bs_season_month = None        # "YYYY-MM" — dernier mois où une saison Brawl Stars a démarré (1er jeudi 10h)
-bs_season_start_date = None   # "YYYY-MM-DD" — date de début de la saison BS en cours (borne pour !evolution_trophees)
-bs_trophy_evolution_history = {}  # "YYYY-MM" -> {tag: {'name','club','start','end','delta'}} — saisons de push archivées
+# bs_season_month, bs_season_start_date et bs_trophy_evolution_history vivent
+# désormais dans Supabase (bs_season_state / bs_season_archive, voir db_bs.py).
 RANKED_CHALLENGE_CHANNEL_ID = 1526529629974695977  # #commandes... — tableau des défis 1v1
 RANKED_LOG_CHANNEL_ID       = 1526529856421105715  # #chat-duels — log public des résultats validés
 RANKED_1V1_TIERS = [
@@ -570,6 +582,7 @@ async def _maybe_azog_ping_reaction(message):
         pass
 
 
+BS_FAMILY_GUILD_ID = 1513110804499795988  # serveur Discord de la famille — voir sync_discord_members
 DEV_ROLE_ID = 1513110804595998789  # rôle Technicien Discord (développeurs du bot)
 DEV_PING_CHANCE = 0.30
 DEV_PING_COOLDOWN_MIN = 10
@@ -851,11 +864,10 @@ def load_data():
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
-    global bs_accounts, bs_role_config, bs_family_clubs, bs_family_ranked_cache, bs_family_ranked_updated_at, bs_trophy_history
+    global bs_accounts, bs_role_config
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
     global ranked_1v1_history, ranked_season_month, slash_global_purged, casino_season_month
-    global bs_season_month, bs_season_start_date, bs_trophy_evolution_history
     load_path = _resolve_data_path()
     if os.path.exists(load_path):
         with open(load_path, 'r', encoding='utf-8-sig') as f:
@@ -948,13 +960,6 @@ def load_data():
                 if isinstance(loaded_bs_roles, dict):
                     bs_role_config['trophies'] = loaded_bs_roles.get('trophies', {}) or {}
                     bs_role_config['ranked']   = loaded_bs_roles.get('ranked', {}) or {}
-                bs_family_clubs         = data.get('bs_family_clubs', [])
-                bs_family_ranked_cache  = data.get('bs_family_ranked_cache', {})
-                bs_family_ranked_updated_at = data.get('bs_family_ranked_updated_at')
-                bs_trophy_history       = data.get('bs_trophy_history', {})
-                bs_season_month         = data.get('bs_season_month')
-                bs_season_start_date    = data.get('bs_season_start_date')
-                bs_trophy_evolution_history = data.get('bs_trophy_evolution_history', {})
                 businesses           = data.get('businesses', {})
                 theft_stats           = data.get('theft_stats', {})
                 daily_sell_volume     = data.get('daily_sell_volume', {})
@@ -994,10 +999,8 @@ def load_data():
                 # remarque le problème des heures plus tard (cf. incident du 20/07/2026).
                 logging.warning(
                     "Données chargées avec succès depuis %s — coins:%d warns:%d "
-                    "bs_trophy_history:%d bs_season_month:%s bs_season_start_date:%s "
-                    "bs_family_clubs:%d",
-                    DATA_FILE, len(coins), len(warns), len(bs_trophy_history),
-                    bs_season_month, bs_season_start_date, len(bs_family_clubs),
+                    "(tracking BS : voir Supabase, plus persisté dans ce fichier)",
+                    DATA_FILE, len(coins), len(warns),
                 )
 
                 # Migration : reset tickets (items 4 et 5) + remboursement au prix d'achat
@@ -1123,13 +1126,6 @@ def save_data():
     data_to_save['locations']        = locations
     data_to_save['bs_accounts']      = bs_accounts
     data_to_save['bs_role_config']   = bs_role_config
-    data_to_save['bs_family_clubs']  = bs_family_clubs
-    data_to_save['bs_family_ranked_cache']      = bs_family_ranked_cache
-    data_to_save['bs_family_ranked_updated_at'] = bs_family_ranked_updated_at
-    data_to_save['bs_trophy_history']           = bs_trophy_history
-    data_to_save['bs_season_month']              = bs_season_month
-    data_to_save['bs_season_start_date']         = bs_season_start_date
-    data_to_save['bs_trophy_evolution_history']  = bs_trophy_evolution_history
     data_to_save['businesses']           = businesses
     data_to_save['theft_stats']           = theft_stats
     data_to_save['daily_sell_volume']     = daily_sell_volume
@@ -1291,22 +1287,10 @@ async def on_ready():
     logging.warning("Connecté en tant que %s — DATA_FILE=%s — fichier_existe=%s", bot.user, DATA_FILE, os.path.exists(DATA_FILE))
     load_data()
 
-    # Migration bs_family_clubs : ancien format (liste de tags str) -> dicts avec slug/alias.
-    # Les commandes dynamiques par clan (!projetx, etc.) ne survivent pas à un redémarrage,
-    # donc on les réenregistre systématiquement ici, à chaque démarrage.
-    migrated = False
-    for i, entry in enumerate(bs_family_clubs):
-        if isinstance(entry, str):
-            data, err = await _bs_fetch_club(entry)
-            name = data['name'] if data else entry
-            slug = _bs_slug(name)
-            reserved = {e['slug'] for e in bs_family_clubs if isinstance(e, dict)} | \
-                       {e['alias'] for e in bs_family_clubs if isinstance(e, dict) and e.get('alias')}
-            bs_family_clubs[i] = {'tag': entry, 'name': name, 'slug': slug, 'alias': _bs_alias(slug, reserved)}
-            migrated = True
-    if migrated:
-        save_data()
-    for entry in bs_family_clubs:
+    # Les commandes dynamiques par clan (!projetx, etc.) ne survivent pas à un
+    # redémarrage, donc on les réenregistre systématiquement ici. bs_family_clubs
+    # vit maintenant dans Supabase (voir db_bs.py), plus dans data.json.
+    for entry in db_bs.list_family_clubs():
         _bs_register_club_command(entry)
 
     # Re-enregistre les views de tournoi pour que les boutons fonctionnent après restart
@@ -1349,6 +1333,8 @@ async def on_ready():
         check_casino_season.start()
     if not check_bs_season.is_running():
         check_bs_season.start()
+    if not sync_discord_members.is_running():
+        sync_discord_members.start()
 
     global _slash_synced, slash_global_purged
     if not _slash_synced:
@@ -10517,11 +10503,12 @@ async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
     action = action.lower()
 
     if action == 'liste':
-        if not bs_family_clubs:
+        family_clubs = db_bs.list_family_clubs()
+        if not family_clubs:
             return await ctx.send("Aucun clan configuré pour l'instant.")
         await ctx.typing()
         ok, failed = [], []
-        for entry in bs_family_clubs:
+        for entry in family_clubs:
             data, err = await _bs_fetch_club(entry['tag'])
             if data:
                 data['entry'] = entry
@@ -10541,7 +10528,7 @@ async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
     clean = tag.strip().lstrip('#').upper()
 
     if action in ('ajouter', 'add'):
-        if any(e['tag'] == clean for e in bs_family_clubs):
+        if db_bs.club_exists(clean):
             return await ctx.send(f"ℹ️ `#{clean}` est déjà dans la famille.")
         data, err = await _bs_fetch_club(clean)
         if err:
@@ -10553,13 +10540,13 @@ async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
                 f"❌ Le nom de clan **{data['name']}** donnerait la commande `!{slug}`, "
                 f"qui existe déjà. Renomme le clan en jeu ou préviens le développeur."
             )
-        reserved = {e['slug'] for e in bs_family_clubs} | {e['alias'] for e in bs_family_clubs if e.get('alias')}
+        existing = db_bs.list_family_clubs()
+        reserved = {e['slug'] for e in existing} | {e['alias'] for e in existing if e.get('alias')}
         alias = _bs_alias(slug, reserved)
 
         entry = {'tag': clean, 'name': data['name'], 'slug': slug, 'alias': alias}
-        bs_family_clubs.append(entry)
+        db_bs.add_family_club(clean, data['name'], slug, alias)
         _bs_register_club_command(entry)
-        save_data()
         if ctx.guild:
             bot.tree.copy_global_to(guild=ctx.guild)
             await bot.tree.sync(guild=ctx.guild)
@@ -10568,11 +10555,11 @@ async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
             f"Commande dédiée : `!{slug}` (alias `!{alias}`)."
         )
 
-    entry = next((e for e in bs_family_clubs if e['tag'] == clean), None)
+    existing = db_bs.list_family_clubs()
+    entry = next((e for e in existing if e['tag'] == clean), None)
     if entry:
-        bs_family_clubs.remove(entry)
+        db_bs.remove_family_club(clean)
         _bs_unregister_club_command(entry)
-        save_data()
         if ctx.guild:
             await bot.tree.sync(guild=ctx.guild)
         return await ctx.send(f"✅ `#{clean}` (**{entry['name']}**) retiré de la famille, commande `!{entry['slug']}` supprimée.")
@@ -10717,12 +10704,13 @@ def _bs_unregister_club_command(entry: dict):
 
 @bot.hybrid_command(name="classement_trophees_famille", aliases=["ctf", "top_famille"])
 async def cmd_classement_trophees_famille(ctx):
-    if not bs_family_clubs:
+    family_clubs = db_bs.list_family_clubs()
+    if not family_clubs:
         return await ctx.send("❌ Aucun clan configuré. Utilise `!bs_famille ajouter <tag>` (Admin).")
 
     await ctx.typing()
     all_members, errors, total_family = [], [], 0
-    for club in bs_family_clubs:
+    for club in family_clubs:
         data, err = await _bs_fetch_club(club['tag'])
         if err:
             errors.append(f"`#{club['tag']}` : {err}")
@@ -10749,10 +10737,13 @@ async def cmd_classement_trophees_famille(ctx):
 
 async def _bs_evolution_current_entries():
     """Calcule l'évolution en direct depuis le début de la saison Brawl Stars en cours
-    (bs_season_start_date, borne posée par check_bs_season au 1er jeudi 10h heure de Paris)."""
-    start_date = bs_season_start_date or datetime.now(BS_SEASON_TZ).strftime('%Y-%m-%d')
+    (season_start_date, borne posée par check_bs_season au 1er jeudi 10h heure de Paris).
+    La valeur de fin vient d'un appel API en direct (comme avant) ; la baseline de
+    début de saison vient de Supabase (bs_trophy_snapshots)."""
+    start_date = db_bs.get_season_state()['season_start_date'] or datetime.now(BS_SEASON_TZ).strftime('%Y-%m-%d')
+    baselines = db_bs.get_baselines_since(start_date)
     all_members, errors = [], []
-    for club in bs_family_clubs:
+    for club in db_bs.list_family_clubs():
         data, err = await _bs_fetch_club(club['tag'])
         if err:
             errors.append(f"`#{club['tag']}` : {err}")
@@ -10760,13 +10751,9 @@ async def _bs_evolution_current_entries():
         for m in data['members']:
             if not m['tag']:
                 continue
-            hist_entry = bs_trophy_history.get(m['tag'])
-            if not hist_entry or not hist_entry['history']:
-                continue  # pas encore de snapshot pour ce membre
-            season_hist = [h for h in hist_entry['history'] if h['date'] >= start_date]
-            if not season_hist:
+            baseline = baselines.get(m['tag'])
+            if not baseline:
                 continue  # membre connu mais aucun point depuis le début de la saison en cours
-            baseline = season_hist[0]
             delta = m['trophies'] - baseline['trophies']
             joined_note = None
             if baseline['date'] != start_date:
@@ -10783,11 +10770,11 @@ async def _bs_evolution_current_entries():
 
 
 def _bs_evolution_archived_entries(month: str):
-    """Relit une saison de push archivée (aucun appel API, juste bs_trophy_evolution_history)."""
-    archived = bs_trophy_evolution_history.get(month, {})
+    """Relit une saison de push archivée depuis Supabase (aucun appel API)."""
+    archived = db_bs.get_archived_season(month)
     entries = [
         {'name': v['name'], 'club': v['club'], 'delta': v['delta'], 'joined_note': None}
-        for v in archived.values()
+        for v in archived
     ]
     entries.sort(key=lambda e: e['delta'], reverse=True)
     clubs = list(dict.fromkeys(e['club'] for e in entries))
@@ -10813,7 +10800,7 @@ class BsEvolutionView(discord.ui.View):
         self.total_pages = max(1, (len(self.filtered) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
         self.page = max(0, min(page, self.total_pages - 1))
 
-        past_seasons = sorted(bs_trophy_evolution_history.keys(), reverse=True)
+        past_seasons = db_bs.list_archived_seasons()
         if past_seasons:
             season_options = [discord.SelectOption(label="📅 Saison actuelle", value="__current__", default=(month is None))]
             for m in past_seasons[:24]:
@@ -10904,10 +10891,8 @@ class BsEvolutionView(discord.ui.View):
 
 @bot.hybrid_command(name="evolution_trophees", aliases=["evo", "evolution"])
 async def cmd_evolution_trophees(ctx):
-    if not bs_family_clubs:
+    if not db_bs.list_family_clubs():
         return await ctx.send("❌ Aucun clan configuré. Utilise `!bs_famille ajouter <tag>` (Admin).")
-    if not bs_trophy_history:
-        return await ctx.send("❌ Pas encore d'historique enregistré, réessaie plus tard (le suivi vient de démarrer).")
 
     await ctx.typing()
     entries, clubs, note = await _bs_evolution_current_entries()
@@ -10954,60 +10939,51 @@ async def check_bs_season():
     était retombé à None). On calcule donc maintenant la date correcte de façon déterministe
     (1er jeudi 10h) plutôt que d'utiliser `today` en dur, et on revalide/recale à chaque tick."""
     await bot.wait_until_ready()
-    global bs_season_month, bs_season_start_date
-    if not bs_family_clubs:
+    if not db_bs.list_family_clubs():
         return
 
     now = datetime.now(BS_SEASON_TZ)
     current_month = now.strftime('%Y-%m')
     today = now.strftime('%Y-%m-%d')
 
-    if bs_season_month is None:
+    state = db_bs.get_season_state()
+    season_month = state['season_month']
+    season_start_date = state['season_start_date']
+
+    if season_month is None:
         start = _most_recent_season_start(now)
-        bs_season_month = start.strftime('%Y-%m')
-        bs_season_start_date = start.strftime('%Y-%m-%d')
-        save_data()
+        db_bs.set_season_state(start.strftime('%Y-%m'), start.strftime('%Y-%m-%d'))
         return
 
-    if bs_season_month == current_month:
+    if season_month == current_month:
         # Filet de sécurité : si le pointeur a dérivé de la vraie date de bascule
         # (cf. docstring), on le recale silencieusement sans repasser par
         # l'archivage puisqu'on reste dans le même mois de saison.
         correct_start_date = _most_recent_season_start(now).strftime('%Y-%m-%d')
-        if bs_season_start_date != correct_start_date:
+        if season_start_date != correct_start_date:
             logging.warning(
                 "check_bs_season: bs_season_start_date incohérent (%s), recalage sur %s",
-                bs_season_start_date, correct_start_date,
+                season_start_date, correct_start_date,
             )
-            bs_season_start_date = correct_start_date
-            save_data()
+            db_bs.set_season_state(season_month, correct_start_date)
         return
 
     is_first_thursday = now.day <= 7 and now.weekday() == 3
     if not ((is_first_thursday and now.hour >= 10) or now.day > 7):
         return
 
-    ended_month = bs_season_month
-    start_date = bs_season_start_date or today
-    archive = {}
-    for tag, entry in bs_trophy_history.items():
-        hist = entry.get('history') or []
-        season_hist = [h for h in hist if h['date'] >= start_date]
-        if not season_hist:
-            continue
-        baseline = season_hist[0]
-        end_val = hist[-1]['trophies']
-        archive[tag] = {
-            'name': entry['name'], 'club': entry['club'],
-            'start': baseline['trophies'], 'end': end_val, 'delta': end_val - baseline['trophies'],
-        }
+    ended_month = season_month
+    start_date = season_start_date or today
+    entries = db_bs.get_season_evolution(start_date)
+    archive = [
+        {'tag': e['tag'], 'name': e['name'], 'club': e['club'], 'start': e['start'], 'end': e['end'], 'delta': e['delta']}
+        for e in entries
+    ]
     if archive:
-        bs_trophy_evolution_history[ended_month] = archive
+        db_bs.archive_season(ended_month, archive)
 
     new_start = _most_recent_season_start(now)
-    bs_season_month = new_start.strftime('%Y-%m')
-    bs_season_start_date = new_start.strftime('%Y-%m-%d')
-    save_data()
+    db_bs.set_season_state(new_start.strftime('%Y-%m'), new_start.strftime('%Y-%m-%d'))
 
 
 @tasks.loop(hours=4)
@@ -11016,13 +10992,13 @@ async def sync_family_ranked():
     Fait exprès de ne PAS tourner à chaque commande : avec ~150 membres et une source
     tierce (api.rnt.dev), interroger tout le monde à la demande serait lent et solliciterait
     inutilement cette API à chaque fois qu'un membre tape la commande."""
-    global bs_family_ranked_updated_at
-    if not bs_family_clubs:
+    clubs = db_bs.list_family_clubs()
+    if not clubs:
         return
 
-    new_cache = {}
+    new_cache = []
     async with aiohttp.ClientSession() as session:
-        for club in bs_family_clubs:
+        for club in clubs:
             data, err = await _bs_fetch_club(club['tag'])
             if err:
                 continue
@@ -11031,35 +11007,29 @@ async def sync_family_ranked():
                     continue
                 ranked_pts, ranked_tier = await _bs_fetch_ranked_pts(session, m['tag'])
                 if ranked_pts is not None:
-                    new_cache[m['tag']] = {
-                        'name': m['name'], 'club': data['name'],
+                    new_cache.append({
+                        'tag': m['tag'], 'name': m['name'], 'club': data['name'],
                         'ranked_pts': ranked_pts, 'ranked_tier': ranked_tier,
-                    }
+                    })
                 await asyncio.sleep(0.6)
 
     if new_cache:
-        bs_family_ranked_cache.clear()
-        bs_family_ranked_cache.update(new_cache)
-        bs_family_ranked_updated_at = datetime.now().strftime('%d/%m %H:%M')
-        save_data()
+        db_bs.replace_ranked_cache(new_cache)
 
-
-BS_HISTORY_RETENTION_DAYS = 90
 
 @tasks.loop(hours=1)
 async def sync_trophy_history():
     """Rafraîchit toutes les heures le point du jour des trophées de tous les membres de la famille
     de clans (par tag Brawl Stars, pas besoin de !bslink) pour alimenter !evolution_trophees.
-    Une seule entrée par jour est conservée (mise à jour en place, pas de doublon) — tourner plus
-    souvent rend juste la valeur de fin de saison archivée par check_bs_season plus précise, sans
-    faire grossir data.json. Réutilise _bs_fetch_club (déjà appelé par sync_family_ranked)."""
-    if not bs_family_clubs:
+    Une seule entrée par jour est conservée (upsert idempotent côté Supabase, pas de doublon) —
+    tourner plus souvent rend juste la valeur de fin de saison archivée par check_bs_season plus
+    précise. Réutilise _bs_fetch_club (déjà appelé par sync_family_ranked)."""
+    clubs = db_bs.list_family_clubs()
+    if not clubs:
         return
 
     today = datetime.now().strftime('%Y-%m-%d')
-    cutoff = (datetime.now() - timedelta(days=BS_HISTORY_RETENTION_DAYS)).strftime('%Y-%m-%d')
-    changed = False
-    for club in bs_family_clubs:
+    for club in clubs:
         data, err = await _bs_fetch_club(club['tag'])
         if err:
             continue
@@ -11076,38 +11046,46 @@ async def sync_trophy_history():
             ],
         }
 
-        for m in data['members']:
-            if not m['tag']:
-                continue
-            entry = bs_trophy_history.setdefault(
-                m['tag'], {'name': m['name'], 'club': data['name'], 'first_seen': today, 'history': []}
-            )
-            entry['name'] = m['name']
-            entry['club'] = data['name']
-            hist = entry['history']
-            if hist and hist[-1]['date'] == today:
-                hist[-1]['trophies'] = m['trophies']  # déjà un snapshot aujourd'hui (redémarrage bot) : on le met à jour
-            else:
-                hist.append({'date': today, 'trophies': m['trophies']})
-                changed = True
-            entry['history'] = [h for h in hist if h['date'] >= cutoff]
+        db_bs.upsert_members_snapshot(today, club['tag'], data['name'], data['members'])
         await asyncio.sleep(0.3)
 
-    if changed:
-        save_data()
+
+@tasks.loop(minutes=15)
+async def sync_discord_members():
+    """Miroir dans Supabase de l'état réel du serveur Discord (ID + rôles + permission
+    admin de chaque membre) — alimente la résolution du niveau d'accès côté site (invité /
+    membre de clan / staff / admin). Le site ne connaît jamais les rôles Discord autrement
+    que via cette table : pas de scope OAuth supplémentaire, pas de token qui expire."""
+    await bot.wait_until_ready()
+    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+    if guild is None:
+        return
+    members = [
+        {
+            'discord_id': str(m.id),
+            'username': m.name,
+            'role_ids': [str(r.id) for r in m.roles if r.id != guild.id],
+            'is_admin': m.guild_permissions.administrator,
+        }
+        for m in guild.members if not m.bot
+    ]
+    if members:
+        db_members.sync_members(members)
 
 
 @bot.hybrid_command(name="classement_ranked_famille", aliases=["crf", "top_ranked_famille"])
 async def cmd_classement_ranked_famille(ctx):
-    if not bs_family_ranked_cache:
+    ranked_cache = db_bs.get_ranked_cache()
+    if not ranked_cache:
         return await ctx.send(
             "❌ Le cache classé n'est pas encore prêt (la première synchronisation peut prendre "
             "quelques minutes après le démarrage du bot, ou après le premier `!bs_famille ajouter`). Réessaie plus tard."
         )
 
-    entries = sorted(bs_family_ranked_cache.values(), key=lambda m: m.get('ranked_pts', 0), reverse=True)
+    entries = sorted(ranked_cache, key=lambda m: m.get('ranked_pts', 0), reverse=True)
     clubs = list(dict.fromkeys(m['club'] for m in entries))
-    note = f"Dernière mise à jour : {bs_family_ranked_updated_at}" if bs_family_ranked_updated_at else None
+    updated_at = _format_ranked_updated_at(db_bs.get_ranked_updated_at())
+    note = f"Dernière mise à jour : {updated_at}" if updated_at else None
 
     view = BsFamilyLeaderboardView(
         title="🎖️ Classement Classé — Famille", color=0x9b59b6,
@@ -11119,13 +11097,14 @@ async def cmd_classement_ranked_famille(ctx):
 
 @bot.hybrid_command(name="famille_stats", aliases=["fs", "stats_famille"])
 async def cmd_famille_stats(ctx):
-    if not bs_family_clubs:
+    clubs = db_bs.list_family_clubs()
+    if not clubs:
         return await ctx.send("❌ Aucun clan configuré. Utilise `!bs_famille ajouter <tag>` (Admin).")
 
     await ctx.typing()
     club_rows, errors = [], []
     total_members, total_trophies = 0, 0
-    for entry in bs_family_clubs:
+    for entry in clubs:
         data, err = await _bs_fetch_club(entry['tag'])
         if err:
             errors.append(f"`#{entry['tag']}` : {err}")
@@ -11156,9 +11135,10 @@ async def cmd_famille_stats(ctx):
         club_lines.append(f"{rank} **{c['name']}** — {c['trophies']:,} 🏆 · {c['members']} membres · {cmd_hint}")
     embed.add_field(name=f"🏰 Clans ({len(club_rows)})", value="\n".join(club_lines), inline=False)
 
-    if bs_family_ranked_cache:
+    ranked_cache = db_bs.get_ranked_cache()
+    if ranked_cache:
         tier_counts = {}
-        for m in bs_family_ranked_cache.values():
+        for m in ranked_cache:
             t = m.get('ranked_tier') or '?'
             tier_counts[t] = tier_counts.get(t, 0) + 1
         tier_order = [name for _, name in RANKED_TIERS]
@@ -11169,7 +11149,8 @@ async def cmd_famille_stats(ctx):
         )
         tier_lines = [f"**{name}** : {count}" for name, count in sorted_tiers]
         value = "\n".join(tier_lines[:15]) if tier_lines else "Aucune donnée"
-        note = f"\n\n*Cache classé — {bs_family_ranked_updated_at}*" if bs_family_ranked_updated_at else ""
+        updated_at = _format_ranked_updated_at(db_bs.get_ranked_updated_at())
+        note = f"\n\n*Cache classé — {updated_at}*" if updated_at else ""
         embed.add_field(name="🎖️ Répartition classé", value=value + note, inline=False)
     else:
         embed.add_field(name="🎖️ Répartition classé", value="Cache pas encore prêt (premier cycle en cours).", inline=False)
