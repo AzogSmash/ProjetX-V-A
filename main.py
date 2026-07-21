@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont
+from keep_alive import keep_alive
 
 load_dotenv()
 
@@ -11990,6 +11991,7 @@ async def cmd_commandes_admin(ctx):
 
 token = os.getenv("TOKEN")
 if token is not None:
+    keep_alive()
     bot.run(token)
 else:
     print("Erreur : Le token Discord n'est pas défini dans les variables d'environnement. Veuillez le configurer.")
