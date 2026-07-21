@@ -744,6 +744,69 @@ if not os.path.exists(DATA_FILE) and os.path.exists('/app/data.json'):
     os.makedirs(os.path.dirname(DATA_FILE) or '.', exist_ok=True)
     shutil.copy('/app/data.json', DATA_FILE)
 
+# ── Filet de sécurité contre la perte silencieuse de données ──
+# Incident du 20/07/2026 : un bug applicatif (double `bot.run()` dans le même
+# process) a fait tourner une instance fantôme qui a fini par appeler
+# save_data() avec un état quasi vide (bs_trophy_history reparti de zéro),
+# écrasant le vrai fichier. Le seul .bak existant ne garde qu'UNE copie,
+# réécrite à chaque sauvegarde — donc écrasé lui aussi avant que quiconque
+# ne remarque le problème (des heures plus tard, via !evo).
+# Deux filets indépendants, en plus du .bak déjà en place :
+#  1. Des instantanés horodatés (au plus 1/heure) qu'on conserve plusieurs
+#     jours, pour pouvoir remonter le temps même si le problème n'est
+#     détecté que tard.
+#  2. Un garde-fou qui refuse d'écraser DATA_FILE si le nouveau contenu est
+#     radicalement plus petit que l'actuel (signe quasi certain d'un état
+#     appauvri plutôt que d'une vraie purge volontaire) — dans ce cas on
+#     écrit le payload suspect à côté pour inspection au lieu de l'appliquer.
+DATA_BACKUP_DIR = os.path.join(os.path.dirname(DATA_FILE) or '.', 'backups')
+DATA_BACKUP_RETENTION = 72          # ~72 instantanés, throttlés à 1/h -> 3 jours d'historique
+DATA_BACKUP_MIN_INTERVAL = timedelta(hours=1)
+DATA_SHRINK_MIN_OLD_SIZE = 5000     # en dessous, fichier encore trop jeune pour que la garde soit utile
+DATA_SHRINK_RATIO = 0.6             # nouveau contenu < 60% de l'actuel -> suspect
+_last_backup_snapshot_at = None
+
+
+def _snapshot_backup_if_due():
+    """Copie DATA_FILE dans backups/ avec horodatage, au plus une fois par heure,
+    et purge les instantanés au-delà de la rétention. Best-effort : ne doit
+    jamais empêcher une sauvegarde normale de se terminer."""
+    global _last_backup_snapshot_at
+    if not os.path.exists(DATA_FILE):
+        return
+    now = datetime.now()
+    if _last_backup_snapshot_at and now - _last_backup_snapshot_at < DATA_BACKUP_MIN_INTERVAL:
+        return
+    try:
+        os.makedirs(DATA_BACKUP_DIR, exist_ok=True)
+        snapshot_path = os.path.join(DATA_BACKUP_DIR, f"data-{now.strftime('%Y%m%dT%H%M%S')}.json")
+        shutil.copy2(DATA_FILE, snapshot_path)
+        _last_backup_snapshot_at = now
+        snapshots = sorted(f for f in os.listdir(DATA_BACKUP_DIR) if f.startswith('data-'))
+        for stale in snapshots[:-DATA_BACKUP_RETENTION]:
+            try:
+                os.remove(os.path.join(DATA_BACKUP_DIR, stale))
+            except OSError:
+                pass
+    except Exception as e:
+        logging.warning("Instantané de sauvegarde impossible : %s", e)
+
+
+def _is_dangerous_shrink(new_payload_bytes: bytes) -> bool:
+    """True si new_payload est nettement plus petit que DATA_FILE actuel —
+    signe probable d'un état appauvri (bug, double instance...) plutôt
+    qu'une purge volontaire légitime."""
+    if not os.path.exists(DATA_FILE):
+        return False
+    try:
+        old_size = os.path.getsize(DATA_FILE)
+    except OSError:
+        return False
+    if old_size < DATA_SHRINK_MIN_OLD_SIZE:
+        return False
+    return len(new_payload_bytes) < old_size * DATA_SHRINK_RATIO
+
+
 def _resolve_data_path():
     """Retourne le fichier à charger : DATA_FILE s'il contient du JSON valide,
     sinon la sauvegarde .bak la plus récente (protection contre un fichier
@@ -913,7 +976,17 @@ def load_data():
                     casino_config['cooldowns']     = loaded_cfg.get('cooldowns', {}) or {}
                     casino_config['biz_overrides'] = loaded_cfg.get('biz_overrides', {}) or {}
 
-                logging.warning("Données chargées avec succès depuis %s", DATA_FILE)
+                # Trace de richesse des données au chargement : en cas de futur incident,
+                # ces chiffres permettent de voir IMMÉDIATEMENT dans les logs si une
+                # collection est repartie anormalement bas, sans attendre qu'un joueur
+                # remarque le problème des heures plus tard (cf. incident du 20/07/2026).
+                logging.warning(
+                    "Données chargées avec succès depuis %s — coins:%d warns:%d "
+                    "bs_trophy_history:%d bs_season_month:%s bs_season_start_date:%s "
+                    "bs_family_clubs:%d",
+                    DATA_FILE, len(coins), len(warns), len(bs_trophy_history),
+                    bs_season_month, bs_season_start_date, len(bs_family_clubs),
+                )
 
                 # Migration : reset tickets (items 4 et 5) + remboursement au prix d'achat
                 _ticket_migrated = False
@@ -949,14 +1022,17 @@ def load_data():
                     save_data()
 
             except json.JSONDecodeError as e:
-                logging.warning("ERREUR JSON dans %s : %s — données réinitialisées", DATA_FILE, e)
+                # exc_info=True : trace complète dans les logs, pour pouvoir identifier
+                # EXACTEMENT quel champ a fait planter le chargement si ça se reproduit
+                # (cf. incident du 20/07/2026, où on n'avait pas ce niveau de détail).
+                logging.error("ERREUR JSON dans %s : %s — données réinitialisées", DATA_FILE, e, exc_info=True)
                 warns = {}
                 mutes = {}
                 silenced_users = {}
                 coins = defaultdict(int)
                 giveaway_data = {}
             except Exception as e:
-                logging.warning("ERREUR chargement données : %s — données réinitialisées", e)
+                logging.error("ERREUR chargement données : %s — données réinitialisées", e, exc_info=True)
                 warns = {}
                 mutes = {}
                 silenced_users = {}
@@ -1063,13 +1139,41 @@ def save_data():
     data_to_save['slash_global_purged'] = slash_global_purged
 
     try:
+        payload_bytes = json.dumps(data_to_save, indent=4, ensure_ascii=False).encode('utf-8')
+
+        if _is_dangerous_shrink(payload_bytes):
+            # Refuse d'écraser un fichier riche par un état radicalement plus petit
+            # (voir incident du 20/07/2026) — on garde DATA_FILE tel quel et on écrit
+            # le payload suspect à côté pour inspection manuelle, au lieu de propager
+            # silencieusement la perte de données.
+            os.makedirs(DATA_BACKUP_DIR, exist_ok=True)
+            rejected_path = os.path.join(
+                DATA_BACKUP_DIR, f"REJECTED-{datetime.now().strftime('%Y%m%dT%H%M%S')}.json"
+            )
+            try:
+                with open(rejected_path, 'wb') as f:
+                    f.write(payload_bytes)
+            except Exception:
+                pass
+            logging.critical(
+                "save_data() BLOQUÉ : nouveau contenu (%d octets) très inférieur à %s (%d octets) — "
+                "payload suspect conservé dans %s pour inspection manuelle. Aucune écriture effectuée.",
+                len(payload_bytes), DATA_FILE, os.path.getsize(DATA_FILE), rejected_path,
+            )
+            return
+
+        # Instantané horodaté (best-effort, throttlé) AVANT d'écraser quoi que ce soit —
+        # garde plusieurs jours d'historique, contrairement au .bak unique ci-dessous qui
+        # est lui-même réécrit à chaque sauvegarde.
+        _snapshot_backup_if_due()
+
         # Écriture atomique : on écrit dans un fichier temporaire puis on remplace l'ancien
         # d'un coup (os.replace est atomique). Sans ça, un crash/redémarrage pendant
         # l'écriture directe de DATA_FILE peut le laisser tronqué/invalide, et le prochain
         # démarrage réinitialiserait alors TOUTES les données (coins, ranked_1v1, etc.).
         tmp_path = f"{DATA_FILE}.tmp"
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            json.dump(data_to_save, f, indent=4, ensure_ascii=False)
+        with open(tmp_path, 'wb') as f:
+            f.write(payload_bytes)
         # Garde une copie du dernier état connu-bon AVANT de le remplacer, pour pouvoir
         # restaurer automatiquement si jamais DATA_FILE finit corrompu malgré l'écriture atomique.
         if os.path.exists(DATA_FILE):
