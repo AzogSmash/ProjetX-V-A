@@ -790,6 +790,14 @@ DATA_BACKUP_MIN_INTERVAL = timedelta(hours=1)
 DATA_SHRINK_MIN_OLD_SIZE = 5000     # en dessous, fichier encore trop jeune pour que la garde soit utile
 DATA_SHRINK_RATIO = 0.6             # nouveau contenu < 60% de l'actuel -> suspect
 _last_backup_snapshot_at = None
+# True si data.json contient encore les champs BS migrés vers Supabase (voir
+# load_data) — dans ce cas le premier save_data() post-migration rétrécit
+# fortement le fichier PAR CONCEPTION (ces champs ne sont plus jamais
+# réécrits), pas par perte de données : le garde-fou anti-shrink le
+# bloquerait sinon indéfiniment puisqu'il compare toujours à l'ancien gros
+# fichier. on_ready() force donc UNE resauvegarde pour établir la nouvelle
+# taille de référence, puis ce flag ne redevient jamais vrai.
+_bs_legacy_fields_pending_resave = False
 
 
 def _snapshot_backup_if_due():
@@ -1003,6 +1011,14 @@ def load_data():
                     DATA_FILE, len(coins), len(warns),
                 )
 
+                global _bs_legacy_fields_pending_resave
+                _bs_legacy_fields_pending_resave = any(
+                    k in data for k in (
+                        'bs_family_clubs', 'bs_trophy_history', 'bs_family_ranked_cache',
+                        'bs_season_month', 'bs_season_start_date', 'bs_trophy_evolution_history',
+                    )
+                )
+
                 # Migration : reset tickets (items 4 et 5) + remboursement au prix d'achat
                 _ticket_migrated = False
                 for _uid, _items in owned_items.items():
@@ -1061,7 +1077,10 @@ def load_data():
         coins = defaultdict(int)
         giveaway_data = {}
 
-def save_data():
+def save_data(force: bool = False):
+    """`force=True` contourne le garde-fou anti-shrink — réservé au
+    resave unique post-migration Supabase (voir on_ready), jamais à un
+    appel normal."""
     data_to_save = {
         'warns': {str(k): v for k, v in warns.items()},
         'coins': dict(coins),
@@ -1149,7 +1168,7 @@ def save_data():
     try:
         payload_bytes = json.dumps(data_to_save, indent=4, ensure_ascii=False).encode('utf-8')
 
-        if _is_dangerous_shrink(payload_bytes):
+        if not force and _is_dangerous_shrink(payload_bytes):
             # Refuse d'écraser un fichier riche par un état radicalement plus petit
             # (voir incident du 20/07/2026) — on garde DATA_FILE tel quel et on écrit
             # le payload suspect à côté pour inspection manuelle, au lieu de propager
@@ -1286,6 +1305,16 @@ async def check_mutes():
 async def on_ready():
     logging.warning("Connecté en tant que %s — DATA_FILE=%s — fichier_existe=%s", bot.user, DATA_FILE, os.path.exists(DATA_FILE))
     load_data()
+
+    if _bs_legacy_fields_pending_resave:
+        # data.json contient encore les champs BS migrés vers Supabase — le premier
+        # save_data() va donc être bien plus petit QUE PAR CONCEPTION (voir le
+        # commentaire sur _bs_legacy_fields_pending_resave). On force ce resave unique
+        # pour établir la nouvelle taille de référence, sinon le garde-fou anti-shrink
+        # bloquerait indéfiniment TOUTES les sauvegardes (coins, warns, etc. inclus),
+        # pas seulement le tracking BS.
+        save_data(force=True)
+        logging.warning("Migration Supabase : data.json re-sauvegardé sans les champs BS legacy.")
 
     # Les commandes dynamiques par clan (!projetx, etc.) ne survivent pas à un
     # redémarrage, donc on les réenregistre systématiquement ici. bs_family_clubs
