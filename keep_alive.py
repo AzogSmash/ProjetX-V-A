@@ -95,6 +95,51 @@ def api_famille_saisons():
     return jsonify(db_bs.list_archived_seasons())
 
 
+def _r1v1_tier_label(points, tiers):
+    label = tiers[0][1]
+    for min_pts, name in tiers:
+        if points >= min_pts:
+            label = name
+    return label
+
+
+@app.route("/api/famille/classement_1v1")
+def api_famille_classement_1v1():
+    """Classement du ranked 1v1 interne au serveur (duels, !duel & co) —
+    système indépendant du ranked en jeu Brawl Stars, voir ranked_1v1."""
+    main = _bot()
+    guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    entries = []
+    for uid_str, p in main.ranked_1v1.items():
+        member = guild.get_member(int(uid_str)) if guild else None
+        if not member or member.bot:
+            continue
+        entries.append({
+            "name": member.display_name,
+            "points": p.get("points", 0),
+            "wins": p.get("wins", 0),
+            "losses": p.get("losses", 0),
+            "tier": _r1v1_tier_label(p.get("points", 0), main.RANKED_1V1_TIERS),
+        })
+    entries.sort(key=lambda e: e["points"], reverse=True)
+    return jsonify(entries)
+
+
+@app.route("/api/famille/classement_casino")
+def api_famille_classement_casino():
+    """Classement de l'économie casino du bot (coins), pour la page Classement du site."""
+    main = _bot()
+    guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    entries = []
+    for uid, amount in main.coins.items():
+        member = guild.get_member(int(uid)) if guild else None
+        if not member or member.bot:
+            continue
+        entries.append({"name": member.display_name, "coins": amount})
+    entries.sort(key=lambda e: e["coins"], reverse=True)
+    return jsonify(entries[:100])
+
+
 @app.route("/api/famille/clan/<tag>")
 def api_famille_clan_detail(tag):
     main = _bot()
