@@ -10123,7 +10123,7 @@ async def _bs_fetch_club(tag: str):
         'tag': club.get('tag', f"#{clean}"),
         'name': _bs_strip_markup(club.get('name')) or '?',
         'trophies': club.get('trophies', 0),
-        'description': club.get('description', ''),
+        'description': _bs_strip_markup(club.get('description', '')),
         'type': club.get('type', 'open'),
         'requiredTrophies': club.get('requiredTrophies', 0),
         'members': members,
