@@ -10799,11 +10799,41 @@ async def cmd_evolution_trophees(ctx):
     await ctx.send(embed=view.build_embed(), view=view)
 
 
+def _first_thursday_10(year: int, month: int) -> datetime:
+    """1er jeudi du mois à 10h, heure de Paris (aware datetime)."""
+    d = datetime(year, month, 1, 10, 0, 0, tzinfo=BS_SEASON_TZ)
+    offset = (3 - d.weekday()) % 7  # weekday(): lundi=0 … jeudi=3
+    return d.replace(day=1 + offset)
+
+
+def _most_recent_season_start(now: datetime) -> datetime:
+    """1er jeudi 10h (heure de Paris) le plus récent déjà passé — calcul
+    déterministe à partir de l'horloge, indépendant de tout état persisté.
+    Utilisé pour amorcer/recaler bs_season_start_date sans jamais retomber
+    sur un arbitraire "maintenant" (voir incident du 20/07/2026 ci-dessous)."""
+    year, month = now.year, now.month
+    for _ in range(4):
+        candidate = _first_thursday_10(year, month)
+        if candidate <= now:
+            return candidate
+        month -= 1
+        if month < 1:
+            month, year = 12, year - 1
+    return _first_thursday_10(year, month)
+
+
 @tasks.loop(minutes=30)
 async def check_bs_season():
     """Détecte le début d'une nouvelle saison Brawl Stars (1er jeudi du mois, à partir de 10h
     heure de Paris — avec rattrapage si le bot était hors ligne pendant toute la fenêtre) et
-    archive la progression de trophées de la saison qui se termine dans bs_trophy_evolution_history."""
+    archive la progression de trophées de la saison qui se termine dans bs_trophy_evolution_history.
+
+    bs_season_start_date étant utilisé comme borne pour calculer la progression de chaque
+    membre (!evo, /api/famille/evolution), une régression ici efface silencieusement des
+    semaines de suivi (incident du 20/07/2026 : cette valeur avait fini remise à "aujourd'hui"
+    au lieu du vrai début de saison, sans doute suite à un redémarrage où bs_season_month
+    était retombé à None). On calcule donc maintenant la date correcte de façon déterministe
+    (1er jeudi 10h) plutôt que d'utiliser `today` en dur, et on revalide/recale à chaque tick."""
     await bot.wait_until_ready()
     global bs_season_month, bs_season_start_date
     if not bs_family_clubs:
@@ -10814,11 +10844,24 @@ async def check_bs_season():
     today = now.strftime('%Y-%m-%d')
 
     if bs_season_month is None:
-        bs_season_month = current_month
-        bs_season_start_date = today
+        start = _most_recent_season_start(now)
+        bs_season_month = start.strftime('%Y-%m')
+        bs_season_start_date = start.strftime('%Y-%m-%d')
         save_data()
         return
-    if current_month == bs_season_month:
+
+    if bs_season_month == current_month:
+        # Filet de sécurité : si le pointeur a dérivé de la vraie date de bascule
+        # (cf. docstring), on le recale silencieusement sans repasser par
+        # l'archivage puisqu'on reste dans le même mois de saison.
+        correct_start_date = _most_recent_season_start(now).strftime('%Y-%m-%d')
+        if bs_season_start_date != correct_start_date:
+            logging.warning(
+                "check_bs_season: bs_season_start_date incohérent (%s), recalage sur %s",
+                bs_season_start_date, correct_start_date,
+            )
+            bs_season_start_date = correct_start_date
+            save_data()
         return
 
     is_first_thursday = now.day <= 7 and now.weekday() == 3
@@ -10842,8 +10885,9 @@ async def check_bs_season():
     if archive:
         bs_trophy_evolution_history[ended_month] = archive
 
-    bs_season_month = current_month
-    bs_season_start_date = today
+    new_start = _most_recent_season_start(now)
+    bs_season_month = new_start.strftime('%Y-%m')
+    bs_season_start_date = new_start.strftime('%Y-%m-%d')
     save_data()
 
 
