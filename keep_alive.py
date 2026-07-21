@@ -124,22 +124,6 @@ def api_famille_clan_detail(tag):
     return jsonify(data)
 
 
-@app.route("/api/famille/_export_pour_migration")
-def api_famille_export_temporaire():
-    # Route TEMPORAIRE pour récupérer l'état actuel avant bascule vers
-    # Supabase (voir migration du tracking BS) — à supprimer juste après.
-    main = _bot()
-    return jsonify({
-        "bs_family_clubs": main.bs_family_clubs,
-        "bs_trophy_history": main.bs_trophy_history,
-        "bs_family_ranked_cache": main.bs_family_ranked_cache,
-        "bs_family_ranked_updated_at": main.bs_family_ranked_updated_at,
-        "bs_season_month": main.bs_season_month,
-        "bs_season_start_date": main.bs_season_start_date,
-        "bs_trophy_evolution_history": main.bs_trophy_evolution_history,
-    })
-
-
 def run():
     try:
         app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
