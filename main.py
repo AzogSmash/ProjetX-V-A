@@ -2162,113 +2162,6 @@ async def unsilence(ctx, member: discord.Member):
     ]
     await send_log_message(ctx.guild, LOG_MODERATION_CHANNEL_ID, "🔊 Membre Désilencé", f"{member.mention} a été retiré de la liste des utilisateurs silencés.", discord.Color.light_grey(), fields)
 
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-    # Vérification punition
-    uid = str(message.author.id)
-    if uid in punitions:
-        data = punitions[uid]
-        if message.channel.id == data['salon_id']:
-            try:
-                nombre_envoye = int(message.content.strip())
-                attendu = data['actuel'] + 1
-                if nombre_envoye == attendu:
-                    data['actuel'] += 1
-                    if data['actuel'] >= data['nombre']:
-                        await message.channel.send(f"🎉 {message.author.mention} a compté jusqu'à **{data['nombre']}** ! Punition terminée !")
-                        await _liberer_membre(message.guild, message.author)
-                    else:
-                        if data['actuel'] % 10 == 0:
-                            await message.channel.send(f"✅ **{data['actuel']}/{data['nombre']}** — Continue !")
-                else:
-                    data['actuel'] = 0
-                    await message.channel.send(f"❌ {message.author.mention} **FAUTE !** Tu as envoyé `{nombre_envoye}` au lieu de `{attendu}`. Repart de **1** !")
-            except ValueError:
-                data['actuel'] = 0
-                await message.channel.send(f"❌ {message.author.mention} **FAUTE !** Ce n'est pas un nombre. Repart de **1** !")
-            return
-
-    guild_id = message.guild.id if message.guild else None
-    if guild_id and guild_id in silenced_users and message.author.id in silenced_users[guild_id]:
-        try:
-            await message.delete()
-            fields = [
-                ("Auteur", message.author.mention, True),
-                ("Canal", message.channel.mention, True),
-                ("Contenu", message.content if message.content else "*(Contenu non textuel ou vide)*", False)
-            ]
-            await send_log_message(message.guild, LOG_MODERATION_CHANNEL_ID, "🗑️ Message d'Utilisateur Silencé Supprimé", f"Le message de {message.author.mention} a été supprimé car l'utilisateur est silencé.", discord.Color.red(), fields)
-        except discord.Forbidden:
-            print(f"❌ Impossible de supprimer le message de {message.author.name} (permissions).")
-        except Exception as e:
-            print(f"❌ Erreur lors de la suppression du message de {message.author.name}: {e}")
-        return
-    
-    # Vérification punition morse
-    if uid in morse_punitions:
-        data = morse_punitions[uid]
-        if message.channel.id == data['salon_id']:
-            data['attempts'] += 1
-            print(f"MORSE ATTENDU: '{data['morse']}'")
-            print(f"MORSE RECU: '{message.content.strip()}'")
-            if message.content.strip() == data['morse']:
-                await message.channel.send(f"🎉 {message.author.mention} **BRAVO !** Tu as réussi ! Punition terminée !")
-                await _liberer_membre_morse(message.guild, message.author)
-            else:
-                # Nouveau mot aléatoire
-                new_word = random.choice(MORSE_WORDS)
-                new_morse = _text_to_morse(new_word)
-                data['word'] = new_word
-                data['morse'] = new_morse
-                buf = _morse_to_image(new_morse, new_word)
-                await message.channel.send(
-                    f"❌ {message.author.mention} **FAUX !** (tentative #{data['attempts']})\nNouveau mot :",
-                    file=discord.File(buf, filename="morse.png")
-                )
-            return
-
-    if message.content.startswith('!') and message.content.lower().endswith(' aide'):
-        command_name = message.content[1:-5]
-        command_help = {
-            "warn": "**!warn @membre [raison]**\nDonne un avertissement à un membre. Auto-mute après 5 warns.",
-            "mute": "**!mute @membre [durée] [raison]**\nMute un membre temporairement (ex: `30s`, `1m`, `2h`, `1j`) ou de manière permanente. Empêche de parler/écrire.",
-            "unmute": "**!unmute @membre**\nEnlève le mute d'un membre.",
-            "ban": "**!ban @membre [raison]**\nBannit définitivement un membre du serveur.",
-            "unban": "**!unban ID_utilisateur**\nDébannit un utilisateur avec son ID.",
-            "clear": "**!clear nombre**\nSupprime un nombre de messages dans le salon.",
-            "silence": "**!silence @membre**\nSupprime automatiquement tous les messages du membre.",
-            "unsilence": "**!unsilence @membre**\nArrête de supprimer les messages du membre.",
-            "sanctions": "**!sanctions [@membre]**\nAffiche le nombre de warns et mutes d'un membre.",
-            "addrole": "**!addrole nom_du_rôle**\nCrée un nouveau rôle sur le serveur.",
-            "giverole": "**!giverole @membre nom_du_rôle**\nDonne un rôle spécifique à un membre.",
-            "construction": "**!construction**\nCrée une architecture complète de serveur communautaire (créateur du bot uniquement).",
-            "nuke": "**!nuke**\n⚠️ DANGER : Supprime TOUS les salons du serveur (créateur du bot uniquement).",
-            "lock": "**!lock**\nVerrouille le salon actuel (empêche d'écrire).",
-            "unlock": "**!unlock**\nDéverrouille le salon actuel.",
-            "rename": "**!rename @membre nouveau_pseudo**\nChange le pseudo d'un membre sur le serveur.",
-            "say": "**!say message**\nFait dire quelque chose au bot (créateur du bot uniquement).",
-            "dm": "**!dm @membre message**\nEnvoie un message privé à un membre (créateur du bot uniquement).",
-            "dmall": "**!dmall message**\nEnvoie un message privé à tous les membres (créateur du bot uniquement).",
-            "giveaway": "**!giveaway durée_heures nb_gagnants lot**\nLance un giveaway.",
-            "cancelgiveaway": "**!cancelgiveaway**\nAnnule le giveaway en cours.",
-            "aide": "**!aide**\nAffiche la liste complète des commandes."
-        }
-        if command_name in command_help:
-            embed = discord.Embed(
-                title=f"ℹ️ Aide - !{command_name}",
-                description=command_help[command_name],
-                color=0x3498db
-            )
-            embed.set_footer(text=f"Demandé par {message.author.display_name} • Tapez !aide pour voir toutes les commandes")
-            await message.channel.send(embed=embed)
-            return
-
-    await bot.process_commands(message)
-    
-
 @bot.command()
 async def dm(ctx, member: discord.Member, *, message):
     if not is_bot_owner(ctx.author):
@@ -9028,6 +8921,14 @@ async def _liberer_membre(guild, membre, resolved_by=None):
 
 @bot.event
 async def on_message(message):
+    """Version fusionnée — il existait DEUX handlers on_message dans ce fichier
+    (celui-ci + un plus ancien vers la ligne 2165), et @bot.event fait que seul
+    le DERNIER défini l'emporte silencieusement (discord.py fait juste
+    setattr(bot, 'on_message', coro), pas d'empilement). Le second (celui qui
+    tournait vraiment) n'avait ni la vérification punition morse ni la liste
+    complète des `!commande aide` — la résolution automatique d'une punition
+    morse en tapant le bon code ne marchait donc jamais (incident du
+    21/07/2026). Fusionné ici, l'ancien doublon supprimé."""
     if message.author.bot:
         return
 
@@ -9039,7 +8940,7 @@ async def on_message(message):
             try:
                 nombre_envoye = int(message.content.strip())
                 attendu = data['actuel'] + 1
-                
+
                 if nombre_envoye == attendu:
                     data['actuel'] += 1
                     if data['actuel'] >= data['nombre']:
@@ -9056,7 +8957,6 @@ async def on_message(message):
                 await message.channel.send(f"❌ {message.author.mention} **FAUTE !** Ce n'est pas un nombre. Repart de **1** !")
             return
 
-    # ... reste du on_message existant
     guild_id = message.guild.id if message.guild else None
     if guild_id and guild_id in silenced_users and message.author.id in silenced_users[guild_id]:
         try:
@@ -9073,10 +8973,52 @@ async def on_message(message):
             print(f"❌ Erreur lors de la suppression du message de {message.author.name}: {e}")
         return
 
+    # Vérification punition morse
+    if uid in morse_punitions:
+        data = morse_punitions[uid]
+        if message.channel.id == data['salon_id']:
+            data['attempts'] += 1
+            if message.content.strip() == data['morse']:
+                await message.channel.send(f"🎉 {message.author.mention} **BRAVO !** Tu as réussi ! Punition terminée !")
+                await _liberer_membre_morse(message.guild, message.author)
+            else:
+                # Nouveau mot aléatoire
+                new_word = random.choice(MORSE_WORDS)
+                new_morse = _text_to_morse(new_word)
+                data['word'] = new_word
+                data['morse'] = new_morse
+                buf = _morse_to_image(new_morse, new_word)
+                await message.channel.send(
+                    f"❌ {message.author.mention} **FAUX !** (tentative #{data['attempts']})\nNouveau mot :",
+                    file=discord.File(buf, filename="morse.png")
+                )
+            return
+
     if message.content.startswith('!') and message.content.lower().endswith(' aide'):
         command_name = message.content[1:-5]
         command_help = {
             "warn": "**!warn @membre [raison]**\nDonne un avertissement à un membre. Auto-mute après 5 warns.",
+            "mute": "**!mute @membre [durée] [raison]**\nMute un membre temporairement (ex: `30s`, `1m`, `2h`, `1j`) ou de manière permanente. Empêche de parler/écrire.",
+            "unmute": "**!unmute @membre**\nEnlève le mute d'un membre.",
+            "ban": "**!ban @membre [raison]**\nBannit définitivement un membre du serveur.",
+            "unban": "**!unban ID_utilisateur**\nDébannit un utilisateur avec son ID.",
+            "clear": "**!clear nombre**\nSupprime un nombre de messages dans le salon.",
+            "silence": "**!silence @membre**\nSupprime automatiquement tous les messages du membre.",
+            "unsilence": "**!unsilence @membre**\nArrête de supprimer les messages du membre.",
+            "sanctions": "**!sanctions [@membre]**\nAffiche le nombre de warns et mutes d'un membre.",
+            "addrole": "**!addrole nom_du_rôle**\nCrée un nouveau rôle sur le serveur.",
+            "giverole": "**!giverole @membre nom_du_rôle**\nDonne un rôle spécifique à un membre.",
+            "construction": "**!construction**\nCrée une architecture complète de serveur communautaire (créateur du bot uniquement).",
+            "nuke": "**!nuke**\n⚠️ DANGER : Supprime TOUS les salons du serveur (créateur du bot uniquement).",
+            "lock": "**!lock**\nVerrouille le salon actuel (empêche d'écrire).",
+            "unlock": "**!unlock**\nDéverrouille le salon actuel.",
+            "rename": "**!rename @membre nouveau_pseudo**\nChange le pseudo d'un membre sur le serveur.",
+            "say": "**!say message**\nFait dire quelque chose au bot (créateur du bot uniquement).",
+            "dm": "**!dm @membre message**\nEnvoie un message privé à un membre (créateur du bot uniquement).",
+            "dmall": "**!dmall message**\nEnvoie un message privé à tous les membres (créateur du bot uniquement).",
+            "giveaway": "**!giveaway durée_heures nb_gagnants lot**\nLance un giveaway.",
+            "cancelgiveaway": "**!cancelgiveaway**\nAnnule le giveaway en cours.",
+            "aide": "**!aide**\nAffiche la liste complète des commandes."
         }
         if command_name in command_help:
             embed = discord.Embed(
@@ -9093,7 +9035,7 @@ async def on_message(message):
         await _maybe_dev_ping_reaction(message)
 
     await bot.process_commands(message)
-    
+
     
 
 MORSE_CODE = {
