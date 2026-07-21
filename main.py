@@ -641,13 +641,23 @@ def _dev_ping_pick_lines(content: str) -> list:
     return DEV_PING_LINES
 
 
-RUSH_USER_ID = 602807768046632971  # se retourne contre lui — aussi autorisé : créateurs du bot + Azog
+RUSH_USER_ID = 602807768046632971  # aussi autorisé : créateurs du bot + Azog
+TWISTY_USER_ID = 860057663064899584  # aussi autorisé : créateurs du bot + Azog
 
 @bot.hybrid_command(name="rush")
 async def cmd_rush(ctx):
     if ctx.author.id != RUSH_USER_ID and not is_bot_owner(ctx.author) and ctx.author.id != PROTECTED_FROM_PUNISH_ID:
         return await ctx.send("❌ Cette commande est réservée à Rush (et rien qu'à lui, désolé).")
-    await ctx.send("Juste une phrase")
+    embed = discord.Embed(title="👑 Le verdict est tombé", description="**Rush** > Twisty", color=0xf1c40f)
+    await ctx.send(embed=embed)
+
+
+@bot.hybrid_command(name="twisty")
+async def cmd_twisty(ctx):
+    if ctx.author.id != TWISTY_USER_ID and not is_bot_owner(ctx.author) and ctx.author.id != PROTECTED_FROM_PUNISH_ID:
+        return await ctx.send("❌ Cette commande est réservée à Twisty (et rien qu'à lui, désolé).")
+    embed = discord.Embed(title="👑 Le verdict est tombé", description="**Twisty** > Rush", color=0x3498db)
+    await ctx.send(embed=embed)
 
 
 async def _maybe_dev_ping_reaction(message):
