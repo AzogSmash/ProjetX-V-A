@@ -173,7 +173,12 @@ def api_member(discord_id):
     member = db_members.get_member(discord_id)
     if member is None:
         return {"error": "pas membre du serveur"}, 404
-    return jsonify({"role_ids": member["role_ids"], "is_admin": member["is_admin"]})
+    main = _bot()
+    return jsonify({
+        "role_ids": member["role_ids"],
+        "is_admin": member["is_admin"],
+        "bs_linked": discord_id in main.bs_accounts,
+    })
 
 
 @app.route("/api/staff/panel")
