@@ -10178,9 +10178,12 @@ def _bs_extract_ranked(player: dict):
     commentaire ici, qui passait par api.rnt.dev, une source tierce non officielle, pour cette
     donnée). Le nom de palier renvoyé par l'API prime sur le calcul par score : ça couvre aussi
     les comptes dont le record all-time a été fait sous l'ancien système Ranked (score absent/à
-    0 dans ce cas, mais le nom de palier reste renseigné) — voir TIER_LOGIC_BRIEF.md.
-    Retourne (pts, tier, highest_pts, highest_tier), chaque valeur pouvant être None si absente
-    du payload."""
+    0, ou pas sur la même échelle que le système actuel, dans ce cas — mais le nom de palier
+    reste renseigné) — voir TIER_LOGIC_BRIEF.md. highest_rank (highestAllTimeRankedRank, un
+    entier de palier fourni par l'API) sert à trier plusieurs records all-time entre eux de façon
+    fiable même quand highest_pts n'est pas comparable d'un joueur à l'autre pour cette raison.
+    Retourne (pts, tier, highest_pts, highest_tier, highest_rank), chaque valeur pouvant être
+    None si absente du payload."""
     pts = player.get('rankedElo')
     tier = _ranked_tier_name_from_api_name(player.get('rankedRankName'))
     if tier is None and pts is not None:
@@ -10190,8 +10193,9 @@ def _bs_extract_ranked(player: dict):
     highest_tier = _ranked_tier_name_from_api_name(player.get('highestAllTimeRankedRankName'))
     if highest_tier is None and highest_pts is not None:
         highest_tier = _ranked_tier_name(highest_pts)
+    highest_rank = player.get('highestAllTimeRankedRank')
 
-    return pts, tier, highest_pts, highest_tier
+    return pts, tier, highest_pts, highest_tier, highest_rank
 
 
 async def _bs_fetch_ranked_pts(session: aiohttp.ClientSession, clean_tag: str):
@@ -10200,17 +10204,17 @@ async def _bs_fetch_ranked_pts(session: aiohttp.ClientSession, clean_tag: str):
     contient pas ces champs — seul l'appel /players par joueur les expose). _bs_fetch_player
     a déjà son payload et appelle _bs_extract_ranked directement, sans passer par ici."""
     if not BRAWLSTARS_API_KEY:
-        return None, None, None, None
+        return None, None, None, None, None
     headers = {"Authorization": f"Bearer {BRAWLSTARS_API_KEY}", "Accept": "application/json"}
     try:
         async with session.get(
             f"{BS_API_BASE}/players/%23{clean_tag}", headers=headers, timeout=aiohttp.ClientTimeout(total=10)
         ) as resp:
             if resp.status != 200:
-                return None, None, None, None
+                return None, None, None, None, None
             player = await resp.json(content_type=None)
     except Exception:
-        return None, None, None, None  # Rang classé indisponible — pas bloquant pour l'appelant
+        return None, None, None, None, None  # Rang classé indisponible — pas bloquant pour l'appelant
     return _bs_extract_ranked(player)
 
 
@@ -10243,7 +10247,7 @@ async def _bs_fetch_player(tag: str):
                     return None, f"❌ Erreur inattendue de l'API Brawl Stars ({resp.status})."
                 player = await resp.json(content_type=None)
 
-            ranked_pts, ranked_tier, highest_ranked_pts, highest_ranked_tier = _bs_extract_ranked(player)
+            ranked_pts, ranked_tier, highest_ranked_pts, highest_ranked_tier, highest_ranked_rank = _bs_extract_ranked(player)
     except Exception as e:
         logging.warning(f"[bs] erreur réseau API Brawl Stars pour tag '{clean}': {type(e).__name__}: {e}")
         return None, "🌐 Impossible de contacter l'API Brawl Stars. Réessaie plus tard."
@@ -10256,6 +10260,7 @@ async def _bs_fetch_player(tag: str):
         'ranked_tier': ranked_tier,
         'highest_ranked_pts': highest_ranked_pts,
         'highest_ranked_tier': highest_ranked_tier,
+        'highest_ranked_rank': highest_ranked_rank,
         'club': _bs_strip_markup((player.get('club') or {}).get('name')),
     }, None
 
@@ -11096,12 +11101,13 @@ async def sync_family_ranked():
             for m in data['members']:
                 if not m['tag']:
                     continue
-                ranked_pts, ranked_tier, highest_ranked_pts, highest_ranked_tier = await _bs_fetch_ranked_pts(session, m['tag'])
+                ranked_pts, ranked_tier, highest_ranked_pts, highest_ranked_tier, highest_ranked_rank = await _bs_fetch_ranked_pts(session, m['tag'])
                 if ranked_pts is not None:
                     new_cache.append({
                         'tag': m['tag'], 'name': m['name'], 'club': data['name'],
                         'ranked_pts': ranked_pts, 'ranked_tier': ranked_tier,
                         'highest_ranked_pts': highest_ranked_pts, 'highest_ranked_tier': highest_ranked_tier,
+                        'highest_ranked_rank': highest_ranked_rank,
                     })
                 await asyncio.sleep(0.6)
 

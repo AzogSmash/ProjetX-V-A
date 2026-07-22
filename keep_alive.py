@@ -58,6 +58,7 @@ def api_famille_ranked():
             "name": p["name"], "club": p["club"],
             "ranked_pts": p["ranked_pts"], "ranked_tier": p["ranked_tier"],
             "highest_ranked_pts": p["highest_ranked_pts"], "highest_ranked_tier": p["highest_ranked_tier"],
+            "highest_ranked_rank": p.get("highest_ranked_rank"),
         }
         for p in db_bs.get_ranked_cache()
     }

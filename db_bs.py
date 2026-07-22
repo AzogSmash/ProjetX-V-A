@@ -164,8 +164,8 @@ def get_baselines_since(since_date: str) -> dict:
 
 def replace_ranked_cache(entries: list[dict]) -> None:
     """entries: [{'tag','name','club','ranked_pts','ranked_tier',
-    'highest_ranked_pts','highest_ranked_tier'}, ...] — remplace tout le
-    cache (comme l'ancien bs_family_ranked_cache.clear()+update)."""
+    'highest_ranked_pts','highest_ranked_tier','highest_ranked_rank'}, ...] —
+    remplace tout le cache (comme l'ancien bs_family_ranked_cache.clear()+update)."""
     client = get_client()
     client.table("bs_ranked_cache").delete().neq("player_tag", "").execute()
     if entries:
@@ -177,6 +177,7 @@ def replace_ranked_cache(entries: list[dict]) -> None:
                     "ranked_tier": e["ranked_tier"],
                     "highest_ranked_pts": e.get("highest_ranked_pts"),
                     "highest_ranked_tier": e.get("highest_ranked_tier"),
+                    "highest_ranked_rank": e.get("highest_ranked_rank"),
                 }
                 for e in entries
             ]
@@ -185,9 +186,9 @@ def replace_ranked_cache(entries: list[dict]) -> None:
 
 def get_ranked_cache() -> list[dict]:
     """[{'tag','name','club','ranked_pts','ranked_tier','highest_ranked_pts',
-    'highest_ranked_tier'}, ...] — jointure avec bs_players/bs_family_clubs
-    pour retrouver nom/club (plus stockés en double dans bs_ranked_cache
-    lui-même, contrairement à l'ancien dict)."""
+    'highest_ranked_tier','highest_ranked_rank'}, ...] — jointure avec
+    bs_players/bs_family_clubs pour retrouver nom/club (plus stockés en
+    double dans bs_ranked_cache lui-même, contrairement à l'ancien dict)."""
     client = get_client()
     ranked = client.table("bs_ranked_cache").select("*").execute().data
     if not ranked:
@@ -210,6 +211,7 @@ def get_ranked_cache() -> list[dict]:
                 "ranked_tier": r["ranked_tier"],
                 "highest_ranked_pts": r.get("highest_ranked_pts"),
                 "highest_ranked_tier": r.get("highest_ranked_tier"),
+                "highest_ranked_rank": r.get("highest_ranked_rank"),
                 "updated_at": r["updated_at"],
             }
         )
