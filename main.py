@@ -10098,7 +10098,7 @@ RANKED_TIERS = [
     (1500,  "Or 1"),       (2000,  "Or 2"),        (2500,  "Or 3"),
     (3000,  "Diamant 1"),  (3500,  "Diamant 2"),   (4000,  "Diamant 3"),
     (4500,  "Mythique 1"), (5000,  "Mythique 2"),  (5500,  "Mythique 3"),
-    (6000,  "Légende 1"),  (6750,  "Légende 2"),   (7500,  "Légende 3"),
+    (6000,  "Légendaire 1"),  (6750,  "Légendaire 2"),   (7500,  "Légendaire 3"),
     (8250,  "Masters 1"),  (9250,  "Masters 2"),   (10250, "Masters 3"),
     (11250, "Pro"),
 ]
