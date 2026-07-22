@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Users/ccass/bot-prairie -maxdepth 1 -iname \".env*\" 2>/dev/null)",
+      "Read(//c/Users/ccass/bot-prairie/**)",
+      "Read(//c/Users/ccass/bot-prairie/src/commands/**)",
+      "Read(//c/Users/ccass/bot-prairie/src/jobs/**)",
+      "Read(//c/Users/ccass/bot-prairie/src/**)",
+      "Read(//c/Users/ccass/bot-prairie/src/services/**)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\({k:v for k,v in d.items\\(\\) if k in ['name','tag','trophies','highestTrophies','rankedRankName','highestAllTimeRankedRankName','soloVictories','duoVictories','expLevel']}, indent=2\\)\\)\")",
+      "Read(//c/Users/ccass/bot-prairie/src/lib/**)",
+      "Bash(curl -s \"https://api.rnt.dev/profile?tag=29UPLG8QQ\")",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 -c ' *)",
+      "Bash(python -m pip --version)",
+      "Bash(python -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(python -m pip install -q discord.py python-dotenv aiohttp Pillow staticmap google-generativeai yt_dlp)",
+      "Bash(python main.py)",
+      "Bash(git commit -m ' *)",
+      "Bash(python -m py_compile main.py)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('club'\\), indent=2\\)\\)\")",
+      "Bash(PYTHONIOENCODING=utf-8 python -c ' *)",
+      "Bash(python -c \"import discord; print\\(discord.__version__\\)\")",
+      "Bash(pip show *)",
+      "Bash(python3 -)",
+      "Bash(python3 -m py_compile main.py)",
+      "Bash(PYTHONIOENCODING=utf-8 python3 -)",
+      "Bash(python3 -c \"from PIL import Image, ImageDraw, ImageFont; print\\(Image.__version__ if hasattr\\(Image,'__version__'\\) else 'n/a'\\); import PIL; print\\(PIL.__version__\\)\")"
+    ]
+  }
+}

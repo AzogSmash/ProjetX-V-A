@@ -10090,7 +10090,6 @@ def _carte_font(size):
 
 # ── Brawl Stars : liaison de compte + rôles auto (trophées / classé) ────────
 BS_API_BASE  = "https://bsproxy.royaleapi.dev/v1"
-RNT_API_BASE = "https://api.rnt.dev/profile"
 
 RANKED_TIERS = [
     (0,     "Bronze 1"),   (250,   "Bronze 2"),   (500,   "Bronze 3"),
@@ -10111,6 +10110,29 @@ def _ranked_tier_name(points: int) -> str:
         else:
             break
     return tier
+
+
+# Nom de palier tel que renvoyé par l'API officielle (ex: "MASTERS I", "LEGENDARY I",
+# "GOLD II" — anglais, tout en majuscules, chiffre romain ; confirmé sur payload réel le
+# 22/07/2026, PRO sans chiffre). Sert de fallback prioritaire sur highestAllTimeRankedRankName
+# pour les comptes dont le record all-time a été fait sous l'ancien système Ranked, où le
+# score numérique (highestAllTimeRankedElo) est absent/à 0 mais le nom reste renseigné.
+_RANKED_TIER_NAME_MAP = {
+    "BRONZE I": "Bronze 1", "BRONZE II": "Bronze 2", "BRONZE III": "Bronze 3",
+    "SILVER I": "Argent 1", "SILVER II": "Argent 2", "SILVER III": "Argent 3",
+    "GOLD I": "Or 1", "GOLD II": "Or 2", "GOLD III": "Or 3",
+    "DIAMOND I": "Diamant 1", "DIAMOND II": "Diamant 2", "DIAMOND III": "Diamant 3",
+    "MYTHIC I": "Mythique 1", "MYTHIC II": "Mythique 2", "MYTHIC III": "Mythique 3",
+    "LEGENDARY I": "Légendaire 1", "LEGENDARY II": "Légendaire 2", "LEGENDARY III": "Légendaire 3",
+    "MASTERS I": "Masters 1", "MASTERS II": "Masters 2", "MASTERS III": "Masters 3",
+    "PRO": "Pro",
+}
+
+
+def _ranked_tier_name_from_api_name(name) -> str | None:
+    if not name:
+        return None
+    return _RANKED_TIER_NAME_MAP.get(name.strip().upper())
 
 
 def _bs_strip_markup(text):
@@ -10149,33 +10171,53 @@ def _bs_alias(slug: str, reserved: set) -> str:
     return f"{base}{i}"
 
 
+def _bs_extract_ranked(player: dict):
+    """Points classés (actuels ET record all-time) à partir d'un payload /players officiel
+    déjà récupéré — rankedElo/rankedRankName/highestAllTimeRankedElo/highestAllTimeRankedRankName
+    sont exposés directement par l'API officielle (contrairement à ce qu'indiquait un ancien
+    commentaire ici, qui passait par api.rnt.dev, une source tierce non officielle, pour cette
+    donnée). Le nom de palier renvoyé par l'API prime sur le calcul par score : ça couvre aussi
+    les comptes dont le record all-time a été fait sous l'ancien système Ranked (score absent/à
+    0 dans ce cas, mais le nom de palier reste renseigné) — voir TIER_LOGIC_BRIEF.md.
+    Retourne (pts, tier, highest_pts, highest_tier), chaque valeur pouvant être None si absente
+    du payload."""
+    pts = player.get('rankedElo')
+    tier = _ranked_tier_name_from_api_name(player.get('rankedRankName'))
+    if tier is None and pts is not None:
+        tier = _ranked_tier_name(pts)
+
+    highest_pts = player.get('highestAllTimeRankedElo')
+    highest_tier = _ranked_tier_name_from_api_name(player.get('highestAllTimeRankedRankName'))
+    if highest_tier is None and highest_pts is not None:
+        highest_tier = _ranked_tier_name(highest_pts)
+
+    return pts, tier, highest_pts, highest_tier
+
+
 async def _bs_fetch_ranked_pts(session: aiohttp.ClientSession, clean_tag: str):
-    """Points classés (actuels ET record all-time) depuis api.rnt.dev (source tierce,
-    best-effort) — stats id 24 = CurrentRankedPoints, id 25 = HighestRankedPoints.
-    Retourne (pts, tier, highest_pts, highest_tier), chaque valeur pouvant être None
-    si indisponible individuellement."""
+    """Variante réseau de _bs_extract_ranked, pour les cas où on n'a pas déjà le payload
+    joueur sous la main (sync en masse depuis la liste de membres d'un clan, qui elle ne
+    contient pas ces champs — seul l'appel /players par joueur les expose). _bs_fetch_player
+    a déjà son payload et appelle _bs_extract_ranked directement, sans passer par ici."""
+    if not BRAWLSTARS_API_KEY:
+        return None, None, None, None
+    headers = {"Authorization": f"Bearer {BRAWLSTARS_API_KEY}", "Accept": "application/json"}
     try:
         async with session.get(
-            f"{RNT_API_BASE}?tag={clean_tag}", timeout=aiohttp.ClientTimeout(total=10)
-        ) as rnt_resp:
-            if rnt_resp.status == 200:
-                rnt_data = await rnt_resp.json(content_type=None)
-                stats = (rnt_data.get('result') or {}).get('stats', [])
-                val = next((s.get('value') for s in stats if s.get('id') == 24), None)
-                highest_val = next((s.get('value') for s in stats if s.get('id') == 25), None)
-                return (
-                    val, _ranked_tier_name(val) if val is not None else None,
-                    highest_val, _ranked_tier_name(highest_val) if highest_val is not None else None,
-                )
+            f"{BS_API_BASE}/players/%23{clean_tag}", headers=headers, timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            if resp.status != 200:
+                return None, None, None, None
+            player = await resp.json(content_type=None)
     except Exception:
-        pass  # Rang classé indisponible (API tierce down) — pas bloquant pour l'appelant
-    return None, None, None, None
+        return None, None, None, None  # Rang classé indisponible — pas bloquant pour l'appelant
+    return _bs_extract_ranked(player)
 
 
 async def _bs_fetch_player(tag: str):
-    """Trophées via l'API officielle (proxy RoyaleAPI, pas besoin d'IP fixe) + rang classé
-    via api.rnt.dev (source tierce non officielle, best-effort — l'API officielle n'expose
-    pas les points classés). Retourne (data: dict|None, err: str|None)."""
+    """Trophées + rang classé, le tout depuis l'API officielle (proxy RoyaleAPI, pas besoin
+    d'IP fixe) — un seul appel /players, le rang classé y est exposé directement (voir
+    _bs_extract_ranked). Retourne (data: dict|None, err: str|None)."""
     clean = tag.strip().lstrip('#').upper()
     if not clean:
         return None, "❌ Tag invalide. Exemple : `#2ABC123`."
@@ -10201,7 +10243,7 @@ async def _bs_fetch_player(tag: str):
                     return None, f"❌ Erreur inattendue de l'API Brawl Stars ({resp.status})."
                 player = await resp.json(content_type=None)
 
-            ranked_pts, ranked_tier, highest_ranked_pts, highest_ranked_tier = await _bs_fetch_ranked_pts(session, clean)
+            ranked_pts, ranked_tier, highest_ranked_pts, highest_ranked_tier = _bs_extract_ranked(player)
     except Exception as e:
         logging.warning(f"[bs] erreur réseau API Brawl Stars pour tag '{clean}': {type(e).__name__}: {e}")
         return None, "🌐 Impossible de contacter l'API Brawl Stars. Réessaie plus tard."
@@ -11037,9 +11079,10 @@ async def check_bs_season():
 @tasks.loop(hours=4)
 async def sync_family_ranked():
     """Rafraîchit le cache des points classés de toute la famille en arrière-plan.
-    Fait exprès de ne PAS tourner à chaque commande : avec ~150 membres et une source
-    tierce (api.rnt.dev), interroger tout le monde à la demande serait lent et solliciterait
-    inutilement cette API à chaque fois qu'un membre tape la commande."""
+    Fait exprès de ne PAS tourner à chaque commande : avec ~150 membres, ça reste un appel
+    /players officiel par personne (la liste de membres d'un clan ne contient pas le rang
+    classé), donc interroger tout le monde à la demande serait lent et solliciterait
+    inutilement l'API à chaque fois qu'un membre tape la commande."""
     clubs = db_bs.list_family_clubs()
     if not clubs:
         return
