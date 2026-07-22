@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, request
 from threading import Thread
 from functools import wraps
+import asyncio
 import logging
 import os
 import secrets
@@ -178,6 +179,40 @@ def api_member(discord_id):
         "role_ids": member["role_ids"],
         "is_admin": member["is_admin"],
         "bs_linked": discord_id in main.bs_accounts,
+    })
+
+
+@app.route("/api/bslink", methods=["POST"])
+@_require_internal_secret
+def api_bslink():
+    """Liaison d'un compte Brawl Stars depuis le site (popup BsLinkModal) —
+    même logique que !bslink côté Discord (_bslink_apply), juste déclenchée
+    depuis Flask. Flask tourne dans un thread séparé de la boucle asyncio du
+    bot ; _bslink_apply fait des appels réseau (aiohttp) et touche des
+    globals partagés (bs_accounts, save_data) donc DOIT s'exécuter sur la
+    boucle du bot, jamais directement ici — d'où run_coroutine_threadsafe."""
+    body = request.get_json(silent=True) or {}
+    discord_id = str(body.get("discord_id", "")).strip()
+    tag = str(body.get("tag", "")).strip()
+    if not discord_id or not tag:
+        return {"error": "discord_id et tag requis"}, 400
+
+    main = _bot()
+    try:
+        future = asyncio.run_coroutine_threadsafe(main._bslink_apply(discord_id, tag), main.bot.loop)
+        data, err = future.result(timeout=20)
+    except Exception as e:
+        return {"error": f"Erreur interne : {e}"}, 500
+
+    if err:
+        return {"error": err}, 400
+
+    return jsonify({
+        "tag": data["tag"],
+        "name": data["name"],
+        "trophies": data["trophies"],
+        "ranked_tier": data["ranked_tier"],
+        "club": data.get("club"),
     })
 
 

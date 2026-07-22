@@ -10389,17 +10389,30 @@ def _bs_embed(member: discord.Member, acc: dict) -> discord.Embed:
     return embed
 
 
-@bot.hybrid_command(name="bslink", aliases=["lierbs"])
-async def cmd_bslink(ctx, tag: str):
+async def _bslink_apply(discord_id: str, tag: str, member: discord.Member = None):
+    """Cœur de !bslink, réutilisé par la commande Discord ET par /api/bslink
+    (liaison depuis le site — voir keep_alive.py). Retourne (data, err)."""
     data, err = await _bs_fetch_player(tag)
     if err:
-        return await ctx.send(err)
+        return None, err
 
-    bs_accounts[str(ctx.author.id)] = data
+    bs_accounts[discord_id] = data
     save_data()
 
-    if ctx.guild:
-        await _bs_sync_member_roles(ctx.author, data['trophies'], data['ranked_pts'])
+    if member is None:
+        guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+        member = guild.get_member(int(discord_id)) if guild else None
+    if member:
+        await _bs_sync_member_roles(member, data['trophies'], data['ranked_pts'])
+
+    return data, None
+
+
+@bot.hybrid_command(name="bslink", aliases=["lierbs"])
+async def cmd_bslink(ctx, tag: str):
+    data, err = await _bslink_apply(str(ctx.author.id), tag, member=ctx.author if ctx.guild else None)
+    if err:
+        return await ctx.send(err)
 
     embed = _bs_embed(ctx.author, data)
     embed.title = f"✅ Compte Brawl Stars lié — {ctx.author.display_name}"
