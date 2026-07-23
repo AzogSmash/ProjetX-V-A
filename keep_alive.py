@@ -264,6 +264,7 @@ def api_member(discord_id):
         "role_ids": member["role_ids"],
         "is_admin": member["is_admin"],
         "bs_linked": discord_id in main.bs_accounts,
+        "bs_tag": (main.bs_accounts.get(discord_id) or {}).get("tag"),
     })
 
 
