@@ -223,7 +223,6 @@ def api_famille_joueur(tag):
         "exp_level": live.get("exp_level") if live else None,
         "discord_id": discord_id,
         "bio": profile.get("bio"),
-        "screenshot_url": profile.get("screenshot_url"),
     })
 
 
@@ -302,16 +301,11 @@ def api_bslink():
     })
 
 
-PROFILE_SCREENSHOT_BUCKET = "profile-screenshots"
-ALLOWED_SCREENSHOT_TYPES = {"image/png", "image/jpeg", "image/webp"}
-MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024
-
-
 @app.route("/api/profile/<tag>", methods=["POST"])
 @_require_internal_secret
 def api_profile_update(tag):
-    """Mise à jour du profil personnalisé (bio + screenshot) — le site vérifie
-    déjà côté serveur que c'est bien le propriétaire du tag qui modifie (voir
+    """Mise à jour de la présentation (bio) — le site vérifie déjà côté
+    serveur que c'est bien le propriétaire du tag qui modifie (voir
     updatePlayerProfile côté site, discord_id dérivé de la session, jamais
     d'un paramètre client), mais on revérifie ici aussi que discord_id est
     bien lié à ce tag dans bs_accounts avant d'écrire quoi que ce soit — pas
@@ -328,30 +322,10 @@ def api_profile_update(tag):
     if linked_tag != clean:
         return {"error": "Ce compte Discord n'est pas lié à ce joueur."}, 403
 
-    bio_kwarg = db_bs._UNSET
     if "bio" in request.form:
-        bio_kwarg = request.form.get("bio", "").strip()[:280] or None
+        bio = request.form.get("bio", "").strip()[:280] or None
+        db_bs.upsert_player_profile(clean, bio=bio)
 
-    screenshot_url = db_bs._UNSET
-    file = request.files.get("screenshot")
-    if file and file.filename:
-        if file.mimetype not in ALLOWED_SCREENSHOT_TYPES:
-            return {"error": "Format d'image non supporté (PNG, JPEG ou WebP uniquement)."}, 400
-        data = file.read()
-        if len(data) > MAX_SCREENSHOT_BYTES:
-            return {"error": "Image trop lourde (5 Mo max)."}, 400
-        ext = file.mimetype.split("/")[1]
-        path = f"{clean}.{ext}"
-        client = db_bs.get_client()
-        try:
-            client.storage.from_(PROFILE_SCREENSHOT_BUCKET).upload(
-                path, data, {"content-type": file.mimetype, "upsert": "true"}
-            )
-        except Exception as e:
-            return {"error": f"Échec de l'upload : {e}"}, 500
-        screenshot_url = client.storage.from_(PROFILE_SCREENSHOT_BUCKET).get_public_url(path)
-
-    db_bs.upsert_player_profile(clean, bio=bio_kwarg, screenshot_url=screenshot_url)
     return jsonify({"ok": True})
 
 

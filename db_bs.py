@@ -274,14 +274,14 @@ def list_archived_seasons() -> list[str]:
     return sorted({r["season_month"] for r in res.data}, reverse=True)
 
 
-# ── Profils personnalisés (bio + screenshot) ──
+# ── Profils personnalisés (bio) ──
 
 def get_player_profile(tag: str) -> dict | None:
-    """{'bio','screenshot_url'} ou None si le joueur n'a rien personnalisé."""
+    """{'bio'} ou None si le joueur n'a rien personnalisé."""
     res = (
         get_client()
         .table("bs_player_profiles")
-        .select("bio,screenshot_url")
+        .select("bio")
         .eq("player_tag", tag)
         .limit(1)
         .execute()
@@ -292,16 +292,12 @@ def get_player_profile(tag: str) -> dict | None:
 _UNSET = object()
 
 
-def upsert_player_profile(tag: str, bio=_UNSET, screenshot_url=_UNSET) -> None:
-    """Met à jour uniquement les champs fournis (bio et/ou screenshot_url) —
-    un champ non passé n'est pas touché, contrairement à un upsert naïf qui
-    écraserait le reste avec des colonnes absentes. `None` sur un champ
-    fourni l'efface (ex: bio="" côté site -> bio=None ici)."""
+def upsert_player_profile(tag: str, bio=_UNSET) -> None:
+    """Met à jour la bio si fournie — `None` l'efface (ex: bio="" côté site
+    -> bio=None ici)."""
     payload = {"player_tag": tag}
     if bio is not _UNSET:
         payload["bio"] = bio
-    if screenshot_url is not _UNSET:
-        payload["screenshot_url"] = screenshot_url
     if len(payload) == 1:
         return
     get_client().table("bs_player_profiles").upsert(payload, on_conflict="player_tag").execute()
