@@ -289,6 +289,24 @@ def get_player_profile(tag: str) -> dict | None:
     return res.data[0] if res.data else None
 
 
+_UNSET = object()
+
+
+def upsert_player_profile(tag: str, bio=_UNSET, screenshot_url=_UNSET) -> None:
+    """Met à jour uniquement les champs fournis (bio et/ou screenshot_url) —
+    un champ non passé n'est pas touché, contrairement à un upsert naïf qui
+    écraserait le reste avec des colonnes absentes. `None` sur un champ
+    fourni l'efface (ex: bio="" côté site -> bio=None ici)."""
+    payload = {"player_tag": tag}
+    if bio is not _UNSET:
+        payload["bio"] = bio
+    if screenshot_url is not _UNSET:
+        payload["screenshot_url"] = screenshot_url
+    if len(payload) == 1:
+        return
+    get_client().table("bs_player_profiles").upsert(payload, on_conflict="player_tag").execute()
+
+
 def get_archived_season(season_month: str) -> list[dict]:
     """[{'tag','name','club','start','end','delta'}, ...]"""
     res = (
