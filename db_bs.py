@@ -274,6 +274,21 @@ def list_archived_seasons() -> list[str]:
     return sorted({r["season_month"] for r in res.data}, reverse=True)
 
 
+# ── Profils personnalisés (bio + screenshot) ──
+
+def get_player_profile(tag: str) -> dict | None:
+    """{'bio','screenshot_url'} ou None si le joueur n'a rien personnalisé."""
+    res = (
+        get_client()
+        .table("bs_player_profiles")
+        .select("bio,screenshot_url")
+        .eq("player_tag", tag)
+        .limit(1)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
 def get_archived_season(season_month: str) -> list[dict]:
     """[{'tag','name','club','start','end','delta'}, ...]"""
     res = (

@@ -10262,6 +10262,10 @@ async def _bs_fetch_player(tag: str):
         'highest_ranked_tier': highest_ranked_tier,
         'highest_ranked_rank': highest_ranked_rank,
         'club': _bs_strip_markup((player.get('club') or {}).get('name')),
+        'victories_3v3': player.get('3vs3Victories', 0),
+        'victories_solo': player.get('soloVictories', 0),
+        'victories_duo': player.get('duoVictories', 0),
+        'exp_level': player.get('expLevel', 0),
     }, None
 
 

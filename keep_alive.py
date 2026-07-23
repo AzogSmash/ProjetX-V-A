@@ -119,6 +119,7 @@ def api_famille_classement_1v1():
             continue
         entries.append({
             "name": member.display_name,
+            "tag": (main.bs_accounts.get(uid_str) or {}).get("tag"),
             "points": p.get("points", 0),
             "wins": p.get("wins", 0),
             "losses": p.get("losses", 0),
@@ -138,9 +139,92 @@ def api_famille_classement_casino():
         member = guild.get_member(int(uid)) if guild else None
         if not member or member.bot:
             continue
-        entries.append({"name": member.display_name, "coins": amount})
+        entries.append({
+            "name": member.display_name,
+            "tag": (main.bs_accounts.get(uid) or {}).get("tag"),
+            "coins": amount,
+        })
     entries.sort(key=lambda e: e["coins"], reverse=True)
     return jsonify(entries[:100])
+
+
+@app.route("/api/famille/joueur/<tag>")
+def api_famille_joueur(tag):
+    """Profil d'un joueur — agrège les données déjà suivies (trophées, ranked,
+    rôle dans le clan, 1v1/casino si un compte Discord est lié) avec un appel
+    live à l'API officielle pour les victoires 3v3/solo/duo et le niveau XP
+    (pas suivi en continu, peu de volume attendu sur cette route donc pas
+    besoin d'un cache dédié). Public comme le reste de l'API famille — le
+    tag est déjà visible publiquement sur tous les classements du site."""
+    main = _bot()
+    clean = tag.strip().lstrip("#").upper()
+
+    trophy_row = next((p for p in db_bs.get_latest_trophies() if p["tag"] == clean), None)
+    if trophy_row is None:
+        return {"error": "joueur introuvable ou pas encore synchronisé"}, 404
+
+    role = None
+    for club in db_bs.list_family_clubs():
+        detail = main.bs_family_club_details.get(club["tag"])
+        if not detail:
+            continue
+        member = next((m for m in detail.get("members", []) if m.get("tag") == clean), None)
+        if member:
+            role = member.get("role")
+            break
+
+    ranked_row = next((r for r in db_bs.get_ranked_cache() if r["tag"] == clean), None)
+
+    discord_id = None
+    for uid_str, acc in main.bs_accounts.items():
+        if (acc.get("tag") or "").strip().lstrip("#").upper() == clean:
+            discord_id = uid_str
+            break
+
+    duel_1v1 = None
+    casino_coins = None
+    if discord_id:
+        p1v1 = main.ranked_1v1.get(discord_id)
+        if p1v1:
+            duel_1v1 = {
+                "points": p1v1.get("points", 0),
+                "wins": p1v1.get("wins", 0),
+                "losses": p1v1.get("losses", 0),
+                "tier": _r1v1_tier_label(p1v1.get("points", 0), main.RANKED_1V1_TIERS),
+            }
+        if discord_id in main.coins:
+            casino_coins = main.coins[discord_id]
+
+    live = None
+    try:
+        future = asyncio.run_coroutine_threadsafe(main._bs_fetch_player(f"#{clean}"), main.bot.loop)
+        live, _err = future.result(timeout=15)
+    except Exception:
+        pass  # Stats live indisponibles (API tierce down) — pas bloquant, le reste du profil s'affiche quand même
+
+    profile = db_bs.get_player_profile(clean) or {}
+
+    return jsonify({
+        "tag": f"#{clean}",
+        "name": trophy_row["name"],
+        "club": trophy_row["club"],
+        "role": role,
+        "trophies": trophy_row["trophies"],
+        "ranked_pts": ranked_row["ranked_pts"] if ranked_row else None,
+        "ranked_tier": ranked_row["ranked_tier"] if ranked_row else None,
+        "highest_ranked_pts": ranked_row.get("highest_ranked_pts") if ranked_row else None,
+        "highest_ranked_tier": ranked_row.get("highest_ranked_tier") if ranked_row else None,
+        "highest_ranked_rank": ranked_row.get("highest_ranked_rank") if ranked_row else None,
+        "duel_1v1": duel_1v1,
+        "casino_coins": casino_coins,
+        "victories_3v3": live.get("victories_3v3") if live else None,
+        "victories_solo": live.get("victories_solo") if live else None,
+        "victories_duo": live.get("victories_duo") if live else None,
+        "exp_level": live.get("exp_level") if live else None,
+        "discord_id": discord_id,
+        "bio": profile.get("bio"),
+        "screenshot_url": profile.get("screenshot_url"),
+    })
 
 
 @app.route("/api/famille/clan/<tag>")
