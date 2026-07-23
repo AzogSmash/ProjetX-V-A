@@ -8809,9 +8809,10 @@ async def cmd_tournoi_ajouter(ctx, membre: discord.Member, *, team_name: str = N
     await ctx.send(f"✅ **{membre.display_name}** ajouté à **{target['name']}** ({len(target['members'])}/{ts}).")
 
 
-# Seuls ces comptes précis peuvent utiliser !punition, peu importe leur(s)
-# rôle(s) — demande du 23/07/2026. Volontairement en dur ici plutôt que via
-# cmd_role_perms/!permission (qui reste basé sur les rôles, pas les comptes).
+# Seuls ces comptes précis peuvent utiliser !punition et !annuler_punition,
+# peu importe leur(s) rôle(s) — demande du 23/07/2026. Volontairement en dur
+# ici plutôt que via cmd_role_perms/!permission (qui reste basé sur les
+# rôles, pas les comptes).
 PUNITION_ALLOWED_USER_IDS = {
     659370556369403935,
     1056848438270115900,
@@ -8879,6 +8880,8 @@ async def cmd_punition(ctx, nombre: int, membre: discord.Member):
 
 @bot.command(name="annuler_punition", aliases=["apun", "unpunish"])
 async def cmd_annuler_punition(ctx, membre: discord.Member):
+    if ctx.author.id not in PUNITION_ALLOWED_USER_IDS and not is_bot_owner(ctx.author):
+        return await ctx.send("❌ Tu n'es pas autorisé à utiliser cette commande.")
     uid = str(membre.id)
     if uid not in punitions:
         return await ctx.send(f"❌ {membre.mention} n'est pas en punition.")
