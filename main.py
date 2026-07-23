@@ -310,6 +310,8 @@ user_team        = {}   # str(uid) -> str(team_id)
 team_state       = {'competition_open': False, 'next_id': 1}
 disabled_cmds    = set()  # noms de commandes désactivées
 cmd_role_perms   = {}   # name -> [role_id, ...] (allowed roles, empty=all)
+casino_banned_users = set()  # uid (int) bannis de toutes les commandes casino
+casino_paused    = False  # pause volontaire de tout le casino (!casino_pause), PAS persistée entre redémarrages
 
 # ── Nouvelles fonctionnalités ─────────────────────────────────────────────
 daily_streaks     = {}   # str(uid) -> {'streak': int, 'last_day': 'YYYY-MM-DD'}
@@ -894,7 +896,7 @@ def load_data():
     global theft_cooldowns, miner_cooldowns, hacker_cooldowns, risque_cooldowns, rob_cooldowns, steal_immunity
     global shield_active, shield_cooldown, shield_break_streak
     global race_bets, race_drivers_live, race_accepting
-    global teams, user_team, disabled_cmds, cmd_role_perms, tournaments
+    global teams, user_team, disabled_cmds, cmd_role_perms, tournaments, casino_banned_users
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
     global bs_accounts, bs_role_config
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
@@ -981,6 +983,7 @@ def load_data():
                 team_state['next_id'] = ts.get('next_id', 1)
                 disabled_cmds    = set(data.get('disabled_cmds', []))
                 cmd_role_perms   = data.get('cmd_role_perms', {})
+                casino_banned_users = set(data.get('casino_banned_users', []))
                 daily_streaks    = data.get('daily_streaks', {})
                 ticket_purchases = data.get('ticket_purchases', {})
                 birthdays        = data.get('birthdays', {})
@@ -1167,6 +1170,7 @@ def save_data(force: bool = False):
     data_to_save['team_state']       = dict(team_state)
     data_to_save['disabled_cmds']    = list(disabled_cmds)
     data_to_save['cmd_role_perms']   = cmd_role_perms
+    data_to_save['casino_banned_users'] = list(casino_banned_users)
     data_to_save['casino_config']    = casino_config
     data_to_save['daily_streaks']    = daily_streaks
     data_to_save['ticket_purchases'] = ticket_purchases
@@ -1438,7 +1442,25 @@ ADMIN_LOCKED_CMDS = {
     'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter', 'tournoi_deplacer',
     'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log',
     'ranked_sanction', 'ranked_ajuster', 'ranked_set', 'reset_casino', 'reset_duels', 'ranked_liberer',
+    'casino_ban', 'casino_unban', 'casino_pause', 'casino_resume',
 }
+
+# ── Anti-macro casino : incident du 23/07/2026 (martingale rouge/noir via
+# macro, tellement rapide que Discord n'affichait plus les messages côté
+# client mais traitait quand même chaque commande côté bot). Toute commande
+# qui touche `coins` passe par un cooldown court ici, plus une pause/ban
+# globaux gérables par un admin (!casino_pause, !casino_ban). ──────────────
+CASINO_CMDS = {
+    'daily', 'travail', 'work', 'mendier', 'beg', 'risque', 'roulette_russe', 'give',
+    'roulette', 'slots', 'machine', 'bj', 'blackjack', 'coinflip', 'cf', 'duel', 'pvp',
+    'poker', 'pk', 'mines', 'higherlower', 'hl', 'voler', 'steal', 'rob',
+    'gratter', 'scratch', 'course', 'parier', 'hacker', 'hack', 'miner',
+}
+CASINO_COOLDOWN_SECONDS = 3
+# uid (int) -> datetime du dernier coup casino — anti-macro uniquement,
+# pas besoin de survivre à un redémarrage (contrairement à daily_cooldowns
+# et cie, qui représentent une vraie limite à conserver).
+_casino_last_use: dict[int, "datetime"] = {}
 
 
 @bot.check
@@ -1458,6 +1480,34 @@ async def _global_command_gate(ctx):
         except Exception:
             pass
         return False
+    # Casino : pause volontaire (!casino_pause), avant un déploiement par ex.
+    # — s'applique même aux admins, sinon ça perd son intérêt.
+    if cmd_name in CASINO_CMDS and casino_paused:
+        try:
+            await ctx.send("⏸️ Le casino est temporairement **en pause**. Réessaie dans quelques minutes.")
+        except Exception:
+            pass
+        return False
+    # Casino : compte banni (!casino_ban) — bloqué même s'il est admin.
+    if cmd_name in CASINO_CMDS and ctx.author.id in casino_banned_users:
+        try:
+            await ctx.send("🚫 Tu n'as plus accès aux commandes casino.")
+        except Exception:
+            pass
+        return False
+    # Casino : cooldown court anti-macro (voir incident du 23/07/2026) —
+    # appliqué même aux admins pour rester cohérent avec les deux checks
+    # ci-dessus, mais sans bloquer un admin qui teste une commande une fois.
+    if cmd_name in CASINO_CMDS:
+        now = datetime.now()
+        last = _casino_last_use.get(ctx.author.id)
+        if last and (now - last).total_seconds() < CASINO_COOLDOWN_SECONDS:
+            try:
+                await ctx.send("⏳ Trop rapide, souffle un peu avant le prochain coup.", delete_after=5)
+            except Exception:
+                pass
+            return False
+        _casino_last_use[ctx.author.id] = now
     # Les admins du serveur passent toujours
     if ctx.guild and ctx.author.guild_permissions.administrator:
         return True
@@ -12159,6 +12209,44 @@ async def cmd_reset_casino(ctx):
         f"Coins, coffres, usines, commerces et métiers repartent à zéro pour tout le monde.\n"
         f"Les items achetés (boutique) et l'inventaire sont conservés."
     )
+
+
+@bot.command(name="casino_ban")
+async def cmd_casino_ban(ctx, membre: discord.Member, *, raison: str = None):
+    """Bloque un joueur sur toutes les commandes casino (paris, jeux, travail, vol...) —
+    reste banni même s'il est admin. Voir !casino_unban pour annuler."""
+    casino_banned_users.add(membre.id)
+    save_data()
+    _log_moderation('casino_ban', membre, ctx.author, reason=raison)
+    await ctx.send(f"🚫 {membre.mention} n'a désormais plus accès aux commandes casino." + (f" Raison : {raison}" if raison else ""))
+
+
+@bot.command(name="casino_unban")
+async def cmd_casino_unban(ctx, membre: discord.Member):
+    """Annule un !casino_ban."""
+    if membre.id not in casino_banned_users:
+        return await ctx.send(f"❌ {membre.mention} n'est pas banni du casino.")
+    casino_banned_users.discard(membre.id)
+    save_data()
+    _log_moderation('casino_unban', membre, ctx.author)
+    await ctx.send(f"✅ {membre.mention} a de nouveau accès aux commandes casino.")
+
+
+@bot.command(name="casino_pause")
+async def cmd_casino_pause(ctx):
+    """Met en pause TOUTES les commandes casino pour tout le monde (y compris les admins) —
+    utile juste avant un déploiement pour ne pas couper une partie en cours. Voir !casino_resume."""
+    global casino_paused
+    casino_paused = True
+    await ctx.send("⏸️ **Casino en pause.** Plus aucune commande casino ne sera acceptée jusqu'à `!casino_resume`.")
+
+
+@bot.command(name="casino_resume")
+async def cmd_casino_resume(ctx):
+    """Annule un !casino_pause."""
+    global casino_paused
+    casino_paused = False
+    await ctx.send("▶️ **Casino relancé.** Les commandes casino sont de nouveau disponibles.")
 
 
 @tasks.loop(hours=6)
