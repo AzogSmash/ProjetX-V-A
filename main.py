@@ -8809,8 +8809,22 @@ async def cmd_tournoi_ajouter(ctx, membre: discord.Member, *, team_name: str = N
     await ctx.send(f"✅ **{membre.display_name}** ajouté à **{target['name']}** ({len(target['members'])}/{ts}).")
 
 
+# Seuls ces comptes précis peuvent utiliser !punition, peu importe leur(s)
+# rôle(s) — demande du 23/07/2026. Volontairement en dur ici plutôt que via
+# cmd_role_perms/!permission (qui reste basé sur les rôles, pas les comptes).
+PUNITION_ALLOWED_USER_IDS = {
+    659370556369403935,
+    1056848438270115900,
+    550678866839207937,
+    860057663064899584,
+    602807768046632971,
+}
+
+
 @bot.command(name="punition", aliases=["pun", "punir"])
 async def cmd_punition(ctx, nombre: int, membre: discord.Member):
+    if ctx.author.id not in PUNITION_ALLOWED_USER_IDS and not is_bot_owner(ctx.author):
+        return await ctx.send("❌ Tu n'es pas autorisé à utiliser cette commande.")
     if await _check_protected_target(ctx, membre):
         return
     if nombre <= 0:
