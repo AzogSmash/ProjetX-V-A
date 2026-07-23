@@ -98,6 +98,30 @@ def api_famille_saisons():
     return jsonify(db_bs.list_archived_seasons())
 
 
+@app.route("/api/famille/recherche")
+def api_famille_recherche():
+    """Recherche joueurs + clubs pour la barre de recherche du site — public,
+    mêmes données que /api/famille/trophees et /api/famille/clans, déjà
+    visibles sur les classements."""
+    q = (request.args.get("q") or "").strip().lower()
+    if len(q) < 2:
+        return jsonify({"players": [], "clubs": []})
+
+    players = [
+        {"tag": p["tag"], "name": p["name"], "club": p["club"]}
+        for p in db_bs.get_latest_trophies()
+        if p.get("name") and q in p["name"].lower()
+    ][:8]
+
+    clubs = [
+        {"slug": c["slug"], "name": c["name"]}
+        for c in db_bs.list_family_clubs()
+        if q in c["name"].lower()
+    ][:8]
+
+    return jsonify({"players": players, "clubs": clubs})
+
+
 @app.route("/api/famille/actualites")
 def api_famille_actualites():
     limit = request.args.get("limit", type=int)
