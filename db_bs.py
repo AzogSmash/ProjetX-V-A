@@ -274,6 +274,23 @@ def list_archived_seasons() -> list[str]:
     return sorted({r["season_month"] for r in res.data}, reverse=True)
 
 
+# ── Actualités (publiées par le staff/admin depuis le site) ──
+
+def list_news(limit: int | None = None) -> list[dict]:
+    """[{'id','icon','title','description','author','created_at'}, ...],
+    plus récentes en premier."""
+    q = get_client().table("bs_news").select("*").order("created_at", desc=True)
+    if limit:
+        q = q.limit(limit)
+    return q.execute().data
+
+
+def create_news(icon: str, title: str, description: str, author: str | None) -> None:
+    get_client().table("bs_news").insert(
+        {"icon": icon, "title": title, "description": description, "author": author}
+    ).execute()
+
+
 # ── Profils personnalisés (bio) ──
 
 def get_player_profile(tag: str) -> dict | None:

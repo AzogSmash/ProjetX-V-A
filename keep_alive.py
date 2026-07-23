@@ -98,6 +98,12 @@ def api_famille_saisons():
     return jsonify(db_bs.list_archived_seasons())
 
 
+@app.route("/api/famille/actualites")
+def api_famille_actualites():
+    limit = request.args.get("limit", type=int)
+    return jsonify(db_bs.list_news(limit))
+
+
 def _r1v1_tier_label(points, tiers):
     label = tiers[0][1]
     for min_pts, name in tiers:
@@ -326,6 +332,31 @@ def api_profile_update(tag):
         bio = request.form.get("bio", "").strip()[:280] or None
         db_bs.upsert_player_profile(clean, bio=bio)
 
+    return jsonify({"ok": True})
+
+
+VALID_NEWS_ICONS = {"skull", "shield", "message", "trophy"}
+
+
+@app.route("/api/actualites", methods=["POST"])
+@_require_internal_secret
+def api_actualites_create():
+    """Publication d'une actualité depuis le panel staff/admin du site — le
+    site vérifie déjà côté serveur que l'appelant est staff/admin
+    (getAccessContext), protégé ici par le secret partagé comme le reste
+    des routes staff (/api/staff/panel)."""
+    body = request.get_json(silent=True) or {}
+    icon = str(body.get("icon", "")).strip()
+    title = str(body.get("title", "")).strip()[:100]
+    description = str(body.get("description", "")).strip()[:300]
+    author = str(body.get("author", "")).strip()[:100] or None
+
+    if icon not in VALID_NEWS_ICONS:
+        return {"error": "Icône invalide."}, 400
+    if not title or not description:
+        return {"error": "Titre et description requis."}, 400
+
+    db_bs.create_news(icon, title, description, author)
     return jsonify({"ok": True})
 
 
