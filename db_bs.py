@@ -70,6 +70,24 @@ def upsert_members_snapshot(today: str, club_tag: str, club_name: str, members: 
     ).execute()
 
 
+def clear_stale_club_members(synced_club_tags: list[str], current_member_tags: list[str]) -> None:
+    """Met club_tag à NULL pour tout joueur dont le club_tag pointe vers un
+    des clans qui viennent d'être synchronisés avec succès mais qui n'est
+    plus dans leur liste de membres actuelle — sinon un joueur parti (sans
+    rejoindre un autre clan suivi) reste compté indéfiniment dans l'effectif
+    de son ancien club (voir incident du 23/07/2026 : un club à 32 "membres"
+    alors que Brawl Stars plafonne à 30). `synced_club_tags` doit être limité
+    aux clans dont l'appel API a réussi cette passe — ne jamais y inclure un
+    clan en échec, sinon ses vrais membres seraient effacés à tort."""
+    if not synced_club_tags:
+        return
+    client = get_client()
+    q = client.table("bs_players").update({"club_tag": None}).in_("club_tag", synced_club_tags)
+    if current_member_tags:
+        q = q.not_.in_("tag", current_member_tags)
+    q.execute()
+
+
 def get_latest_trophies() -> list[dict]:
     """[{'tag','name','club','trophies','date'}, ...] — dernier point connu
     par joueur, via la vue bs_latest_trophies (voir 002_views.sql)."""

@@ -11225,6 +11225,8 @@ async def sync_trophy_history():
         return
 
     today = datetime.now().strftime('%Y-%m-%d')
+    synced_club_tags = []
+    all_current_tags = []
     for club in clubs:
         data, err = await _bs_fetch_club(club['tag'])
         if err:
@@ -11243,7 +11245,14 @@ async def sync_trophy_history():
         }
 
         db_bs.upsert_members_snapshot(today, club['tag'], data['name'], data['members'])
+        synced_club_tags.append(club['tag'])
+        all_current_tags.extend(m['tag'] for m in data['members'] if m['tag'])
         await asyncio.sleep(0.3)
+
+    # Nettoie les joueurs partis d'un clan de la famille sans en rejoindre un
+    # autre suivi — seulement pour les clans synchronisés avec succès cette
+    # passe, pour ne jamais effacer à tort les membres d'un clan en échec.
+    db_bs.clear_stale_club_members(synced_club_tags, all_current_tags)
 
 
 @tasks.loop(minutes=15)
