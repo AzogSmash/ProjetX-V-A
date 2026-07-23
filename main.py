@@ -6547,30 +6547,51 @@ def _gestion_embed():
 
 
 class GestionView(discord.ui.View):
-    def __init__(self, admin_id):
+    PAGE_SIZE = 25  # limite Discord par menu déroulant
+
+    def __init__(self, admin_id, page: int = 0):
         super().__init__(timeout=300)
         self.admin_id = admin_id
-        # Discord limite à 25 options par menu — paginé en groupes
         cmds = _all_command_names()
-        # Bouton désactiver : commandes actives
-        active = [c for c in cmds if c not in disabled_cmds and c not in ALWAYS_ALLOWED_CMDS][:25]
-        # Bouton activer : commandes désactivées
-        inactive = sorted(disabled_cmds)[:25]
+        # Listes complètes (pas tronquées) — paginées ci-dessous, pour que les
+        # commandes ajoutées après les 25 premières (triées alphabétiquement)
+        # restent gérables au lieu d'être invisibles pour toujours.
+        self.active_all = [c for c in cmds if c not in disabled_cmds and c not in ALWAYS_ALLOWED_CMDS]
+        self.inactive_all = sorted(disabled_cmds)
+        pages_needed = max(
+            (len(self.active_all) - 1) // self.PAGE_SIZE + 1 if self.active_all else 1,
+            (len(self.inactive_all) - 1) // self.PAGE_SIZE + 1 if self.inactive_all else 1,
+        )
+        self.total_pages = max(1, pages_needed)
+        self.page = max(0, min(page, self.total_pages - 1))
+
+        start = self.page * self.PAGE_SIZE
+        active = self.active_all[start:start + self.PAGE_SIZE]
+        inactive = self.inactive_all[start:start + self.PAGE_SIZE]
 
         if active:
             self.disable_select = discord.ui.Select(
-                placeholder=f"🚫 Désactiver une commande ({len(active)} dispos)",
+                placeholder=f"🚫 Désactiver une commande — page {self.page + 1}/{self.total_pages} ({len(self.active_all)} au total)",
                 options=[discord.SelectOption(label=f"!{c}"[:100], value=c) for c in active]
             )
             self.disable_select.callback = self._on_disable
             self.add_item(self.disable_select)
         if inactive:
             self.enable_select = discord.ui.Select(
-                placeholder=f"✅ Réactiver une commande ({len(inactive)})",
+                placeholder=f"✅ Réactiver une commande — page {self.page + 1}/{self.total_pages} ({len(self.inactive_all)} au total)",
                 options=[discord.SelectOption(label=f"!{c}"[:100], value=c) for c in inactive]
             )
             self.enable_select.callback = self._on_enable
             self.add_item(self.enable_select)
+
+        if self.page > 0:
+            prev_btn = discord.ui.Button(label="◀ Précédent", style=discord.ButtonStyle.secondary, row=2)
+            prev_btn.callback = self._prev
+            self.add_item(prev_btn)
+        if self.page < self.total_pages - 1:
+            next_btn = discord.ui.Button(label="Suivant ▶", style=discord.ButtonStyle.secondary, row=2)
+            next_btn.callback = self._next
+            self.add_item(next_btn)
 
     async def interaction_check(self, interaction):
         if not (interaction.user.guild_permissions.administrator or is_bot_owner(interaction.user)):
@@ -6586,7 +6607,7 @@ class GestionView(discord.ui.View):
             )
         disabled_cmds.add(cmd)
         save_data()
-        new_view = GestionView(self.admin_id)
+        new_view = GestionView(self.admin_id, page=self.page)
         await interaction.response.edit_message(embed=_gestion_embed(), view=new_view)
         await interaction.followup.send(f"🚫 `!{cmd}` a été **désactivée**.", ephemeral=True)
 
@@ -6594,9 +6615,15 @@ class GestionView(discord.ui.View):
         cmd = self.enable_select.values[0]
         disabled_cmds.discard(cmd)
         save_data()
-        new_view = GestionView(self.admin_id)
+        new_view = GestionView(self.admin_id, page=self.page)
         await interaction.response.edit_message(embed=_gestion_embed(), view=new_view)
         await interaction.followup.send(f"✅ `!{cmd}` a été **réactivée**.", ephemeral=True)
+
+    async def _prev(self, interaction):
+        await interaction.response.edit_message(embed=_gestion_embed(), view=GestionView(self.admin_id, self.page - 1))
+
+    async def _next(self, interaction):
+        await interaction.response.edit_message(embed=_gestion_embed(), view=GestionView(self.admin_id, self.page + 1))
 
 
 @bot.command(name="gestion", aliases=["gest", "admin"])
