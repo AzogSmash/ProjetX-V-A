@@ -8937,10 +8937,69 @@ async def _create_ticket_apply(discord_id: str, category: str, description: str,
     )
     embed.add_field(name="Ouvert par", value=member.mention, inline=True)
     embed.set_footer(text="Non pris en charge")
-    await salon.send(content=member.mention, embed=embed, view=TicketControlView(row["id"]))
+
+    staff_mentions = [f"<@&{rid}>" for rid in TICKET_STAFF_ROLE_IDS if guild.get_role(rid)]
+    staff_part = " ou ".join(staff_mentions) if staff_mentions else "staff"
+    welcome = (
+        f"Bienvenue {member.mention} dans le salon de ton ticket ! "
+        f"Un membre du {staff_part} va venir gérer ta demande."
+    )
+    await salon.send(
+        content=welcome, embed=embed, view=TicketControlView(row["id"]),
+        allowed_mentions=discord.AllowedMentions(users=True, roles=True),
+    )
 
     channel_url = f"https://discord.com/channels/{BS_FAMILY_GUILD_ID}/{salon.id}"
     return {"id": row["id"], "channel_id": str(salon.id), "channel_url": channel_url, "already_open": False}, None
+
+
+async def _finish_ticket_close(interaction: discord.Interaction, view: "TicketControlView", ticket: dict, reason: str | None):
+    """Cœur du close, partagé entre !Fermer! (bouton direct) et !Fermer avec
+    raison! (modal) — l'appelant a déjà deferré interaction.response avant
+    d'appeler cette fonction."""
+    transcript = []
+    async for msg in interaction.channel.history(limit=None, oldest_first=True):
+        transcript.append({
+            "author": msg.author.display_name,
+            "avatar_url": str(msg.author.display_avatar.url) if msg.author.display_avatar else None,
+            "content": msg.content,
+            "created_at": msg.created_at.isoformat(),
+        })
+    db_bs.close_ticket(view.ticket_id, str(interaction.user.id), reason, transcript)
+
+    close_note = f"🔒 Ticket fermé par {interaction.user.mention}."
+    if reason:
+        close_note += f"\n**Raison :** {reason}"
+    close_note += "\nCe salon sera supprimé dans quelques secondes."
+    await interaction.channel.send(close_note)
+
+    site_url = os.environ.get("SITE_URL")
+    fields = [
+        ("Ticket", f"#{view.ticket_id}", True),
+        ("Catégorie", TICKET_CATEGORIES.get(ticket["category"], ticket["category"]), True),
+        ("Ouvert par", f"<@{ticket['discord_id']}>", True),
+        ("Fermé par", interaction.user.mention, True),
+    ]
+    if ticket.get("claimed_by"):
+        fields.append(("Pris en charge par", f"<@{ticket['claimed_by']}>", True))
+    if reason:
+        fields.append(("Raison", reason, False))
+    if site_url:
+        fields.append(("Transcript", f"{site_url}/staff/tickets/{view.ticket_id}", False))
+    await send_log_message(
+        interaction.guild, LOG_TICKET_CHANNEL_ID,
+        "🎫 Ticket fermé", None,
+        0xe74c3c, fields=fields,
+    )
+
+    # Le salon est supprimé (pas juste verrouillé) — demande du 26/07/2026.
+    # Le transcript + le log ci-dessus existent déjà indépendamment du salon,
+    # donc rien n'est perdu à la suppression.
+    await asyncio.sleep(5)
+    try:
+        await interaction.channel.delete(reason=f"Ticket #{view.ticket_id} fermé par {interaction.user}")
+    except discord.HTTPException:
+        pass
 
 
 class TicketControlView(discord.ui.View):
@@ -8966,10 +9025,28 @@ class TicketControlView(discord.ui.View):
         close_btn.callback = self._on_close
         self.add_item(close_btn)
 
+        close_reason_btn = discord.ui.Button(
+            label="Fermer avec raison", style=discord.ButtonStyle.secondary, emoji="📝",
+            custom_id=f"ticket_close_reason:{ticket_id}",
+        )
+        close_reason_btn.callback = self._on_close_with_reason
+        self.add_item(close_reason_btn)
+
     def _is_staff(self, member: discord.Member) -> bool:
         return is_bot_owner(member) or member.guild_permissions.administrator or any(
             r.id in TICKET_STAFF_ROLE_IDS for r in member.roles
         )
+
+    def _get_closable_ticket(self, interaction: discord.Interaction):
+        """Retourne (ticket, erreur). ticket est None si l'erreur doit être renvoyée à l'utilisateur."""
+        ticket = db_bs.get_ticket(self.ticket_id)
+        if not ticket:
+            return None, "❌ Ticket introuvable."
+        if ticket["status"] != "open":
+            return None, "❌ Ce ticket est déjà fermé."
+        if str(interaction.user.id) != ticket["discord_id"] and not self._is_staff(interaction.user):
+            return None, "❌ Réservé à l'auteur du ticket ou au staff."
+        return ticket, None
 
     async def _on_claim(self, interaction: discord.Interaction):
         if not self._is_staff(interaction.user):
@@ -8980,46 +9057,34 @@ class TicketControlView(discord.ui.View):
         await interaction.response.edit_message(embed=embed)
 
     async def _on_close(self, interaction: discord.Interaction):
-        ticket = db_bs.get_ticket(self.ticket_id)
-        if not ticket:
-            return await interaction.response.send_message("❌ Ticket introuvable.", ephemeral=True)
-        if str(interaction.user.id) != ticket["discord_id"] and not self._is_staff(interaction.user):
-            return await interaction.response.send_message("❌ Réservé à l'auteur du ticket ou au staff.", ephemeral=True)
-
+        ticket, err = self._get_closable_ticket(interaction)
+        if err:
+            return await interaction.response.send_message(err, ephemeral=True)
         await interaction.response.defer()
+        await _finish_ticket_close(interaction, self, ticket, None)
 
-        transcript = []
-        async for msg in interaction.channel.history(limit=None, oldest_first=True):
-            transcript.append({
-                "author": msg.author.display_name,
-                "avatar_url": str(msg.author.display_avatar.url) if msg.author.display_avatar else None,
-                "content": msg.content,
-                "created_at": msg.created_at.isoformat(),
-            })
-        db_bs.close_ticket(self.ticket_id, str(interaction.user.id), None, transcript)
+    async def _on_close_with_reason(self, interaction: discord.Interaction):
+        ticket, err = self._get_closable_ticket(interaction)
+        if err:
+            return await interaction.response.send_message(err, ephemeral=True)
+        await interaction.response.send_modal(TicketCloseReasonModal(self))
 
-        opener = interaction.guild.get_member(int(ticket["discord_id"]))
-        if opener:
-            await interaction.channel.set_permissions(opener, send_messages=False)
-        try:
-            await interaction.channel.edit(name=f"closed-{interaction.channel.name}"[:100])
-        except discord.HTTPException:
-            pass
 
-        for item in self.children:
-            item.disabled = True
-        await interaction.message.edit(view=self)
-        await interaction.channel.send(f"🔒 Ticket fermé par {interaction.user.mention}.")
+class TicketCloseReasonModal(discord.ui.Modal, title="Fermer le ticket"):
+    reason_input = discord.ui.TextInput(
+        label="Raison de la fermeture", required=True, max_length=200,
+    )
 
-        site_url = os.environ.get("SITE_URL")
-        fields = [("Ticket", f"#{self.ticket_id}", True), ("Fermé par", interaction.user.mention, True)]
-        if site_url:
-            fields.append(("Transcript", f"{site_url}/staff/tickets/{self.ticket_id}", False))
-        await send_log_message(
-            interaction.guild, LOG_TICKET_CHANNEL_ID,
-            "🎫 Ticket fermé", f"Catégorie : {TICKET_CATEGORIES.get(ticket['category'], ticket['category'])}",
-            0xe74c3c, fields=fields,
-        )
+    def __init__(self, view: TicketControlView):
+        super().__init__()
+        self.view_ref = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        ticket, err = self.view_ref._get_closable_ticket(interaction)
+        if err:
+            return await interaction.response.send_message(err, ephemeral=True)
+        await interaction.response.defer()
+        await _finish_ticket_close(interaction, self.view_ref, ticket, str(self.reason_input.value))
 
 
 class TicketDescriptionModal(discord.ui.Modal):
