@@ -359,6 +359,51 @@ def api_profile_update(tag):
     return jsonify({"ok": True})
 
 
+@app.route("/api/tickets", methods=["POST"])
+@_require_internal_secret
+def api_tickets_create():
+    """Ouverture d'un ticket depuis le site (formulaire /support, réservé aux
+    comptes liés) — même logique que !ticket_panel côté Discord
+    (_create_ticket_apply), déclenchée depuis Flask. La création du salon
+    passe par des appels Discord (aiohttp + globals partagés) donc DOIT
+    s'exécuter sur la boucle du bot, jamais directement ici — même raison que
+    /api/bslink."""
+    body = request.get_json(silent=True) or {}
+    discord_id = str(body.get("discord_id", "")).strip()
+    category = str(body.get("category", "")).strip()
+    description = str(body.get("description", "")).strip()[:1000]
+    bs_tag = str(body.get("bs_tag", "")).strip() or None
+    if not discord_id or not category or not description:
+        return {"error": "discord_id, category et description requis"}, 400
+
+    main = _bot()
+    if not main.bot.is_ready():
+        return {"error": "Le bot redémarre, réessaie dans quelques secondes."}, 503
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            main._create_ticket_apply(discord_id, category, description, bs_tag), main.bot.loop
+        )
+        data, err = future.result(timeout=20)
+    except Exception as e:
+        return {"error": f"Erreur interne : {e}"}, 500
+
+    if err:
+        return {"error": err}, 400
+    return jsonify(data)
+
+
+@app.route("/api/tickets/<int:ticket_id>")
+@_require_internal_secret
+def api_ticket_get(ticket_id):
+    """Métadonnées + transcript d'un ticket fermé, pour la page staff
+    /staff/tickets/[id] du site (lien posté dans #logs-ticket à la
+    fermeture). Lecture Supabase directe, pas besoin de la boucle du bot."""
+    ticket = db_bs.get_ticket(ticket_id)
+    if ticket is None:
+        return {"error": "ticket introuvable"}, 404
+    return jsonify(ticket)
+
+
 VALID_NEWS_ICONS = {"skull", "shield", "message", "trophy"}
 
 

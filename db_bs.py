@@ -12,6 +12,7 @@ la classe de bug où deux instances du process divergent silencieusement.
 """
 
 import os
+from datetime import datetime, timezone
 from functools import lru_cache
 
 from supabase import create_client, Client
@@ -358,3 +359,63 @@ def get_archived_season(season_month: str) -> list[dict]:
         }
         for r in res.data
     ]
+
+
+# ── Tickets (remplace tickets.bot) ──
+
+def create_ticket(discord_id: str, bs_tag: str | None, category: str, description: str, channel_id: str) -> dict:
+    res = (
+        get_client()
+        .table("tickets")
+        .insert(
+            {
+                "discord_id": discord_id,
+                "bs_tag": bs_tag,
+                "category": category,
+                "description": description,
+                "channel_id": channel_id,
+            }
+        )
+        .execute()
+    )
+    return res.data[0]
+
+
+def get_open_ticket_for_user(discord_id: str) -> dict | None:
+    res = (
+        get_client()
+        .table("tickets")
+        .select("*")
+        .eq("discord_id", discord_id)
+        .eq("status", "open")
+        .limit(1)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def get_ticket(ticket_id: int) -> dict | None:
+    res = get_client().table("tickets").select("*").eq("id", ticket_id).limit(1).execute()
+    return res.data[0] if res.data else None
+
+
+def list_open_tickets() -> list[dict]:
+    """Tickets ouverts, pour ré-enregistrer les vues persistantes au démarrage (on_ready)."""
+    res = get_client().table("tickets").select("id,channel_id").eq("status", "open").execute()
+    return res.data
+
+
+def claim_ticket(ticket_id: int, staff_discord_id: str) -> None:
+    get_client().table("tickets").update({"claimed_by": staff_discord_id}).eq("id", ticket_id).execute()
+
+
+def close_ticket(ticket_id: int, closed_by: str, reason: str | None, transcript: list[dict]) -> None:
+    get_client().table("tickets").update(
+        {
+            "status": "closed",
+            "closed_by": closed_by,
+            "close_reason": reason,
+            "transcript": transcript,
+            "closed_at": datetime.now(timezone.utc).isoformat(),
+        }
+    ).eq("id", ticket_id).execute()

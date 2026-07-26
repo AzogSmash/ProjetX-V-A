@@ -33,11 +33,28 @@ def _format_ranked_updated_at(iso_ts: str | None) -> str | None:
         return iso_ts
     return dt.astimezone(BS_SEASON_TZ).strftime('%d/%m %H:%M')
 
-# Récupération des IDs des salons de logs depuis les variables d'environnement
-LOG_MODERATION_CHANNEL_ID = os.getenv("1515780858483576923")
-LOG_GIVEAWAY_CHANNEL_ID = os.getenv("1515781002817966341")
-LOG_GENERAL_CHANNEL_ID = os.getenv("1515781072783151314")
+# IDs des salons de logs — étaient enveloppés dans os.getenv(...) alors que
+# ce sont déjà les IDs numériques directs (aucune variable d'environnement ne
+# s'appelle littéralement "1515780858483576923"), ce qui rendait ces 3 logs
+# silencieusement inactifs (send_log_message ne fait rien si channel_id est
+# None). Corrigé le 26/07/2026.
+LOG_MODERATION_CHANNEL_ID = 1515780858483576923
+LOG_GIVEAWAY_CHANNEL_ID = 1515781002817966341
+LOG_GENERAL_CHANNEL_ID = 1515781072783151314
 BRAWLSTARS_API_KEY = (os.getenv("BRAWLSTARS_API_KEY") or "").strip() or None
+
+# ── Système de tickets maison (remplace tickets.bot) ──
+TICKET_CATEGORY_ID = 1513110806382772407  # catégorie Discord où sont créés les salons de ticket
+LOG_TICKET_CHANNEL_ID = 1513117932228706374  # salon #logs-ticket
+# Mêmes IDs de rôle que STAFF_ROLE_IDS côté site (src/lib/access.ts) — pour
+# que "staff" veuille dire la même chose partout.
+TICKET_STAFF_ROLE_IDS = {1513110804595998788, 1516514610881237084}
+TICKET_CATEGORIES = {
+    "candidature": "💼 Candidature",
+    "club_recruitment": "🎯 Recrutement Club",
+    "incident": "🔴 Incident",
+    "other": "❓ Autre",
+}
 
 # Intents du bot
 intents = discord.Intents.default()
@@ -1343,6 +1360,14 @@ async def check_mutes():
 @bot.event
 async def on_ready():
     logging.warning("Connecté en tant que %s — DATA_FILE=%s — fichier_existe=%s", bot.user, DATA_FILE, os.path.exists(DATA_FILE))
+
+    # Vues de tickets en tout premier (avant load_data/re-registration des
+    # clans, plus lents) : minimise la fenêtre où un clic sur un vieux salon
+    # de ticket échouerait faute de vue enregistrée après un redémarrage.
+    bot.add_view(TicketPanelView())
+    for row in db_bs.list_open_tickets():
+        bot.add_view(TicketControlView(row["id"]))
+
     load_data()
 
     if _bs_legacy_fields_pending_resave:
@@ -1442,7 +1467,7 @@ ADMIN_LOCKED_CMDS = {
     'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter', 'tournoi_deplacer',
     'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log',
     'ranked_sanction', 'ranked_ajuster', 'ranked_set', 'reset_casino', 'reset_duels', 'ranked_liberer',
-    'casino_ban', 'casino_unban', 'casino_pause', 'casino_resume',
+    'casino_ban', 'casino_unban', 'casino_pause', 'casino_resume', 'ticket_panel',
 }
 
 # ── Anti-macro casino : incident du 23/07/2026 (martingale rouge/noir via
@@ -8857,6 +8882,198 @@ async def cmd_tournoi_ajouter(ctx, membre: discord.Member, *, team_name: str = N
     save_data()
     await _update_tournament_board(ctx.guild, t, gid, TournamentJoinView(gid, ts))
     await ctx.send(f"✅ **{membre.display_name}** ajouté à **{target['name']}** ({len(target['members'])}/{ts}).")
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# ── Système de tickets maison (remplace tickets.bot) ────────────────────
+# ═════════════════════════════════════════════════════════════════════════
+# Ouvrable depuis Discord (panel + modal, voir !ticket_panel) et depuis le
+# site (formulaire réservé aux comptes liés, voir POST /api/tickets dans
+# keep_alive.py). _create_ticket_apply est le cœur partagé par les deux
+# chemins, même logique que _bslink_apply pour !bslink/POST /api/bslink.
+
+async def _create_ticket_apply(discord_id: str, category: str, description: str, bs_tag: str | None = None):
+    """Retourne (data, err). data = {'id','channel_id','channel_url','already_open'}."""
+    if category not in TICKET_CATEGORIES:
+        return None, "Catégorie invalide."
+
+    existing = db_bs.get_open_ticket_for_user(discord_id)
+    if existing:
+        channel_url = f"https://discord.com/channels/{BS_FAMILY_GUILD_ID}/{existing['channel_id']}"
+        return {"id": existing["id"], "channel_id": existing["channel_id"], "channel_url": channel_url, "already_open": True}, None
+
+    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+    if not guild:
+        return None, "Serveur introuvable."
+    member = guild.get_member(int(discord_id))
+    if not member:
+        return None, "Tu dois être membre du serveur pour ouvrir un ticket."
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+    }
+    for rid in TICKET_STAFF_ROLE_IDS:
+        role = guild.get_role(rid)
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+    ticket_category = guild.get_channel(TICKET_CATEGORY_ID)
+    salon = await guild.create_text_channel(
+        f"ticket-{category}-{member.name}"[:100],
+        category=ticket_category if isinstance(ticket_category, discord.CategoryChannel) else None,
+        overwrites=overwrites,
+        reason=f"Ticket ouvert par {member.name}",
+    )
+
+    row = db_bs.create_ticket(discord_id, bs_tag, category, description, str(salon.id))
+
+    embed = discord.Embed(
+        title=f"🎫 Ticket #{row['id']} — {TICKET_CATEGORIES[category]}",
+        description=description,
+        color=0x3498db,
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="Ouvert par", value=member.mention, inline=True)
+    embed.set_footer(text="Non pris en charge")
+    await salon.send(content=member.mention, embed=embed, view=TicketControlView(row["id"]))
+
+    channel_url = f"https://discord.com/channels/{BS_FAMILY_GUILD_ID}/{salon.id}"
+    return {"id": row["id"], "channel_id": str(salon.id), "channel_url": channel_url, "already_open": False}, None
+
+
+class TicketControlView(discord.ui.View):
+    """Persistante — custom_id encode l'ID du ticket (même technique que
+    MatchView) pour fonctionner après un redémarrage via bot.add_view()
+    sans dictionnaire en mémoire séparé (voir on_ready)."""
+
+    def __init__(self, ticket_id: int):
+        super().__init__(timeout=None)
+        self.ticket_id = ticket_id
+
+        claim_btn = discord.ui.Button(
+            label="Prendre en charge", style=discord.ButtonStyle.primary, emoji="🙋",
+            custom_id=f"ticket_claim:{ticket_id}",
+        )
+        claim_btn.callback = self._on_claim
+        self.add_item(claim_btn)
+
+        close_btn = discord.ui.Button(
+            label="Fermer", style=discord.ButtonStyle.danger, emoji="🔒",
+            custom_id=f"ticket_close:{ticket_id}",
+        )
+        close_btn.callback = self._on_close
+        self.add_item(close_btn)
+
+    def _is_staff(self, member: discord.Member) -> bool:
+        return is_bot_owner(member) or member.guild_permissions.administrator or any(
+            r.id in TICKET_STAFF_ROLE_IDS for r in member.roles
+        )
+
+    async def _on_claim(self, interaction: discord.Interaction):
+        if not self._is_staff(interaction.user):
+            return await interaction.response.send_message("❌ Réservé au staff.", ephemeral=True)
+        db_bs.claim_ticket(self.ticket_id, str(interaction.user.id))
+        embed = interaction.message.embeds[0]
+        embed.set_footer(text=f"Pris en charge par {interaction.user.display_name}")
+        await interaction.response.edit_message(embed=embed)
+
+    async def _on_close(self, interaction: discord.Interaction):
+        ticket = db_bs.get_ticket(self.ticket_id)
+        if not ticket:
+            return await interaction.response.send_message("❌ Ticket introuvable.", ephemeral=True)
+        if str(interaction.user.id) != ticket["discord_id"] and not self._is_staff(interaction.user):
+            return await interaction.response.send_message("❌ Réservé à l'auteur du ticket ou au staff.", ephemeral=True)
+
+        await interaction.response.defer()
+
+        transcript = []
+        async for msg in interaction.channel.history(limit=None, oldest_first=True):
+            transcript.append({
+                "author": msg.author.display_name,
+                "avatar_url": str(msg.author.display_avatar.url) if msg.author.display_avatar else None,
+                "content": msg.content,
+                "created_at": msg.created_at.isoformat(),
+            })
+        db_bs.close_ticket(self.ticket_id, str(interaction.user.id), None, transcript)
+
+        opener = interaction.guild.get_member(int(ticket["discord_id"]))
+        if opener:
+            await interaction.channel.set_permissions(opener, send_messages=False)
+        try:
+            await interaction.channel.edit(name=f"closed-{interaction.channel.name}"[:100])
+        except discord.HTTPException:
+            pass
+
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+        await interaction.channel.send(f"🔒 Ticket fermé par {interaction.user.mention}.")
+
+        site_url = os.environ.get("SITE_URL")
+        fields = [("Ticket", f"#{self.ticket_id}", True), ("Fermé par", interaction.user.mention, True)]
+        if site_url:
+            fields.append(("Transcript", f"{site_url}/staff/tickets/{self.ticket_id}", False))
+        await send_log_message(
+            interaction.guild, LOG_TICKET_CHANNEL_ID,
+            "🎫 Ticket fermé", f"Catégorie : {TICKET_CATEGORIES.get(ticket['category'], ticket['category'])}",
+            0xe74c3c, fields=fields,
+        )
+
+
+class TicketDescriptionModal(discord.ui.Modal):
+    description_input = discord.ui.TextInput(
+        label="Décris ta demande",
+        style=discord.TextStyle.paragraph,
+        placeholder="Explique en quelques lignes ce dont tu as besoin...",
+        required=True, max_length=1000,
+    )
+
+    def __init__(self, category: str):
+        super().__init__(title=f"Nouveau ticket — {TICKET_CATEGORIES[category]}")
+        self.category = category
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        data, err = await _create_ticket_apply(str(interaction.user.id), self.category, str(self.description_input.value))
+        if err:
+            return await interaction.followup.send(f"❌ {err}", ephemeral=True)
+        if data["already_open"]:
+            return await interaction.followup.send(f"Tu as déjà un ticket ouvert : <#{data['channel_id']}>", ephemeral=True)
+        await interaction.followup.send(f"✅ Ticket créé : <#{data['channel_id']}>", ephemeral=True)
+
+
+class TicketPanelView(discord.ui.View):
+    """Persistante (custom_id statique — pas besoin d'ID dynamique, la
+    sélection ouvre juste un modal)."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.select = discord.ui.Select(
+            placeholder="Choisis une catégorie pour ouvrir un ticket",
+            custom_id="ticket_panel_select",
+            options=[discord.SelectOption(label=label, value=key) for key, label in TICKET_CATEGORIES.items()],
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        category = self.select.values[0]
+        await interaction.response.send_modal(TicketDescriptionModal(category))
+
+
+@bot.command(name="ticket_panel")
+async def cmd_ticket_panel(ctx):
+    """Poste le panel d'ouverture de ticket dans le salon courant — à lancer une
+    fois manuellement (pas auto-posté à chaque redémarrage, voir on_ready pour
+    le ré-enregistrement des vues existantes)."""
+    embed = discord.Embed(
+        title="🎫 Ouvrir un ticket",
+        description="Choisis une catégorie ci-dessous pour contacter le staff.",
+        color=0x3498db,
+    )
+    await ctx.send(embed=embed, view=TicketPanelView())
 
 
 # Seuls ces comptes précis peuvent utiliser !punition et !annuler_punition,
