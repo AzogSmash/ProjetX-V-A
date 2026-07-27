@@ -9194,16 +9194,32 @@ async def cmd_ticket_panel(ctx):
 
 
 DEFAULT_TICKET_CLOSE_DELAY_S = 10
+_CHANNEL_MENTION_RE = re.compile(r"^<#(\d+)>$")
+
+
+def _resolve_ticket_arg(ctx, arg: str) -> dict | None:
+    """Résout arg vers un ticket ouvert : mention de salon (#salon, ce qui
+    donne <#id> une fois envoyé — marche sans le mode développeur, contrairement
+    à un ID de salon copié à la main), ID de salon brut, ou ID de ticket."""
+    m = _CHANNEL_MENTION_RE.match(arg)
+    channel_id = m.group(1) if m else (arg if arg.isdigit() and len(arg) >= 15 else None)
+    if channel_id:
+        return db_bs.get_ticket_by_channel(channel_id)
+    if arg.isdigit():
+        return db_bs.get_ticket(int(arg))
+    return None
 
 
 @bot.command(name="fermer_ticket", aliases=["close_ticket", "ticket_close"])
 async def cmd_fermer_ticket(ctx, arg: str = None, *, reste: str = None):
     """Deux usages :
-    - Lancée dans le salon d'un ticket, sans ID : ferme CE ticket, après un
-      délai en secondes optionnel (`!fermer_ticket 30`, sinon délai par défaut).
-    - Lancée avec un ID en premier argument (depuis n'importe quel salon) :
-      ferme le ticket #<id> immédiatement, avec une raison optionnelle
-      (`!fermer_ticket 42 raison ici`)."""
+    - Lancée dans le salon d'un ticket, sans argument de ciblage : ferme CE
+      ticket, après un délai en secondes optionnel (`!fermer_ticket 30`,
+      sinon délai par défaut).
+    - Lancée avec une mention de salon ou un ID en premier argument (depuis
+      n'importe quel salon) : ferme ce ticket immédiatement, avec une raison
+      optionnelle (`!fermer_ticket #ticket-incident-bob raison ici` ou
+      `!fermer_ticket 42 raison ici`)."""
     if not _is_ticket_staff(ctx.author):
         return await ctx.send("❌ Réservé au staff.")
 
@@ -9227,15 +9243,15 @@ async def cmd_fermer_ticket(ctx, arg: str = None, *, reste: str = None):
         await _finish_ticket_close(ctx.channel, ctx.author, ctx.guild, current["id"], ticket, None)
         return
 
-    if arg is None or not arg.isdigit():
+    if arg is None:
         return await ctx.send(
             "❌ Utilisation : `!fermer_ticket` dans le salon du ticket (délai optionnel en secondes), "
-            "ou `!fermer_ticket <id> [raison]` depuis n'importe quel salon."
+            "ou `!fermer_ticket #salon-du-ticket [raison]` / `!fermer_ticket <id> [raison]` depuis n'importe quel salon."
         )
-    ticket_id = int(arg)
-    ticket = db_bs.get_ticket(ticket_id)
+    ticket = _resolve_ticket_arg(ctx, arg)
     if not ticket:
-        return await ctx.send(f"❌ Ticket #{ticket_id} introuvable.")
+        return await ctx.send(f"❌ Ticket introuvable pour `{arg}`.")
+    ticket_id = ticket["id"]
     if ticket["status"] != "open":
         return await ctx.send(f"❌ Le ticket #{ticket_id} est déjà fermé.")
 
