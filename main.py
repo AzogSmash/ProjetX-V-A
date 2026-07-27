@@ -8074,19 +8074,6 @@ async def cmd_lancer_course(ctx):
 
 # ── Admin — diagnostics bot ────────────────────────────────────────────────
 
-_BG_TASKS = [
-    ("check_mutes",          check_mutes),
-    ("update_crypto_prices", update_crypto_prices),
-    ("check_birthdays",      check_birthdays),
-    ("sync_bs_roles",        sync_bs_roles),
-    ("sync_family_ranked",   sync_family_ranked),
-    ("sync_trophy_history",  sync_trophy_history),
-    ("check_ranked_season",  check_ranked_season),
-    ("check_casino_season",  check_casino_season),
-    ("check_bs_season",      check_bs_season),
-    ("sync_discord_members", sync_discord_members),
-]
-
 @bot.command(name="ping")
 async def cmd_ping(ctx):
     if not (ctx.author.guild_permissions.administrator or is_bot_owner(ctx.author)):
@@ -8101,7 +8088,22 @@ async def cmd_ping(ctx):
     minutes, _ = divmod(rem, 60)
     uptime_str = f"{days}j {hours}h {minutes}m" if days else f"{hours}h {minutes}m"
 
-    tasks_lines = [f"{'🟢' if task.is_running() else '🔴'} `{name}`" for name, task in _BG_TASKS]
+    # Résolu ici (pas au niveau module) : plusieurs de ces tâches sont définies
+    # plus bas dans le fichier, donc une liste construite au chargement du
+    # module lèverait un NameError avant même que le bot ne démarre.
+    bg_tasks = [
+        ("check_mutes",          check_mutes),
+        ("update_crypto_prices", update_crypto_prices),
+        ("check_birthdays",      check_birthdays),
+        ("sync_bs_roles",        sync_bs_roles),
+        ("sync_family_ranked",   sync_family_ranked),
+        ("sync_trophy_history",  sync_trophy_history),
+        ("check_ranked_season",  check_ranked_season),
+        ("check_casino_season",  check_casino_season),
+        ("check_bs_season",      check_bs_season),
+        ("sync_discord_members", sync_discord_members),
+    ]
+    tasks_lines = [f"{'🟢' if task.is_running() else '🔴'} `{name}`" for name, task in bg_tasks]
 
     embed = discord.Embed(title="🏓 Pong ! — État du bot", color=0x3498db)
     embed.add_field(name="Latence WebSocket", value=f"{lat_icon} {latency_ms} ms", inline=True)
