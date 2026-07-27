@@ -65,6 +65,7 @@ intents.messages = True
 intents.reactions = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
+bot_start_time = datetime.now()
 _slash_synced = False
 slash_global_purged = False  # persisté : la purge des commandes globales ne doit se faire qu'une fois
 
@@ -1143,7 +1144,7 @@ def save_data(force: bool = False):
         mutes_for_save[str(guild_id)] = {}
         for user_id, mute_info in guild_mutes.items():
             info_copy = mute_info.copy()
-            if "end_time" in info_copy and info_copy["end_time"]:
+            if "end_time" in info_copy and isinstance(info_copy["end_time"], datetime):
                 info_copy["end_time"] = info_copy["end_time"].isoformat()
             mutes_for_save[str(guild_id)][str(user_id)] = info_copy
     data_to_save['mutes'] = mutes_for_save
@@ -1154,7 +1155,7 @@ def save_data(force: bool = False):
     giveaway_for_save = {}
     for guild_id, gw_info in giveaway_data.items():
         info_copy = gw_info.copy()
-        if "end_time" in info_copy and info_copy["end_time"]:
+        if "end_time" in info_copy and isinstance(info_copy["end_time"], datetime):
             info_copy["end_time"] = info_copy["end_time"].isoformat()
         giveaway_for_save[str(guild_id)] = info_copy
     data_to_save['giveaway_data'] = giveaway_for_save
@@ -2539,7 +2540,7 @@ async def giveaway(ctx, duration_hours: float, winners_count: int, *, prize: str
         "guild_id": ctx.guild.id,
         "winners": winners_count,
         "prize": prize,
-        "end_time": end_time.isoformat()
+        "end_time": end_time
     }
     save_data()
 
@@ -8070,6 +8071,45 @@ async def cmd_lancer_course(ctx):
     save_data()
     await ctx.send(embed=embed)
 
+
+# ── Admin — diagnostics bot ────────────────────────────────────────────────
+
+_BG_TASKS = [
+    ("check_mutes",          check_mutes),
+    ("update_crypto_prices", update_crypto_prices),
+    ("check_birthdays",      check_birthdays),
+    ("sync_bs_roles",        sync_bs_roles),
+    ("sync_family_ranked",   sync_family_ranked),
+    ("sync_trophy_history",  sync_trophy_history),
+    ("check_ranked_season",  check_ranked_season),
+    ("check_casino_season",  check_casino_season),
+    ("check_bs_season",      check_bs_season),
+    ("sync_discord_members", sync_discord_members),
+]
+
+@bot.command(name="ping")
+async def cmd_ping(ctx):
+    if not (ctx.author.guild_permissions.administrator or is_bot_owner(ctx.author)):
+        return await ctx.send("❌ Seuls les administrateurs peuvent utiliser cette commande.")
+
+    latency_ms = round(bot.latency * 1000)
+    lat_icon = "🟢" if latency_ms < 150 else "🟡" if latency_ms < 350 else "🔴"
+
+    delta = datetime.now() - bot_start_time
+    days, rem = divmod(int(delta.total_seconds()), 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    uptime_str = f"{days}j {hours}h {minutes}m" if days else f"{hours}h {minutes}m"
+
+    tasks_lines = [f"{'🟢' if task.is_running() else '🔴'} `{name}`" for name, task in _BG_TASKS]
+
+    embed = discord.Embed(title="🏓 Pong ! — État du bot", color=0x3498db)
+    embed.add_field(name="Latence WebSocket", value=f"{lat_icon} {latency_ms} ms", inline=True)
+    embed.add_field(name="Uptime", value=uptime_str, inline=True)
+    embed.add_field(name="Serveurs", value=str(len(bot.guilds)), inline=True)
+    embed.add_field(name="Tâches de fond", value="\n".join(tasks_lines), inline=False)
+    embed.set_footer(text=f"Bot ID: {bot.user.id}")
+    await ctx.send(embed=embed)
 
 # ── Admin — marché crypto ─────────────────────────────────────────────────
 
