@@ -399,6 +399,19 @@ def get_ticket(ticket_id: int) -> dict | None:
     return res.data[0] if res.data else None
 
 
+def get_ticket_by_channel(channel_id: str) -> dict | None:
+    res = (
+        get_client()
+        .table("tickets")
+        .select("*")
+        .eq("channel_id", channel_id)
+        .eq("status", "open")
+        .limit(1)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
 def list_open_tickets() -> list[dict]:
     """Tickets ouverts, pour ré-enregistrer les vues persistantes au démarrage (on_ready)."""
     res = get_client().table("tickets").select("id,channel_id").eq("status", "open").execute()

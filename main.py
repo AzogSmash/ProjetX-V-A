@@ -8995,41 +8995,44 @@ async def _create_ticket_apply(discord_id: str, category: str, description: str,
     return {"id": row["id"], "channel_id": str(salon.id), "channel_url": channel_url, "already_open": False}, None
 
 
-async def _finish_ticket_close(interaction: discord.Interaction, view: "TicketControlView", ticket: dict, reason: str | None):
-    """Cœur du close, partagé entre !Fermer! (bouton direct) et !Fermer avec
-    raison! (modal) — l'appelant a déjà deferré interaction.response avant
-    d'appeler cette fonction."""
+async def _finish_ticket_close(
+    channel: discord.TextChannel, actor: discord.abc.User, guild: discord.Guild,
+    ticket_id: int, ticket: dict, reason: str | None,
+):
+    """Cœur du close, partagé entre !Fermer! (bouton), !Fermer avec raison!
+    (modal) et !fermer_ticket (commande texte) — l'appelant a déjà répondu
+    à l'interaction (le cas échéant) avant d'appeler cette fonction."""
     transcript = []
-    async for msg in interaction.channel.history(limit=None, oldest_first=True):
+    async for msg in channel.history(limit=None, oldest_first=True):
         transcript.append({
             "author": msg.author.display_name,
             "avatar_url": str(msg.author.display_avatar.url) if msg.author.display_avatar else None,
             "content": msg.content,
             "created_at": msg.created_at.isoformat(),
         })
-    db_bs.close_ticket(view.ticket_id, str(interaction.user.id), reason, transcript)
+    db_bs.close_ticket(ticket_id, str(actor.id), reason, transcript)
 
-    close_note = f"🔒 Ticket fermé par {interaction.user.mention}."
+    close_note = f"🔒 Ticket fermé par {actor.mention}."
     if reason:
         close_note += f"\n**Raison :** {reason}"
     close_note += "\nCe salon sera supprimé dans quelques secondes."
-    await interaction.channel.send(close_note)
+    await channel.send(close_note)
 
     site_url = os.environ.get("SITE_URL")
     fields = [
-        ("Ticket", f"#{view.ticket_id}", True),
+        ("Ticket", f"#{ticket_id}", True),
         ("Catégorie", TICKET_CATEGORIES.get(ticket["category"], ticket["category"]), True),
         ("Ouvert par", f"<@{ticket['discord_id']}>", True),
-        ("Fermé par", interaction.user.mention, True),
+        ("Fermé par", actor.mention, True),
     ]
     if ticket.get("claimed_by"):
         fields.append(("Pris en charge par", f"<@{ticket['claimed_by']}>", True))
     if reason:
         fields.append(("Raison", reason, False))
     if site_url:
-        fields.append(("Transcript", f"{site_url}/staff/tickets/{view.ticket_id}", False))
+        fields.append(("Transcript", f"{site_url}/staff/tickets/{ticket_id}", False))
     await send_log_message(
-        interaction.guild, LOG_TICKET_CHANNEL_ID,
+        guild, LOG_TICKET_CHANNEL_ID,
         "🎫 Ticket fermé", None,
         0xe74c3c, fields=fields,
     )
@@ -9039,9 +9042,15 @@ async def _finish_ticket_close(interaction: discord.Interaction, view: "TicketCo
     # donc rien n'est perdu à la suppression.
     await asyncio.sleep(5)
     try:
-        await interaction.channel.delete(reason=f"Ticket #{view.ticket_id} fermé par {interaction.user}")
+        await channel.delete(reason=f"Ticket #{ticket_id} fermé par {actor}")
     except discord.HTTPException:
         pass
+
+
+def _is_ticket_staff(member: discord.Member) -> bool:
+    return is_bot_owner(member) or member.guild_permissions.administrator or any(
+        r.id in TICKET_STAFF_ROLE_IDS for r in member.roles
+    )
 
 
 class TicketControlView(discord.ui.View):
@@ -9075,9 +9084,7 @@ class TicketControlView(discord.ui.View):
         self.add_item(close_reason_btn)
 
     def _is_staff(self, member: discord.Member) -> bool:
-        return is_bot_owner(member) or member.guild_permissions.administrator or any(
-            r.id in TICKET_STAFF_ROLE_IDS for r in member.roles
-        )
+        return _is_ticket_staff(member)
 
     def _get_closable_ticket(self, interaction: discord.Interaction):
         """Retourne (ticket, erreur). ticket est None si l'erreur doit être renvoyée à l'utilisateur."""
@@ -9103,7 +9110,7 @@ class TicketControlView(discord.ui.View):
         if err:
             return await interaction.response.send_message(err, ephemeral=True)
         await interaction.response.defer()
-        await _finish_ticket_close(interaction, self, ticket, None)
+        await _finish_ticket_close(interaction.channel, interaction.user, interaction.guild, self.ticket_id, ticket, None)
 
     async def _on_close_with_reason(self, interaction: discord.Interaction):
         ticket, err = self._get_closable_ticket(interaction)
@@ -9126,7 +9133,10 @@ class TicketCloseReasonModal(discord.ui.Modal, title="Fermer le ticket"):
         if err:
             return await interaction.response.send_message(err, ephemeral=True)
         await interaction.response.defer()
-        await _finish_ticket_close(interaction, self.view_ref, ticket, str(self.reason_input.value))
+        await _finish_ticket_close(
+            interaction.channel, interaction.user, interaction.guild,
+            self.view_ref.ticket_id, ticket, str(self.reason_input.value),
+        )
 
 
 class TicketDescriptionModal(discord.ui.Modal):
@@ -9181,6 +9191,62 @@ async def cmd_ticket_panel(ctx):
         color=0x3498db,
     )
     await ctx.send(embed=embed, view=TicketPanelView())
+
+
+DEFAULT_TICKET_CLOSE_DELAY_S = 10
+
+
+@bot.command(name="fermer_ticket", aliases=["close_ticket", "ticket_close"])
+async def cmd_fermer_ticket(ctx, arg: str = None, *, reste: str = None):
+    """Deux usages :
+    - Lancée dans le salon d'un ticket, sans ID : ferme CE ticket, après un
+      délai en secondes optionnel (`!fermer_ticket 30`, sinon délai par défaut).
+    - Lancée avec un ID en premier argument (depuis n'importe quel salon) :
+      ferme le ticket #<id> immédiatement, avec une raison optionnelle
+      (`!fermer_ticket 42 raison ici`)."""
+    if not _is_ticket_staff(ctx.author):
+        return await ctx.send("❌ Réservé au staff.")
+
+    current = db_bs.get_ticket_by_channel(str(ctx.channel.id))
+    if current:
+        delay = DEFAULT_TICKET_CLOSE_DELAY_S
+        if arg is not None:
+            try:
+                delay = max(0, int(arg))
+            except ValueError:
+                return await ctx.send(
+                    "❌ Dans le salon d'un ticket, le seul argument accepté est un délai en secondes. "
+                    "Ex : `!fermer_ticket 30`"
+                )
+        await ctx.send(f"🔒 Ce ticket sera fermé dans {delay} seconde(s) par {ctx.author.mention}.")
+        await asyncio.sleep(delay)
+        # Re-vérifié après le délai : le ticket a pu être fermé/repris entre temps.
+        ticket = db_bs.get_ticket(current["id"])
+        if not ticket or ticket["status"] != "open":
+            return
+        await _finish_ticket_close(ctx.channel, ctx.author, ctx.guild, current["id"], ticket, None)
+        return
+
+    if arg is None or not arg.isdigit():
+        return await ctx.send(
+            "❌ Utilisation : `!fermer_ticket` dans le salon du ticket (délai optionnel en secondes), "
+            "ou `!fermer_ticket <id> [raison]` depuis n'importe quel salon."
+        )
+    ticket_id = int(arg)
+    ticket = db_bs.get_ticket(ticket_id)
+    if not ticket:
+        return await ctx.send(f"❌ Ticket #{ticket_id} introuvable.")
+    if ticket["status"] != "open":
+        return await ctx.send(f"❌ Le ticket #{ticket_id} est déjà fermé.")
+
+    channel = ctx.guild.get_channel(int(ticket["channel_id"]))
+    if not channel:
+        # Salon déjà supprimé manuellement : on ferme quand même l'enregistrement.
+        db_bs.close_ticket(ticket_id, str(ctx.author.id), reste, [])
+        return await ctx.send(f"✅ Ticket #{ticket_id} marqué comme fermé (le salon n'existait déjà plus).")
+
+    await _finish_ticket_close(channel, ctx.author, ctx.guild, ticket_id, ticket, reste)
+    await ctx.send(f"✅ Ticket #{ticket_id} fermé.")
 
 
 # Seuls ces comptes précis peuvent utiliser !punition et !annuler_punition,
