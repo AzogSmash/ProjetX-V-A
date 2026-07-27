@@ -339,6 +339,35 @@ def upsert_player_profile(tag: str, bio=_UNSET) -> None:
     get_client().table("bs_player_profiles").upsert(payload, on_conflict="player_tag").execute()
 
 
+# ── Notes internes staff sur les membres d'un clan (voir supabase/xxx_member_notes.sql) ──
+# Une note par joueur (pas par club) : si un membre change de clan, la note
+# suit — pas de reset, cohérent avec le reste (bs_player_profiles est aussi
+# indexé par tag seul). club_slug sert seulement à savoir quel staff peut
+# l'éditer (vérifié côté site, pas ici — voir commentaire dans db_members.py).
+
+def get_notes_for_club(club_slug: str) -> dict:
+    """player_tag -> {'note','updated_by','updated_at'} pour les membres notés d'un club."""
+    res = get_client().table("member_notes").select("*").eq("club_slug", club_slug).execute()
+    return {row["player_tag"]: row for row in res.data}
+
+
+def set_member_note(tag: str, club_slug: str, note: str | None, updated_by: str) -> None:
+    """note=None ou vide efface la note."""
+    if note:
+        get_client().table("member_notes").upsert(
+            {
+                "player_tag": tag,
+                "club_slug": club_slug,
+                "note": note,
+                "updated_by": updated_by,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="player_tag",
+        ).execute()
+    else:
+        get_client().table("member_notes").delete().eq("player_tag", tag).execute()
+
+
 def get_archived_season(season_month: str) -> list[dict]:
     """[{'tag','name','club','start','end','delta'}, ...]"""
     res = (

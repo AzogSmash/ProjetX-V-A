@@ -429,6 +429,44 @@ def api_actualites_create():
     return jsonify({"ok": True})
 
 
+@app.route("/api/famille/notes/<slug>")
+@_require_internal_secret
+def api_famille_notes_get(slug):
+    """Notes internes staff sur les membres d'un club — protégé comme le
+    reste des routes staff (le site ne demande ces données que pour un
+    viewer déjà vérifié staff/admin de ce club, voir getClubNotes)."""
+    return jsonify(db_bs.get_notes_for_club(slug))
+
+
+@app.route("/api/famille/notes/<slug>", methods=["POST"])
+@_require_internal_secret
+def api_famille_notes_set(slug):
+    """Le site a déjà vérifié tier=staff/admin + correspondance de club avant
+    d'appeler cette route (voir updateMemberNote côté site) — cette
+    correspondance rôle Discord -> club vit côté site, pas ici (voir
+    db_members.py). On revérifie seulement ce que le bot peut vérifier :
+    que le compte est bien staff ou admin (défense en profondeur, même
+    logique que /api/profile/<tag>)."""
+    body = request.get_json(silent=True) or {}
+    discord_id = str(body.get("discord_id", "")).strip()
+    tag = str(body.get("tag", "")).strip()
+    note = str(body.get("note", "")).strip()[:300] or None
+    if not discord_id or not tag:
+        return {"error": "discord_id et tag requis"}, 400
+
+    member = db_members.get_member(discord_id)
+    main = _bot()
+    is_staff = member is not None and (
+        member["is_admin"] or any(str(rid) in member["role_ids"] for rid in main.TICKET_STAFF_ROLE_IDS)
+    )
+    if not is_staff:
+        return {"error": "Réservé au staff."}, 403
+
+    clean_tag = tag.strip().lstrip("#").upper()
+    db_bs.set_member_note(clean_tag, slug, note, discord_id)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/staff/panel")
 @_require_internal_secret
 def api_staff_panel():
