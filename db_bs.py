@@ -110,20 +110,43 @@ def get_player_history(player_tag: str, since: str | None = None) -> list[dict]:
     return q.execute().data
 
 
+_PAGE_SIZE = 1000
+
+
+def _select_all_snapshots_since(since_date: str) -> list[dict]:
+    """PostgREST plafonne silencieusement toute requête sans .range() à 1000
+    lignes — avec ~230 joueurs et un snapshot par jour, ce plafond est
+    dépassé en quelques semaines de saison (1785 lignes constatées le
+    28/07/2026, classement pusheurs figé au 25/07 pendant que les trophées
+    bruts (via une vue Postgres, pas ce chemin) continuaient d'avancer).
+    Pagine par blocs de 1000 jusqu'à épuisement plutôt que de tronquer."""
+    client = get_client()
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page = (
+            client.table("bs_trophy_snapshots")
+            .select("player_tag,snapshot_date,trophies")
+            .gte("snapshot_date", since_date)
+            .order("snapshot_date")
+            .range(offset, offset + _PAGE_SIZE - 1)
+            .execute()
+            .data
+        )
+        rows.extend(page)
+        if len(page) < _PAGE_SIZE:
+            break
+        offset += _PAGE_SIZE
+    return rows
+
+
 def get_season_evolution(since_date: str) -> list[dict]:
     """[{'tag','name','club','start','end','delta','joined_note'}, ...] pour
     tous les joueurs ayant au moins un point depuis `since_date`. Équivalent
     de l'ancien _bs_evolution_current_entries, mais borné dans le temps donc
     pas besoin de tout l'historique complet."""
     client = get_client()
-    snaps = (
-        client.table("bs_trophy_snapshots")
-        .select("player_tag,snapshot_date,trophies")
-        .gte("snapshot_date", since_date)
-        .order("snapshot_date")
-        .execute()
-        .data
-    )
+    snaps = _select_all_snapshots_since(since_date)
     by_player: dict[str, list[dict]] = {}
     for row in snaps:
         by_player.setdefault(row["player_tag"], []).append(row)
@@ -163,15 +186,7 @@ def get_baselines_since(since_date: str) -> dict:
     joueur depuis `since_date`. Utilisé quand le delta se calcule contre une
     valeur de trophées fraîchement récupérée en direct (ex: !evo), plutôt
     que contre le dernier snapshot stocké."""
-    res = (
-        get_client()
-        .table("bs_trophy_snapshots")
-        .select("player_tag,snapshot_date,trophies")
-        .gte("snapshot_date", since_date)
-        .order("snapshot_date")
-        .execute()
-        .data
-    )
+    res = _select_all_snapshots_since(since_date)
     baselines: dict = {}
     for row in res:
         if row["player_tag"] not in baselines:
