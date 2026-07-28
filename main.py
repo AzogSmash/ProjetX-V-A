@@ -12732,75 +12732,124 @@ async def cmd_ranked_liberer(ctx, joueur: discord.Member):
     await ctx.send(f"✅ {joueur.mention} débloqué ({', '.join(removed)} effacé). Il peut relancer `!1v1`.")
 
 
+# Libellés FR pour les permissions Discord détectées via @commands.has_permissions
+# (voir _extract_permission_labels) — table de traduction, pas une liste de
+# commandes : rien à retoucher ici quand une commande est ajoutée/retirée.
+_ADMIN_REF_PERM_LABELS = {
+    "administrator": "Administrateur",
+    "manage_guild": "Gérer le serveur",
+    "manage_roles": "Gérer les rôles",
+    "manage_channels": "Gérer les salons",
+    "manage_messages": "Gérer les messages",
+    "manage_nicknames": "Gérer les pseudos",
+    "kick_members": "Expulser des membres",
+    "ban_members": "Bannir des membres",
+    "mute_members": "Réduire au silence (vocal)",
+    "moderate_members": "Timeout (mise en sourdine)",
+}
+
+
+def _extract_permission_labels(command) -> list[str] | None:
+    """Lit la permission Discord exacte exigée par un @commands.has_permissions(...)
+    directement dans la closure du check — vérifié empiriquement contre le
+    vrai code de discord.py (co_freevars == ('perms',)), pas une supposition."""
+    for chk in command.checks:
+        try:
+            if chk.__code__.co_freevars == ("perms",) and chk.__closure__:
+                perms = chk.__closure__[0].cell_contents
+                if isinstance(perms, dict):
+                    return [_ADMIN_REF_PERM_LABELS.get(k, k) for k, v in perms.items() if v]
+        except Exception:
+            continue
+    return None
+
+
+def _admin_ref_label(cmd) -> str | None:
+    """Retourne un libellé d'accès si la commande est restreinte d'une façon
+    détectable dans le code (disabled_cmds, cmd_role_perms, ADMIN_LOCKED_CMDS,
+    ALWAYS_ALLOWED_CMDS, ou un @commands.has_permissions) — None sinon, ce qui
+    l'exclut de cette référence "admin". Les commandes protégées par une
+    simple vérification manuelle en plein milieu de leur code (ex: !bs_famille,
+    !bs_roles) ne peuvent pas être détectées ainsi et n'apparaîtront pas —
+    limite connue, pas un bug."""
+    name = cmd.name
+    if name in disabled_cmds:
+        return "🚫 Désactivée actuellement"
+    if cmd_role_perms.get(name):
+        return "🔒 Rôle(s) autorisé(s) via `!permission`"
+    perm_labels = _extract_permission_labels(cmd)
+    if perm_labels:
+        return f"🔒 Permission Discord : {', '.join(perm_labels)}"
+    if name in ADMIN_LOCKED_CMDS:
+        return "🔒 Admin uniquement"
+    if name in ALWAYS_ALLOWED_CMDS:
+        return "🔒 Admin uniquement (outil de gestion du bot)"
+    return None
+
+
+def _chunk_lines(lines: list[str], limit: int = 1000) -> list[str]:
+    chunks, current = [], ""
+    for line in lines:
+        piece = (line + "\n")
+        if current and len(current) + len(piece) > limit:
+            chunks.append(current)
+            current = ""
+        current += piece
+    if current:
+        chunks.append(current)
+    return chunks or ["*(aucune)*"]
+
+
 @bot.hybrid_command(name="commandes_admin", aliases=["modcommandes", "aide_admin", "admincommands"])
 @discord.app_commands.default_permissions(administrator=True)
-async def cmd_commandes_admin(ctx):
-    """Liste toutes les commandes de modération/admin — volontairement en préfixe only (pas de /),
-    donc pas d'autocomplete Discord pour les retrouver : ce menu sert d'index."""
+async def cmd_commandes_admin(ctx, *, mot_cle: str = None):
+    """Référence des commandes admin/modération, générée depuis le vrai code
+    (checks de permission, ADMIN_LOCKED_CMDS, cmd_role_perms, disabled_cmds)
+    plutôt qu'une liste tapée à la main qui se périme — volontairement en
+    préfixe only (pas de /), donc pas d'autocomplete Discord pour les
+    retrouver : ce menu sert d'index. Demande du 26/07/2026."""
     if not (ctx.guild and ctx.author.guild_permissions.administrator) and not is_bot_owner(ctx.author):
         return await ctx.send("❌ Réservé aux administrateurs.")
 
+    restricted = [(c, label) for c in bot.commands if (label := _admin_ref_label(c)) is not None]
+    restricted.sort(key=lambda t: t[0].name)
+
+    if mot_cle:
+        needle = mot_cle.lower().strip()
+        matches = [
+            (c, label) for c, label in restricted
+            if needle in " ".join([c.name, *c.aliases, COMMAND_USAGE.get(c.name, ""), c.help or ""]).lower()
+        ]
+        if not matches:
+            return await ctx.send(f"❌ Aucune commande admin/modération ne correspond à `{mot_cle}`.")
+        embed = discord.Embed(
+            title=f"🔎 Commandes admin — « {mot_cle} »",
+            description=f"{len(matches)} résultat(s).",
+            color=0xe74c3c,
+        )
+        for c, label in matches[:10]:
+            alias_str = f" (`!{'`, `!'.join(c.aliases)}`)" if c.aliases else ""
+            usage = COMMAND_USAGE.get(c.name, f"`!{c.name} {c.signature}`".strip())
+            embed.add_field(name=f"!{c.name}{alias_str}", value=f"{usage}\n{label}", inline=False)
+        if len(matches) > 10:
+            embed.set_footer(text=f"+{len(matches) - 10} autres résultats — affine ta recherche.")
+        return await ctx.send(embed=embed)
+
     embed = discord.Embed(
         title="🛡️ Commandes de modération & admin",
-        description="Toutes en préfixe `!` uniquement (pas de `/`) — pas d'abus, pas de clutter dans l'autocomplete.",
-        color=0xe74c3c
+        description=(
+            f"**{len(restricted)}** commandes restreintes détectées automatiquement dans le code.\n"
+            f"Utilise `!commandes_admin <mot-clé>` pour chercher une commande précise avec son détail."
+        ),
+        color=0xe74c3c,
     )
-    embed.add_field(
-        name="⚖️ Modération",
-        value=(
-            "`!warn @m <raison>` · `!mute @m [durée] <raison>` · `!unmute @m`\n"
-            "`!clear <nb>` · `!silence @m` · `!unsilence @m` · `!sanctions [@m]`\n"
-            "`!ban @m <raison>` · `!unban <id>`\n"
-            "`!lock [#salon]` · `!unlock [#salon]`\n"
-            "`!rename @m <pseudo>`"
-        ), inline=False
+    lines = [f"`!{c.name}` — {label}" for c, label in restricted]
+    for i, chunk in enumerate(_chunk_lines(lines)):
+        embed.add_field(name="Commandes" if i == 0 else "Commandes (suite)", value=chunk, inline=False)
+    embed.set_footer(
+        text="Le créateur du bot passe toujours outre ces restrictions. "
+        "!permission permet de déléguer une commande à un rôle non-admin."
     )
-    embed.add_field(
-        name="🔒 Punitions",
-        value=(
-            "`!punition <nb> @m` (`!pun`) — Punition morse\n"
-            "`!annuler_punition @m` (`!apun`)\n"
-            "`!morse @m` — Punition morse avancée\n"
-            "`!annuler_morse @m` (`!amorse`)"
-        ), inline=False
-    )
-    embed.add_field(
-        name="⚙️ Administration serveur",
-        value=(
-            "`!gestion` (`!gest`) — Activer/désactiver des commandes\n"
-            "`!permission` (`!perm`) — Restreindre des commandes par rôle\n"
-            "`!cd_set` — Modifier les cooldowns\n"
-            "`!prix_casino` — Prix shop/usine + mises\n"
-            "`!set_admin_log #salon` — Salon de logs admin\n"
-            "`!addcoins @m <n> [cash|coffre]` / `!removecoins @m <n> [cash|coffre]`\n"
-            "`!giveaway` / `!cancelgiveaway`\n"
-            "`!ouvrir_course` / `!lancer_course`\n"
-            "`!ouverture_tournoi` / `!annuler_tournoi`\n"
-            "`!tournoi_ajouter @m [équipe]` / `!tournoi_retirer @m`\n"
-            "`!tournoi_deplacer #salon` — Déplacer le tableau du tournoi\n"
-            "`!prix_tournoi <montant>` / `!win <n°>`\n"
-            "`!freeze_crypto` — Geler le marché crypto\n"
-            "`!bs_famille ajouter/retirer <tag>` · `!bs_roles trophees/ranked <min> @role`"
-        ), inline=False
-    )
-    embed.add_field(
-        name="🥊 Ranked 1v1 (admin)",
-        value=(
-            "`!ranked_sanction @m` — Valider un signalement (baisse réputation, ban auto si trop bas)\n"
-            "`!ranked_ajuster @m <+/-N>` — Ajuster les points\n"
-            "`!ranked_set @m <points> <V> <D>` — Fixer précisément points/V/D\n"
-            "`!ranked_liberer @m` — Débloquer un défi/duel coincé (ex: après un redémarrage)\n"
-            "`!reset_casino` — Reset saison casino (coins/coffres/usines/commerces/métiers)\n"
-            "`!reset_duels` — Reset saison ranked 1v1 (archive + remet à zéro)"
-        ), inline=False
-    )
-    if is_bot_owner(ctx.author):
-        embed.add_field(
-            name="👑 Créateur du bot",
-            value="`!say <message>` · `!dm @m <msg>` · `!dmall <msg>` · `!construction` · `!nuke`",
-            inline=False
-        )
-    embed.set_footer(text="!perm permet de déléguer certaines de ces commandes à un rôle non-admin.")
     await ctx.send(embed=embed)
 
 
