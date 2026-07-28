@@ -1468,7 +1468,7 @@ ADMIN_LOCKED_CMDS = {
     'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter', 'tournoi_deplacer',
     'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log',
     'ranked_sanction', 'ranked_ajuster', 'ranked_set', 'reset_casino', 'reset_duels', 'ranked_liberer',
-    'casino_ban', 'casino_unban', 'casino_pause', 'casino_resume', 'ticket_panel', 'aide',
+    'casino_ban', 'casino_unban', 'casino_pause', 'casino_resume', 'ticket_panel',
 }
 
 # ── Anti-macro casino : incident du 23/07/2026 (martingale rouge/noir via
@@ -6867,116 +6867,6 @@ async def cmd_permission(ctx):
     if not ctx.guild:
         return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
     await ctx.send(embed=_perm_embed(), view=PermissionView(ctx))
-
-
-# ═════════════════════════════════════════════════════════════════════════
-# ── !aide : référence des commandes, générée depuis le vrai code (Admin) ──
-# Toujours à jour par construction (bot.commands, disabled_cmds,
-# cmd_role_perms, ADMIN_LOCKED_CMDS sont la même source que le check global
-# _global_command_gate) — pas une doc à maintenir à la main qui finit par
-# se périmer. Demande du 26/07/2026 : "on se perd pour retrouver les
-# commandes de modération quand on n'a pas accès au code".
-# ═════════════════════════════════════════════════════════════════════════
-
-def _aide_access_label(cmd_name: str, guild: "discord.Guild | None") -> str:
-    if cmd_name in disabled_cmds:
-        return "🚫 Désactivée actuellement"
-    allowed_roles = cmd_role_perms.get(cmd_name)
-    if allowed_roles:
-        if guild:
-            names = [r.name for rid in allowed_roles if (r := guild.get_role(rid))]
-            if names:
-                return f"🔒 Rôles : {', '.join(names)}"
-        return "🔒 Restreinte à certains rôles"
-    if cmd_name in ADMIN_LOCKED_CMDS:
-        return "🔒 Admin uniquement"
-    return "✅ Accessible à tous"
-
-
-def _aide_tier(cmd_name: str) -> str:
-    if cmd_name in disabled_cmds:
-        return "disabled"
-    if cmd_role_perms.get(cmd_name) or cmd_name in ADMIN_LOCKED_CMDS:
-        return "restricted"
-    return "open"
-
-
-def _chunk_names(names: list[str], limit: int = 950) -> list[str]:
-    """Découpe une liste de noms en morceaux qui tiennent dans un field
-    d'embed (max 1024 caractères) — marge de sécurité à 950."""
-    chunks, current = [], ""
-    for n in sorted(names):
-        piece = f"`{n}` "
-        if len(current) + len(piece) > limit:
-            chunks.append(current)
-            current = ""
-        current += piece
-    if current:
-        chunks.append(current)
-    return chunks or ["*(aucune)*"]
-
-
-@bot.command(name="aide", aliases=["cmds", "commandes"])
-async def cmd_aide(ctx, *, mot_cle: str = None):
-    if not (ctx.guild and ctx.author.guild_permissions.administrator) and not is_bot_owner(ctx.author):
-        return await ctx.send("❌ Réservé aux administrateurs ou au créateur du bot.")
-
-    all_cmds = sorted({c.name for c in bot.commands})
-
-    if mot_cle:
-        needle = mot_cle.lower().strip()
-        matches = []
-        for c in bot.commands:
-            haystack = " ".join([c.name, *c.aliases, COMMAND_USAGE.get(c.name, ""), c.help or ""]).lower()
-            if needle in haystack:
-                matches.append(c)
-        matches.sort(key=lambda c: c.name)
-
-        if not matches:
-            return await ctx.send(f"❌ Aucune commande ne correspond à `{mot_cle}`.")
-
-        embed = discord.Embed(
-            title=f"🔎 Recherche : « {mot_cle} »",
-            description=f"{len(matches)} commande(s) trouvée(s).",
-            color=0xA970FF,
-        )
-        for c in matches[:10]:
-            alias_str = f" (alias : {', '.join(f'`!{a}`' for a in c.aliases)})" if c.aliases else ""
-            usage = COMMAND_USAGE.get(c.name, f"`!{c.name} {c.signature}`".strip())
-            embed.add_field(
-                name=f"!{c.name}{alias_str}",
-                value=f"{usage}\n{_aide_access_label(c.name, ctx.guild)}",
-                inline=False,
-            )
-        if len(matches) > 10:
-            embed.set_footer(text=f"+{len(matches) - 10} autres résultats — affine ta recherche pour les voir.")
-        return await ctx.send(embed=embed)
-
-    tiers: dict[str, list[str]] = {"disabled": [], "restricted": [], "open": []}
-    for name in all_cmds:
-        tiers[_aide_tier(name)].append(name)
-
-    embed = discord.Embed(
-        title="📖 Commandes du bot",
-        description=(
-            f"**{len(all_cmds)}** commandes au total. Utilise `!aide <mot-clé>` pour chercher "
-            f"une commande précise (nom, alias ou usage) et voir son détail."
-        ),
-        color=0xA970FF,
-    )
-    sections = [
-        ("🔒 Réservées (admin ou rôle autorisé)", "restricted"),
-        ("🚫 Désactivées actuellement", "disabled"),
-        ("✅ Accessibles à tous", "open"),
-    ]
-    for title, key in sections:
-        names = tiers[key]
-        if not names:
-            continue
-        for i, chunk in enumerate(_chunk_names(names)):
-            field_title = title if i == 0 else f"{title} (suite)"
-            embed.add_field(name=field_title, value=chunk, inline=False)
-    await ctx.send(embed=embed)
 
 
 # ═════════════════════════════════════════════════════════════════════════
