@@ -308,6 +308,75 @@ def list_archived_seasons() -> list[str]:
     return sorted({r["season_month"] for r in res.data}, reverse=True)
 
 
+# ── Ranked 1v1 interne (reset mensuel calendaire, indépendant des saisons BS) ──
+# Remplace ranked_1v1_history (anciennement un dict en mémoire persisté dans
+# data.json — même classe de fragilité que les champs BS avant leur migration
+# Supabase ci-dessus, voir migration one-shot dans main.py/load_data).
+
+def archive_ranked_1v1_season(season_month: str, entries: dict) -> None:
+    """entries: discord_id (str) -> {'points','wins','losses'}"""
+    if not entries:
+        return
+    get_client().table("ranked_1v1_seasons").upsert(
+        [
+            {
+                "season_month": season_month,
+                "discord_id": uid,
+                "points": p.get("points", 0),
+                "wins": p.get("wins", 0),
+                "losses": p.get("losses", 0),
+            }
+            for uid, p in entries.items()
+        ],
+        on_conflict="season_month,discord_id",
+    ).execute()
+
+
+def get_ranked_1v1_season(season_month: str) -> dict:
+    """discord_id -> {'points','wins','losses'}"""
+    res = get_client().table("ranked_1v1_seasons").select("*").eq("season_month", season_month).execute()
+    return {r["discord_id"]: r for r in res.data}
+
+
+def list_ranked_1v1_seasons() -> list[str]:
+    res = get_client().table("ranked_1v1_seasons").select("season_month").execute()
+    return sorted({r["season_month"] for r in res.data}, reverse=True)
+
+
+# ── Casino (économie interne, reset mensuel calendaire) ──
+# Avant cette table, le reset (manuel ou automatique) effaçait tout sans
+# archive — incident silencieux repéré le 29/07/2026 : perte totale et
+# définitive du classement précédent à chaque reset, y compris le reset
+# automatique qui ne demandait même pas de confirmation.
+
+def archive_casino_season(season_month: str, entries: dict) -> None:
+    """entries: discord_id (str) -> coins (int)"""
+    if not entries:
+        return
+    get_client().table("casino_seasons").upsert(
+        [{"season_month": season_month, "discord_id": uid, "coins": amount} for uid, amount in entries.items()],
+        on_conflict="season_month,discord_id",
+    ).execute()
+
+
+def get_casino_season(season_month: str) -> list[dict]:
+    """[{'discord_id','coins'}, ...] triés par coins décroissant."""
+    res = (
+        get_client()
+        .table("casino_seasons")
+        .select("*")
+        .eq("season_month", season_month)
+        .order("coins", desc=True)
+        .execute()
+    )
+    return res.data
+
+
+def list_casino_seasons() -> list[str]:
+    res = get_client().table("casino_seasons").select("season_month").execute()
+    return sorted({r["season_month"] for r in res.data}, reverse=True)
+
+
 # ── Actualités (publiées par le staff/admin depuis le site) ──
 
 def list_news(limit: int | None = None) -> list[dict]:

@@ -139,43 +139,81 @@ def _r1v1_tier_label(points, tiers):
 @app.route("/api/famille/classement_1v1")
 def api_famille_classement_1v1():
     """Classement du ranked 1v1 interne au serveur (duels, !duel & co) —
-    système indépendant du ranked en jeu Brawl Stars, voir ranked_1v1."""
+    système indépendant du ranked en jeu Brawl Stars, voir ranked_1v1.
+    ?mois=YYYY-MM renvoie une saison archivée (voir db_bs.get_ranked_1v1_season)
+    au lieu du mois en cours."""
     main = _bot()
     guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    mois = request.args.get("mois")
     entries = []
-    for uid_str, p in main.ranked_1v1.items():
-        member = guild.get_member(int(uid_str)) if guild else None
-        if not member or member.bot:
-            continue
-        entries.append({
-            "name": member.display_name,
-            "tag": (main.bs_accounts.get(uid_str) or {}).get("tag"),
-            "points": p.get("points", 0),
-            "wins": p.get("wins", 0),
-            "losses": p.get("losses", 0),
-            "tier": _r1v1_tier_label(p.get("points", 0), main.RANKED_1V1_TIERS),
-        })
+    if mois:
+        for uid_str, p in db_bs.get_ranked_1v1_season(mois).items():
+            member = guild.get_member(int(uid_str)) if guild else None
+            entries.append({
+                "name": member.display_name if member else "Ancien membre",
+                "tag": (main.bs_accounts.get(uid_str) or {}).get("tag"),
+                "points": p.get("points", 0),
+                "wins": p.get("wins", 0),
+                "losses": p.get("losses", 0),
+                "tier": _r1v1_tier_label(p.get("points", 0), main.RANKED_1V1_TIERS),
+            })
+    else:
+        for uid_str, p in main.ranked_1v1.items():
+            member = guild.get_member(int(uid_str)) if guild else None
+            if not member or member.bot:
+                continue
+            entries.append({
+                "name": member.display_name,
+                "tag": (main.bs_accounts.get(uid_str) or {}).get("tag"),
+                "points": p.get("points", 0),
+                "wins": p.get("wins", 0),
+                "losses": p.get("losses", 0),
+                "tier": _r1v1_tier_label(p.get("points", 0), main.RANKED_1V1_TIERS),
+            })
     entries.sort(key=lambda e: e["points"], reverse=True)
     return jsonify(entries)
 
 
+@app.route("/api/famille/saisons_1v1")
+def api_famille_saisons_1v1():
+    return jsonify(db_bs.list_ranked_1v1_seasons())
+
+
 @app.route("/api/famille/classement_casino")
 def api_famille_classement_casino():
-    """Classement de l'économie casino du bot (coins), pour la page Classement du site."""
+    """Classement de l'économie casino du bot (coins), pour la page Classement du site.
+    ?mois=YYYY-MM renvoie une saison archivée (voir db_bs.get_casino_season)
+    au lieu du mois en cours."""
     main = _bot()
     guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    mois = request.args.get("mois")
     entries = []
-    for uid, amount in main.coins.items():
-        member = guild.get_member(int(uid)) if guild else None
-        if not member or member.bot:
-            continue
-        entries.append({
-            "name": member.display_name,
-            "tag": (main.bs_accounts.get(uid) or {}).get("tag"),
-            "coins": amount,
-        })
+    if mois:
+        for row in db_bs.get_casino_season(mois):
+            uid = row["discord_id"]
+            member = guild.get_member(int(uid)) if guild else None
+            entries.append({
+                "name": member.display_name if member else "Ancien membre",
+                "tag": (main.bs_accounts.get(uid) or {}).get("tag"),
+                "coins": row["coins"],
+            })
+    else:
+        for uid, amount in main.coins.items():
+            member = guild.get_member(int(uid)) if guild else None
+            if not member or member.bot:
+                continue
+            entries.append({
+                "name": member.display_name,
+                "tag": (main.bs_accounts.get(uid) or {}).get("tag"),
+                "coins": amount,
+            })
     entries.sort(key=lambda e: e["coins"], reverse=True)
     return jsonify(entries[:100])
+
+
+@app.route("/api/famille/saisons_casino")
+def api_famille_saisons_casino():
+    return jsonify(db_bs.list_casino_seasons())
 
 
 @app.route("/api/famille/joueur/<tag>")

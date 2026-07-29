@@ -365,7 +365,6 @@ ranked_pending    = {}   # "minuid_maxuid" -> {'p1','p2','guild_id','channel_id'
 ranked_pair_daily = {}   # "minuid_maxuid" -> {'date':'YYYY-MM-DD','count':int}
 ranked_reports    = {}   # str(target_uid) -> [{'reporter','reason','guild_id','created_at','resolved'}]
 ranked_report_cooldowns = {}  # "reporter_target" -> ISO datetime
-ranked_1v1_history = {}   # "YYYY-MM" -> {uid_str: {'points','wins','losses'}} — saisons archivées
 ranked_season_month = None  # "YYYY-MM" — mois de la saison en cours
 casino_season_month = None  # "YYYY-MM" — dernier mois où le casino a été reset automatiquement
 BS_SEASON_TZ = ZoneInfo("Europe/Paris")
@@ -488,7 +487,7 @@ def _r1v1_month_label(month_key: str) -> str:
 
 def _r1v1_leaderboard_entries(guild, month=None):
     """Entrées triées par points pour la saison en cours (month=None) ou une saison archivée."""
-    source = ranked_1v1 if month is None else ranked_1v1_history.get(month, {})
+    source = ranked_1v1 if month is None else db_bs.get_ranked_1v1_season(month)
     entries = []
     for uid_str, prof in source.items():
         if not (prof.get('wins', 0) or prof.get('losses', 0)):
@@ -919,7 +918,7 @@ def load_data():
     global bs_accounts, bs_role_config
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
-    global ranked_1v1_history, ranked_season_month, slash_global_purged, casino_season_month
+    global ranked_season_month, slash_global_purged, casino_season_month
     global punitions, morse_punitions, moderation_log
     load_path = _resolve_data_path()
     if os.path.exists(load_path):
@@ -1041,7 +1040,20 @@ def load_data():
                 ranked_pair_daily = data.get('ranked_pair_daily', {})
                 ranked_reports    = data.get('ranked_reports', {})
                 ranked_report_cooldowns = data.get('ranked_report_cooldowns', {})
-                ranked_1v1_history  = data.get('ranked_1v1_history', {})
+                # Migration one-shot vers Supabase (voir db_bs.archive_ranked_1v1_season) —
+                # ranked_1v1_history vivait avant dans data.json, même fragilité que les
+                # champs BS avant leur propre migration (voir _bs_legacy_fields_pending_resave
+                # un peu plus haut). Upsert idempotent : sans risque si ça tourne 2 fois
+                # avant que le champ disparaisse de data.json (il n'est plus dans
+                # data_to_save, donc le prochain save_data() l'efface pour de bon).
+                _legacy_ranked_1v1_history = data.get('ranked_1v1_history', {})
+                for _season_month, _entries in _legacy_ranked_1v1_history.items():
+                    db_bs.archive_ranked_1v1_season(_season_month, _entries)
+                if _legacy_ranked_1v1_history:
+                    logging.warning(
+                        "Migration Supabase : %d saison(s) ranked 1v1 migrées depuis data.json.",
+                        len(_legacy_ranked_1v1_history),
+                    )
                 ranked_season_month = data.get('ranked_season_month')
                 casino_season_month = data.get('casino_season_month')
                 slash_global_purged = data.get('slash_global_purged', False)
@@ -1217,7 +1229,6 @@ def save_data(force: bool = False):
     data_to_save['ranked_pair_daily'] = ranked_pair_daily
     data_to_save['ranked_reports']    = ranked_reports
     data_to_save['ranked_report_cooldowns'] = ranked_report_cooldowns
-    data_to_save['ranked_1v1_history']  = ranked_1v1_history
     data_to_save['ranked_season_month'] = ranked_season_month
     data_to_save['casino_season_month'] = casino_season_month
     data_to_save['slash_global_purged'] = slash_global_purged
@@ -12047,10 +12058,10 @@ async def check_ranked_season():
         return
 
     ended_month = ranked_season_month
-    ranked_1v1_history[ended_month] = {
+    db_bs.archive_ranked_1v1_season(ended_month, {
         uid: {'points': p.get('points', 0), 'wins': p.get('wins', 0), 'losses': p.get('losses', 0)}
         for uid, p in ranked_1v1.items() if p.get('wins', 0) or p.get('losses', 0)
-    }
+    })
     for p in ranked_1v1.values():
         p['points'] = 0
         p['wins']   = 0
@@ -12343,7 +12354,7 @@ class RankedLeaderboardView(discord.ui.View):
         self.total_pages = max(1, (len(self.entries) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
         self.page = max(0, min(page, self.total_pages - 1))
 
-        past_months = sorted(ranked_1v1_history.keys(), reverse=True)
+        past_months = db_bs.list_ranked_1v1_seasons()
         if past_months:
             current_key = ranked_season_month or datetime.now().strftime('%Y-%m')
             options = [discord.SelectOption(
@@ -12607,22 +12618,30 @@ def _reset_casino_state():
 @bot.command(name="reset_casino")
 async def cmd_reset_casino(ctx):
     """Reset manuel de la saison casino : coins, coffres, usines, commerces et métiers repartent
-    à zéro. Les items achetés (boutique) et l'inventaire sont conservés."""
+    à zéro. Les items achetés (boutique) et l'inventaire sont conservés. Le classement coins
+    est archivé avant reset (voir db_bs.archive_casino_season), consultable ensuite via
+    !classement_casino — safes/factories/businesses/jobs_data ne sont pas archivés (le
+    classement casino public n'a jamais porté que sur les coins, voir /api/famille/classement_casino)."""
     nb = len(set(coins.keys()) | {int(k) for k in safes.keys()} | {int(k) for k in factories.keys()}
              | {int(k) for k in businesses.keys()} | {int(k) for k in jobs_data.keys()})
     if not await _confirm_action(
         ctx,
         f"⚠️ **ATTENTION :** Ça va reset les coins, coffres, usines, commerces et métiers de **{nb} joueur(s)**. "
-        f"Irréversible (items/inventaire conservés)."
+        f"Le classement coins sera archivé (consultable via `!classement_casino`), le reste est irréversible."
     ):
         return
 
+    global casino_season_month
+    ended_month = casino_season_month or datetime.now().strftime('%Y-%m')
+    db_bs.archive_casino_season(ended_month, {str(uid): amount for uid, amount in coins.items() if amount > 0})
     _reset_casino_state()
+    casino_season_month = datetime.now().strftime('%Y-%m')
     save_data()
     await ctx.send(
         f"✅ **Casino réinitialisé !** ({nb} joueur(s) concernés)\n"
         f"Coins, coffres, usines, commerces et métiers repartent à zéro pour tout le monde.\n"
-        f"Les items achetés (boutique) et l'inventaire sont conservés."
+        f"Les items achetés (boutique) et l'inventaire sont conservés. "
+        f"Ancien classement coins consultable via `!classement_casino`."
     )
 
 
@@ -12647,6 +12666,102 @@ async def cmd_casino_unban(ctx, membre: discord.Member):
     await ctx.send(f"✅ {membre.mention} a de nouveau accès aux commandes casino.")
 
 
+def _casino_leaderboard_entries(guild, month=None):
+    """Entrées triées par coins pour le mois en cours (month=None) ou une saison archivée —
+    même structure que _r1v1_leaderboard_entries."""
+    if month is None:
+        source = [(uid, amount) for uid, amount in coins.items() if amount > 0]
+    else:
+        source = [(row['discord_id'], row['coins']) for row in db_bs.get_casino_season(month)]
+    entries = []
+    for uid, amount in source:
+        member = guild.get_member(int(uid)) if guild else None
+        name = member.display_name if member else f"<@{uid}>"
+        entries.append({'name': name, 'coins': amount})
+    entries.sort(key=lambda e: e['coins'], reverse=True)
+    return entries
+
+
+class CasinoLeaderboardView(discord.ui.View):
+    """Podium top 3 + pagination (30/page) + sélecteur de saison (mois passés archivés) —
+    même structure que RankedLeaderboardView (voir plus haut)."""
+    PAGE_SIZE = 30
+
+    def __init__(self, guild, month=None, page=0):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.month = month  # None = mois en cours
+        self.entries = _casino_leaderboard_entries(guild, month)
+        self.total_pages = max(1, (len(self.entries) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        self.page = max(0, min(page, self.total_pages - 1))
+
+        past_months = db_bs.list_casino_seasons()
+        if past_months:
+            current_key = casino_season_month or datetime.now().strftime('%Y-%m')
+            options = [discord.SelectOption(
+                label=f"📅 Saison actuelle ({_r1v1_month_label(current_key)})"[:100],
+                value="__current__", default=(month is None)
+            )]
+            for m in past_months[:24]:
+                options.append(discord.SelectOption(label=_r1v1_month_label(m)[:100], value=m, default=(m == month)))
+            self.month_select = discord.ui.Select(placeholder="📅 Choisir une saison…", options=options)
+            self.month_select.callback = self._on_month
+            self.add_item(self.month_select)
+
+        if self.page > 0:
+            prev_btn = discord.ui.Button(label="◀ Précédent", style=discord.ButtonStyle.secondary, row=1)
+            prev_btn.callback = self._prev
+            self.add_item(prev_btn)
+        if self.page < self.total_pages - 1:
+            next_btn = discord.ui.Button(label="Suivant ▶", style=discord.ButtonStyle.secondary, row=1)
+            next_btn.callback = self._next
+            self.add_item(next_btn)
+
+    def build_embed(self) -> discord.Embed:
+        month_label = "Mois en cours" if self.month is None else _r1v1_month_label(self.month)
+        embed = discord.Embed(title=f"💰 Classement Casino — {month_label}", color=0xf39c12)
+        start = self.page * self.PAGE_SIZE
+        page_entries = self.entries[start:start + self.PAGE_SIZE]
+
+        if self.page == 0:
+            medals = ['🥇', '🥈', '🥉']
+            for i, e in enumerate(self.entries[:3]):
+                embed.add_field(name=f"{medals[i]} {e['name']}", value=f"**{e['coins']:,} coins**", inline=True)
+            rest, rank_offset = page_entries[3:], 4
+        else:
+            rest, rank_offset = page_entries, start + 1
+
+        if rest:
+            lines = [f"**{rank_offset + i}.** {e['name']} — **{e['coins']:,} coins**" for i, e in enumerate(rest)]
+            for i in range(0, len(lines), 10):
+                embed.add_field(name=chr(8203), value="\n".join(lines[i:i + 10]), inline=False)
+        elif not self.entries:
+            embed.description = "Personne n'a de coins sur cette période."
+
+        embed.set_footer(text=f"{len(self.entries)} joueur(s) classé(s) · Page {self.page + 1}/{self.total_pages}")
+        return embed
+
+    async def _on_month(self, interaction: discord.Interaction):
+        value = self.month_select.values[0]
+        month = None if value == "__current__" else value
+        view = CasinoLeaderboardView(self.guild, month, 0)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    async def _prev(self, interaction: discord.Interaction):
+        view = CasinoLeaderboardView(self.guild, self.month, self.page - 1)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    async def _next(self, interaction: discord.Interaction):
+        view = CasinoLeaderboardView(self.guild, self.month, self.page + 1)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+
+@bot.hybrid_command(name="classement_casino", aliases=["top_casino"])
+async def cmd_classement_casino(ctx):
+    view = CasinoLeaderboardView(ctx.guild)
+    await ctx.send(embed=view.build_embed(), view=view)
+
+
 @bot.command(name="casino_pause")
 async def cmd_casino_pause(ctx):
     """Met en pause TOUTES les commandes casino pour tout le monde (y compris les admins) —
@@ -12666,8 +12781,11 @@ async def cmd_casino_resume(ctx):
 
 @tasks.loop(hours=6)
 async def check_casino_season():
-    """Reset automatique et silencieux du casino au changement de mois calendaire —
-    même logique que check_ranked_season (duels), indépendant des saisons Brawl Stars."""
+    """Reset automatique du casino au changement de mois calendaire — même logique que
+    check_ranked_season (duels), indépendant des saisons Brawl Stars. Archive d'abord
+    dans Supabase (voir db_bs.archive_casino_season) : avant le 29/07/2026, ce reset
+    effaçait tout sans rien garder nulle part, contrairement au reset 1v1 qui, lui,
+    archivait déjà (incident repéré lors d'un audit des systèmes de saison)."""
     await bot.wait_until_ready()
     global casino_season_month
     current_month = datetime.now().strftime('%Y-%m')
@@ -12678,6 +12796,7 @@ async def check_casino_season():
     if current_month == casino_season_month:
         return
 
+    db_bs.archive_casino_season(casino_season_month, {str(uid): amount for uid, amount in coins.items() if amount > 0})
     _reset_casino_state()
     casino_season_month = current_month
     save_data()
@@ -12696,10 +12815,10 @@ async def cmd_reset_duels(ctx):
 
     global ranked_season_month
     ended_month = ranked_season_month or datetime.now().strftime('%Y-%m')
-    ranked_1v1_history[ended_month] = {
+    db_bs.archive_ranked_1v1_season(ended_month, {
         uid: {'points': p.get('points', 0), 'wins': p.get('wins', 0), 'losses': p.get('losses', 0)}
         for uid, p in ranked_1v1.items() if p.get('wins', 0) or p.get('losses', 0)
-    }
+    })
     for p in ranked_1v1.values():
         p['points'] = 0
         p['wins']   = 0
