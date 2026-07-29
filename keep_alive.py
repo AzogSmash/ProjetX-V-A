@@ -597,6 +597,71 @@ def api_admin_coins():
     return jsonify(result)
 
 
+def _require_ticket_staff(body: dict):
+    """Comme _require_admin, mais accepte aussi le staff ticket (TICKET_STAFF_ROLE_IDS)
+    — mêmes rôles que _is_ticket_staff côté bot (main.py)."""
+    discord_id = str(body.get("discord_id", "")).strip()
+    if not discord_id:
+        return None, ({"error": "discord_id requis"}, 400)
+    member = db_members.get_member(discord_id)
+    main = _bot()
+    is_staff = member is not None and (
+        member["is_admin"] or any(str(rid) in member["role_ids"] for rid in main.TICKET_STAFF_ROLE_IDS)
+    )
+    if not is_staff:
+        return None, ({"error": "Réservé au staff."}, 403)
+    return discord_id, None
+
+
+@app.route("/api/admin/tickets")
+@_require_internal_secret
+def api_admin_tickets_list():
+    discord_id = request.args.get("discord_id", "")
+    _actor, err = _require_ticket_staff({"discord_id": discord_id})
+    if err:
+        return err
+    return jsonify(db_bs.list_open_tickets_full())
+
+
+@app.route("/api/admin/tickets/fermer", methods=["POST"])
+@_require_internal_secret
+def api_admin_tickets_fermer():
+    body = request.get_json(silent=True) or {}
+    discord_id, err = _require_ticket_staff(body)
+    if err:
+        return err
+    try:
+        ticket_id = int(body.get("ticket_id"))
+    except (TypeError, ValueError):
+        return {"error": "ticket_id invalide"}, 400
+    reason = body.get("reason") or None
+
+    ticket = db_bs.get_ticket(ticket_id)
+    if not ticket:
+        return {"error": "Ticket introuvable."}, 404
+    if ticket["status"] != "open":
+        return {"error": "Ce ticket est déjà fermé."}, 400
+
+    main = _bot()
+    guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    channel = guild.get_channel(int(ticket["channel_id"])) if guild else None
+    if not channel:
+        db_bs.close_ticket(ticket_id, discord_id, reason, [])
+        return jsonify({"ok": True, "channel_deleted": False})
+
+    actor = guild.get_member(int(discord_id))
+    if not actor:
+        return {"error": "Ton compte Discord est introuvable sur le serveur."}, 400
+    future = asyncio.run_coroutine_threadsafe(
+        main._finish_ticket_close(channel, actor, guild, ticket_id, ticket, reason), main.bot.loop
+    )
+    try:
+        future.result(timeout=20)
+    except Exception as e:
+        return {"error": f"Erreur interne : {e}"}, 500
+    return jsonify({"ok": True, "channel_deleted": True})
+
+
 @app.route("/api/admin/clans/ajouter", methods=["POST"])
 @_require_internal_secret
 def api_admin_clans_ajouter():

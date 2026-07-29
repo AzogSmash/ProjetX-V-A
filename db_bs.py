@@ -531,6 +531,21 @@ def list_open_tickets() -> list[dict]:
     return res.data
 
 
+def list_open_tickets_full() -> list[dict]:
+    """Tickets ouverts avec tous les champs, pour l'onglet Tickets du panel
+    staff/admin du site (contrairement à list_open_tickets, réservée au
+    ré-enregistrement des vues au démarrage)."""
+    res = (
+        get_client()
+        .table("tickets")
+        .select("*")
+        .eq("status", "open")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return res.data
+
+
 def claim_ticket(ticket_id: int, staff_discord_id: str) -> None:
     get_client().table("tickets").update({"claimed_by": staff_discord_id}).eq("id", ticket_id).execute()
 
