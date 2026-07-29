@@ -11255,6 +11255,50 @@ async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
     return await ctx.send(f"ℹ️ `#{clean}` n'était pas dans la famille.")
 
 
+# ── Admin — ajout/retrait de clan déclenché depuis le site ────────────────
+# Fonctions jumelles de cmd_bs_famille (voir ci-dessus) plutôt qu'un refactor
+# partagé — même raisonnement que _apply_casino_pause & co : commande déjà
+# utilisée telle quelle, pas de risque à prendre pour économiser des lignes.
+
+async def _apply_bs_famille_add(tag: str) -> tuple[dict | None, str | None]:
+    clean = tag.strip().lstrip('#').upper()
+    if db_bs.club_exists(clean):
+        return None, f"#{clean} est déjà dans la famille."
+    data, err = await _bs_fetch_club(clean)
+    if err:
+        return None, f"Impossible de vérifier ce clan : {err}"
+
+    slug = _bs_slug(data['name'])
+    if bot.get_command(slug) is not None:
+        return None, f"Le nom de clan {data['name']} donnerait la commande !{slug}, qui existe déjà."
+    existing = db_bs.list_family_clubs()
+    reserved = {e['slug'] for e in existing} | {e['alias'] for e in existing if e.get('alias')}
+    alias = _bs_alias(slug, reserved)
+
+    entry = {'tag': clean, 'name': data['name'], 'slug': slug, 'alias': alias}
+    db_bs.add_family_club(clean, data['name'], slug, alias)
+    _bs_register_club_command(entry)
+    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+    if guild:
+        bot.tree.copy_global_to(guild=guild)
+        await bot.tree.sync(guild=guild)
+    return {"tag": clean, "name": data['name'], "slug": slug, "alias": alias, "member_count": len(data['members'])}, None
+
+
+async def _apply_bs_famille_remove(tag: str) -> tuple[dict | None, str | None]:
+    clean = tag.strip().lstrip('#').upper()
+    existing = db_bs.list_family_clubs()
+    entry = next((e for e in existing if e['tag'] == clean), None)
+    if not entry:
+        return None, f"#{clean} n'était pas dans la famille."
+    db_bs.remove_family_club(clean)
+    _bs_unregister_club_command(entry)
+    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+    if guild:
+        await bot.tree.sync(guild=guild)
+    return {"tag": clean, "name": entry['name'], "slug": entry['slug']}, None
+
+
 class BsFamilyLeaderboardView(discord.ui.View):
     """Vue paginée (30/page) avec podium distinct pour le top 3 et filtre par clan.
     Les données sont capturées une seule fois à l'appel de la commande — changer de page

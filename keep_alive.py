@@ -597,6 +597,48 @@ def api_admin_coins():
     return jsonify(result)
 
 
+@app.route("/api/admin/clans/ajouter", methods=["POST"])
+@_require_internal_secret
+def api_admin_clans_ajouter():
+    body = request.get_json(silent=True) or {}
+    _discord_id, err = _require_admin(body)
+    if err:
+        return err
+    tag = str(body.get("tag", "")).strip()
+    if not tag:
+        return {"error": "tag requis"}, 400
+    main = _bot()
+    future = asyncio.run_coroutine_threadsafe(main._apply_bs_famille_add(tag), main.bot.loop)
+    try:
+        data, apply_err = future.result(timeout=30)
+    except Exception as e:
+        return {"error": f"Erreur interne : {e}"}, 500
+    if apply_err:
+        return {"error": apply_err}, 400
+    return jsonify(data)
+
+
+@app.route("/api/admin/clans/retirer", methods=["POST"])
+@_require_internal_secret
+def api_admin_clans_retirer():
+    body = request.get_json(silent=True) or {}
+    _discord_id, err = _require_admin(body)
+    if err:
+        return err
+    tag = str(body.get("tag", "")).strip()
+    if not tag:
+        return {"error": "tag requis"}, 400
+    main = _bot()
+    future = asyncio.run_coroutine_threadsafe(main._apply_bs_famille_remove(tag), main.bot.loop)
+    try:
+        data, apply_err = future.result(timeout=30)
+    except Exception as e:
+        return {"error": f"Erreur interne : {e}"}, 500
+    if apply_err:
+        return {"error": apply_err}, 400
+    return jsonify(data)
+
+
 @app.route("/api/famille/notes/<slug>")
 @_require_internal_secret
 def api_famille_notes_get(slug):
