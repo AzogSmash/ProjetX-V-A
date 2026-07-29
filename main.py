@@ -8183,6 +8183,85 @@ async def cmd_removecoins(ctx, member: discord.Member, amount: int, compte: str 
         f"{member.mention} : **-{taken:,} coins** → solde {coins[member.id]:,}", author=ctx.author)
 
 
+# ── Admin — actions économie déclenchées depuis le site ───────────────────
+# Fonctions séparées des commandes Discord ci-dessus plutôt que de les
+# refactorer pour partager le code : ces commandes sont utilisées au
+# quotidien et déjà éprouvées, préférence pour ne pas les toucher plutôt que
+# de risquer une régression pour économiser quelques lignes (voir keep_alive.py
+# pour les routes Flask qui appellent ces fonctions via run_coroutine_threadsafe).
+
+async def _apply_casino_pause() -> bool:
+    global casino_paused
+    casino_paused = True
+    return casino_paused
+
+
+async def _apply_casino_resume() -> bool:
+    global casino_paused
+    casino_paused = False
+    return casino_paused
+
+
+async def _apply_casino_ban(guild, target_id: int, actor_id: int, reason: str | None) -> dict:
+    casino_banned_users.add(target_id)
+    save_data()
+    member, actor = guild.get_member(target_id), guild.get_member(actor_id)
+    if member and actor:
+        _log_moderation('casino_ban', member, actor, reason=reason)
+    return {"ok": True}
+
+
+async def _apply_casino_unban(guild, target_id: int, actor_id: int) -> dict:
+    casino_banned_users.discard(target_id)
+    save_data()
+    member, actor = guild.get_member(target_id), guild.get_member(actor_id)
+    if member and actor:
+        _log_moderation('casino_unban', member, actor)
+    return {"ok": True}
+
+
+async def _apply_crypto_freeze() -> bool:
+    global crypto_market_frozen
+    crypto_market_frozen = not crypto_market_frozen
+    save_data()
+    return crypto_market_frozen
+
+
+async def _apply_coins_adjust(guild, target_id: int, actor_id: int, amount: int, compte: str) -> dict:
+    """Ajuste coins ou coffre d'un montant signé (positif = ajout, négatif =
+    retrait plafonné au solde dispo) — équivalent unifié de !addcoins/!removecoins."""
+    member = guild.get_member(target_id)
+    if not member:
+        return {"error": "Membre introuvable sur le serveur."}
+    actor = guild.get_member(actor_id)
+    uid = str(target_id)
+    is_safe = compte.lower().strip() in ("coffre", "banque", "safe", "coffre-fort")
+
+    if is_safe:
+        if amount >= 0:
+            safes[uid] = safes.get(uid, 0) + amount
+        else:
+            taken = min(-amount, safes.get(uid, 0))
+            safes[uid] = safes.get(uid, 0) - taken
+            amount = -taken
+        save_data()
+        new_balance = safes[uid]
+    else:
+        if amount >= 0:
+            coins[target_id] += amount
+        else:
+            taken = min(-amount, coins[target_id])
+            coins[target_id] -= taken
+            amount = -taken
+        save_data()
+        new_balance = coins[target_id]
+
+    if actor:
+        label = ("addcoins" if amount >= 0 else "removecoins") + (" (coffre)" if is_safe else "")
+        await _admin_log(guild, label, f"{member.mention} : **{amount:+,} coins** → solde {new_balance:,}", author=actor)
+    return {"ok": True, "balance": new_balance}
+
+
 # =======================================================================
 # ========================== TOURNOI ====================================
 # =======================================================================

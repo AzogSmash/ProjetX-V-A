@@ -320,6 +320,22 @@ def _require_internal_secret(fn):
     return wrapper
 
 
+# ── Actions admin déclenchées depuis le site (panel /admin) ──────────────
+# Le site vérifie déjà tier=admin (getAccessContext) avant d'appeler ces
+# routes, protégées ici par le secret partagé — on revérifie quand même
+# is_admin via db_members (défense en profondeur, même logique que le reste).
+
+def _require_admin(body: dict):
+    """Retourne (discord_id, None) si admin valide, sinon (None, (json, status))."""
+    discord_id = str(body.get("discord_id", "")).strip()
+    if not discord_id:
+        return None, ({"error": "discord_id requis"}, 400)
+    member = db_members.get_member(discord_id)
+    if not member or not member["is_admin"]:
+        return None, ({"error": "Réservé aux administrateurs."}, 403)
+    return discord_id, None
+
+
 @app.route("/api/member/<discord_id>")
 @_require_internal_secret
 def api_member(discord_id):
@@ -465,6 +481,120 @@ def api_actualites_create():
 
     db_bs.create_news(icon, title, description, author)
     return jsonify({"ok": True})
+
+
+@app.route("/api/admin/economy/status")
+@_require_internal_secret
+def api_admin_economy_status():
+    main = _bot()
+    return jsonify({"casino_paused": main.casino_paused, "crypto_market_frozen": main.crypto_market_frozen})
+
+
+@app.route("/api/admin/casino/pause", methods=["POST"])
+@_require_internal_secret
+def api_admin_casino_pause():
+    body = request.get_json(silent=True) or {}
+    _discord_id, err = _require_admin(body)
+    if err:
+        return err
+    main = _bot()
+    future = asyncio.run_coroutine_threadsafe(main._apply_casino_pause(), main.bot.loop)
+    paused = future.result(timeout=10)
+    return jsonify({"ok": True, "paused": paused})
+
+
+@app.route("/api/admin/casino/resume", methods=["POST"])
+@_require_internal_secret
+def api_admin_casino_resume():
+    body = request.get_json(silent=True) or {}
+    _discord_id, err = _require_admin(body)
+    if err:
+        return err
+    main = _bot()
+    future = asyncio.run_coroutine_threadsafe(main._apply_casino_resume(), main.bot.loop)
+    paused = future.result(timeout=10)
+    return jsonify({"ok": True, "paused": paused})
+
+
+@app.route("/api/admin/casino/ban", methods=["POST"])
+@_require_internal_secret
+def api_admin_casino_ban():
+    body = request.get_json(silent=True) or {}
+    discord_id, err = _require_admin(body)
+    if err:
+        return err
+    target = str(body.get("target_discord_id", "")).strip()
+    if not target:
+        return {"error": "target_discord_id requis"}, 400
+    main = _bot()
+    guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    if not guild:
+        return {"error": "Serveur introuvable."}, 500
+    future = asyncio.run_coroutine_threadsafe(
+        main._apply_casino_ban(guild, int(target), int(discord_id), body.get("reason") or None), main.bot.loop
+    )
+    return jsonify(future.result(timeout=10))
+
+
+@app.route("/api/admin/casino/unban", methods=["POST"])
+@_require_internal_secret
+def api_admin_casino_unban():
+    body = request.get_json(silent=True) or {}
+    discord_id, err = _require_admin(body)
+    if err:
+        return err
+    target = str(body.get("target_discord_id", "")).strip()
+    if not target:
+        return {"error": "target_discord_id requis"}, 400
+    main = _bot()
+    guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    if not guild:
+        return {"error": "Serveur introuvable."}, 500
+    future = asyncio.run_coroutine_threadsafe(
+        main._apply_casino_unban(guild, int(target), int(discord_id)), main.bot.loop
+    )
+    return jsonify(future.result(timeout=10))
+
+
+@app.route("/api/admin/crypto/freeze", methods=["POST"])
+@_require_internal_secret
+def api_admin_crypto_freeze():
+    body = request.get_json(silent=True) or {}
+    _discord_id, err = _require_admin(body)
+    if err:
+        return err
+    main = _bot()
+    future = asyncio.run_coroutine_threadsafe(main._apply_crypto_freeze(), main.bot.loop)
+    frozen = future.result(timeout=10)
+    return jsonify({"ok": True, "frozen": frozen})
+
+
+@app.route("/api/admin/coins", methods=["POST"])
+@_require_internal_secret
+def api_admin_coins():
+    body = request.get_json(silent=True) or {}
+    discord_id, err = _require_admin(body)
+    if err:
+        return err
+    target = str(body.get("target_discord_id", "")).strip()
+    try:
+        amount = int(body.get("amount"))
+    except (TypeError, ValueError):
+        return {"error": "amount invalide."}, 400
+    if not target or amount == 0:
+        return {"error": "target_discord_id et amount (non nul) requis"}, 400
+    compte = str(body.get("compte", "cash"))
+    main = _bot()
+    guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    if not guild:
+        return {"error": "Serveur introuvable."}, 500
+    future = asyncio.run_coroutine_threadsafe(
+        main._apply_coins_adjust(guild, int(target), int(discord_id), amount, compte), main.bot.loop
+    )
+    result = future.result(timeout=10)
+    if "error" in result:
+        return result, 404
+    return jsonify(result)
 
 
 @app.route("/api/famille/notes/<slug>")
