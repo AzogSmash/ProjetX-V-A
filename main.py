@@ -2249,6 +2249,274 @@ async def unsilence(ctx, member: discord.Member):
     ]
     await send_log_message(ctx.guild, LOG_MODERATION_CHANNEL_ID, "🔊 Membre Désilencé", f"{member.mention} a été retiré de la liste des utilisateurs silencés.", discord.Color.light_grey(), fields)
 
+
+# ── Admin — modération déclenchée depuis le site ──────────────────────────
+# Fonctions jumelles de warn/mute/unmute/ban/silence/unsilence ci-dessus —
+# même raisonnement que les sections "déclenché depuis le site" plus loin
+# dans ce fichier (économie, clans) : commandes Discord déjà éprouvées au
+# quotidien, pas touchées, plutôt qu'un refactor partagé risqué. `actor` est
+# le Member correspondant à l'admin connecté sur le site (peut être None si
+# introuvable sur le serveur — les vérifications de hiérarchie de rôle sont
+# alors sautées, mais reste réservé aux admins site de toute façon).
+
+def _is_mod_immune(member) -> bool:
+    return bool(member and member.id in MOD_IMMUNE_IDS)
+
+
+async def _apply_warn(guild, target_id: int, actor_id: int, reason: str) -> tuple[dict | None, str | None]:
+    member = guild.get_member(target_id)
+    actor = guild.get_member(actor_id)
+    if not member:
+        return None, "Membre introuvable sur le serveur."
+    if _is_mod_immune(member):
+        return None, "Ce membre est protégé."
+
+    guild_id, user_id = guild.id, member.id
+    warns.setdefault(guild_id, {}).setdefault(user_id, [])
+    warns[guild_id][user_id].append({
+        "reason": reason, "moderator": actor.name if actor else "Admin (site)",
+        "timestamp": datetime.now().isoformat(),
+    })
+    if actor:
+        _log_moderation('warn', member, actor, reason=reason)
+    save_data()
+    num_warns = len(warns[guild_id][user_id])
+
+    fields = [
+        ("Utilisateur averti", member.mention, True),
+        ("Modérateur", actor.mention if actor else "Admin (site)", True),
+        ("Raison", reason, False),
+        ("Total d'avertissements", str(num_warns), True),
+    ]
+    await send_log_message(guild, LOG_MODERATION_CHANNEL_ID, "⚠️ Avertissement", f"Un avertissement a été donné à {member.mention}.", discord.Color.orange(), fields)
+
+    dm_sent = True
+    try:
+        await member.send(f"⚠️ Vous avez reçu un avertissement sur **{guild.name}**.\nRaison : {reason}")
+    except Exception:
+        dm_sent = False
+
+    auto_muted = False
+    if num_warns % 5 == 0:
+        mute_role = discord.utils.get(guild.roles, name="Muted")
+        if mute_role:
+            try:
+                await member.add_roles(mute_role, reason=f"Auto-mute: {num_warns} avertissements")
+                end_time = datetime.now() + timedelta(days=1)
+                mutes.setdefault(guild_id, {})[member.id] = {"end_time": end_time, "reason": f"Auto-mute après {num_warns} warns"}
+                save_data()
+                auto_muted = True
+                fields_mute = [
+                    ("Utilisateur muté", member.mention, True),
+                    ("Raison", f"Atteint {num_warns} avertissements", False),
+                    ("Durée", "1 jour", True),
+                ]
+                await send_log_message(guild, LOG_MODERATION_CHANNEL_ID, "🔇 Auto-Mute", f"{member.mention} a été muté automatiquement.", discord.Color.red(), fields_mute)
+            except discord.Forbidden:
+                pass
+
+    return {"num_warns": num_warns, "dm_sent": dm_sent, "auto_muted": auto_muted}, None
+
+
+async def _apply_mute(guild, target_id: int, actor_id: int, duration: str | None, reason: str) -> tuple[dict | None, str | None]:
+    member = guild.get_member(target_id)
+    actor = guild.get_member(actor_id)
+    if not member:
+        return None, "Membre introuvable sur le serveur."
+    if _is_mod_immune(member):
+        return None, "Ce membre est protégé."
+    if member.id == bot.user.id:
+        return None, "Je ne peux pas me muter moi-même."
+    if member.id == guild.owner_id:
+        return None, "Impossible de muter le propriétaire du serveur."
+    if actor and actor.top_role <= member.top_role and actor.id != guild.owner_id:
+        return None, "Ce membre a un rôle égal ou supérieur au tien."
+
+    mute_role = discord.utils.get(guild.roles, name="Muted")
+    if not mute_role:
+        try:
+            mute_role = await guild.create_role(name="Muted", permissions=discord.Permissions.none())
+            for channel in guild.channels:
+                try:
+                    await channel.set_permissions(mute_role, send_messages=False, speak=False, add_reactions=False)
+                except discord.Forbidden:
+                    pass
+        except discord.Forbidden:
+            return None, "Impossible de créer le rôle Muted (permissions insuffisantes)."
+
+    if mute_role in member.roles:
+        return None, "Ce membre est déjà muté."
+
+    end_time, log_duration_text = None, "Permanent"
+    if duration:
+        try:
+            num = float(duration[:-1])
+            unit = duration[-1].lower()
+            if unit == 's':
+                end_time, log_duration_text = datetime.now() + timedelta(seconds=num), f"{num} seconde(s)"
+            elif unit == 'm':
+                end_time, log_duration_text = datetime.now() + timedelta(minutes=num), f"{num} minute(s)"
+            elif unit == 'h':
+                end_time, log_duration_text = datetime.now() + timedelta(hours=num), f"{num} heure(s)"
+            elif unit == 'j':
+                end_time, log_duration_text = datetime.now() + timedelta(days=num), f"{num} jour(s)"
+            else:
+                duration = None
+        except ValueError:
+            duration = None
+
+    try:
+        await member.add_roles(mute_role, reason=reason)
+    except discord.Forbidden:
+        return None, "Permissions insuffisantes pour ajouter le rôle Muted."
+
+    mutes.setdefault(guild.id, {})[member.id] = {"end_time": end_time, "reason": reason}
+    if actor:
+        _log_moderation('mute', member, actor, reason=reason, extra=log_duration_text)
+    save_data()
+
+    dm_sent = True
+    dm_message = f"🔇 Vous avez été mute sur **{guild.name}**."
+    if reason:
+        dm_message += f"\nRaison : {reason}"
+    if log_duration_text != "Permanent":
+        dm_message += f"\nFin du mute : {end_time.strftime('%Y-%m-%d %H:%M:%S')} (heure locale)"
+    try:
+        await member.send(dm_message)
+    except Exception:
+        dm_sent = False
+
+    fields_log = [
+        ("Utilisateur muté", member.mention, True),
+        ("Modérateur", actor.mention if actor else "Admin (site)", True),
+        ("Raison", reason, False),
+        ("Durée", log_duration_text, True),
+    ]
+    log_title = "🔇 Membre Muté Temporairement" if duration else "🔇 Membre Muté Permanent"
+    log_color = discord.Color.red() if duration else discord.Color.dark_red()
+    await send_log_message(guild, LOG_MODERATION_CHANNEL_ID, log_title, f"{member.mention} a été muté.", log_color, fields_log)
+
+    return {"duration": log_duration_text, "dm_sent": dm_sent}, None
+
+
+async def _apply_unmute(guild, target_id: int, actor_id: int) -> tuple[dict | None, str | None]:
+    member = guild.get_member(target_id)
+    actor = guild.get_member(actor_id)
+    if not member:
+        return None, "Membre introuvable sur le serveur."
+    mute_role = discord.utils.get(guild.roles, name="Muted")
+    if not mute_role or mute_role not in member.roles:
+        return None, "Ce membre n'est pas muté."
+    try:
+        await member.remove_roles(mute_role, reason=f"Unmute par {actor.name if actor else 'admin (site)'}")
+    except discord.Forbidden:
+        return None, "Permissions insuffisantes."
+
+    guild_id = guild.id
+    if guild_id in mutes and member.id in mutes[guild_id]:
+        del mutes[guild_id][member.id]
+        if not mutes[guild_id]:
+            del mutes[guild_id]
+        save_data()
+
+    dm_sent = True
+    try:
+        await member.send(f"🔊 Vous avez été unmute sur **{guild.name}**.")
+    except Exception:
+        dm_sent = False
+
+    fields = [
+        ("Utilisateur unmute", member.mention, True),
+        ("Modérateur", actor.mention if actor else "Admin (site)", True),
+    ]
+    await send_log_message(guild, LOG_MODERATION_CHANNEL_ID, "🔊 Membre Unmute Manuellement", f"{member.mention} a été unmute manuellement.", discord.Color.green(), fields)
+    return {"dm_sent": dm_sent}, None
+
+
+async def _apply_ban(guild, target_id: int, actor_id: int, reason: str | None) -> tuple[dict | None, str | None]:
+    member = guild.get_member(target_id)
+    actor = guild.get_member(actor_id)
+    if not member:
+        return None, "Membre introuvable sur le serveur."
+    if _is_mod_immune(member):
+        return None, "Ce membre est protégé."
+    if member.id == actor_id:
+        return None, "Impossible de se bannir soi-même."
+    if member.id == bot.user.id:
+        return None, "Je ne peux pas me bannir moi-même."
+    if member.id == guild.owner_id:
+        return None, "Impossible de bannir le propriétaire du serveur."
+    if actor and actor.top_role <= member.top_role and actor.id != guild.owner_id:
+        return None, "Ce membre a un rôle égal ou supérieur au tien."
+
+    dm_sent = True
+    try:
+        await member.send(f"🚫 Vous avez été banni du serveur **{guild.name}**.\nRaison : {reason if reason else 'Non spécifiée'}")
+    except Exception:
+        dm_sent = False
+
+    try:
+        await member.ban(reason=reason)
+    except discord.Forbidden:
+        return None, "Permissions insuffisantes pour bannir ce membre."
+
+    if actor:
+        _log_moderation('ban', member, actor, reason=reason)
+    save_data()
+
+    fields = [
+        ("Utilisateur banni", member.mention, True),
+        ("ID Utilisateur", member.id, True),
+        ("Modérateur", actor.mention if actor else "Admin (site)", True),
+        ("Raison", reason if reason else "Non spécifiée", False),
+    ]
+    await send_log_message(guild, LOG_MODERATION_CHANNEL_ID, "🚫 Membre Banni", f"{member.mention} a été banni du serveur.", discord.Color.dark_red(), fields)
+    return {"dm_sent": dm_sent}, None
+
+
+async def _apply_silence(guild, target_id: int, actor_id: int) -> tuple[dict | None, str | None]:
+    member = guild.get_member(target_id)
+    actor = guild.get_member(actor_id)
+    if not member:
+        return None, "Membre introuvable sur le serveur."
+    if _is_mod_immune(member):
+        return None, "Ce membre est protégé."
+    guild_id = guild.id
+    silenced_users.setdefault(guild_id, [])
+    if member.id in silenced_users[guild_id]:
+        return None, "Ce membre est déjà silencé."
+    silenced_users[guild_id].append(member.id)
+    if actor:
+        _log_moderation('silence', member, actor)
+    save_data()
+    fields = [
+        ("Utilisateur silencé", member.mention, True),
+        ("Modérateur", actor.mention if actor else "Admin (site)", True),
+    ]
+    await send_log_message(guild, LOG_MODERATION_CHANNEL_ID, "🔇 Membre Silencé", f"{member.mention} a été ajouté à la liste des utilisateurs silencés.", discord.Color.dark_grey(), fields)
+    return {"ok": True}, None
+
+
+async def _apply_unsilence(guild, target_id: int, actor_id: int) -> tuple[dict | None, str | None]:
+    member = guild.get_member(target_id)
+    actor = guild.get_member(actor_id)
+    if not member:
+        return None, "Membre introuvable sur le serveur."
+    guild_id = guild.id
+    if guild_id not in silenced_users or member.id not in silenced_users[guild_id]:
+        return None, "Ce membre n'est pas silencé."
+    silenced_users[guild_id].remove(member.id)
+    if not silenced_users[guild_id]:
+        del silenced_users[guild_id]
+    save_data()
+    fields = [
+        ("Utilisateur désilencé", member.mention, True),
+        ("Modérateur", actor.mention if actor else "Admin (site)", True),
+    ]
+    await send_log_message(guild, LOG_MODERATION_CHANNEL_ID, "🔊 Membre Désilencé", f"{member.mention} a été retiré de la liste des utilisateurs silencés.", discord.Color.light_grey(), fields)
+    return {"ok": True}, None
+
+
 @bot.command()
 async def dm(ctx, member: discord.Member, *, message):
     if not is_bot_owner(ctx.author):

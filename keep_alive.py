@@ -613,6 +613,141 @@ def _require_ticket_staff(body: dict):
     return discord_id, None
 
 
+def _run_mod_action(main, coro):
+    """Exécute une coroutine _apply_* sur la boucle du bot et normalise les
+    erreurs réseau/timeout — toutes les routes de modération ci-dessous
+    renvoient (data, error) de la même façon."""
+    future = asyncio.run_coroutine_threadsafe(coro, main.bot.loop)
+    try:
+        return future.result(timeout=20)
+    except Exception as e:
+        return None, f"Erreur interne : {e}"
+
+
+@app.route("/api/admin/moderation/warn", methods=["POST"])
+@_require_internal_secret
+def api_admin_mod_warn():
+    body = request.get_json(silent=True) or {}
+    discord_id, err = _require_admin(body)
+    if err:
+        return err
+    target = str(body.get("target_discord_id", "")).strip()
+    if not target:
+        return {"error": "target_discord_id requis"}, 400
+    reason = str(body.get("reason", "")).strip() or "Aucune raison spécifiée"
+    main = _bot()
+    guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    if not guild:
+        return {"error": "Serveur introuvable."}, 500
+    data, apply_err = _run_mod_action(main, main._apply_warn(guild, int(target), int(discord_id), reason))
+    if apply_err:
+        return {"error": apply_err}, 400
+    return jsonify(data)
+
+
+@app.route("/api/admin/moderation/mute", methods=["POST"])
+@_require_internal_secret
+def api_admin_mod_mute():
+    body = request.get_json(silent=True) or {}
+    discord_id, err = _require_admin(body)
+    if err:
+        return err
+    target = str(body.get("target_discord_id", "")).strip()
+    if not target:
+        return {"error": "target_discord_id requis"}, 400
+    duration = str(body.get("duration", "")).strip() or None
+    reason = str(body.get("reason", "")).strip() or "Aucune raison spécifiée"
+    main = _bot()
+    guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    if not guild:
+        return {"error": "Serveur introuvable."}, 500
+    data, apply_err = _run_mod_action(main, main._apply_mute(guild, int(target), int(discord_id), duration, reason))
+    if apply_err:
+        return {"error": apply_err}, 400
+    return jsonify(data)
+
+
+@app.route("/api/admin/moderation/unmute", methods=["POST"])
+@_require_internal_secret
+def api_admin_mod_unmute():
+    body = request.get_json(silent=True) or {}
+    discord_id, err = _require_admin(body)
+    if err:
+        return err
+    target = str(body.get("target_discord_id", "")).strip()
+    if not target:
+        return {"error": "target_discord_id requis"}, 400
+    main = _bot()
+    guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    if not guild:
+        return {"error": "Serveur introuvable."}, 500
+    data, apply_err = _run_mod_action(main, main._apply_unmute(guild, int(target), int(discord_id)))
+    if apply_err:
+        return {"error": apply_err}, 400
+    return jsonify(data)
+
+
+@app.route("/api/admin/moderation/ban", methods=["POST"])
+@_require_internal_secret
+def api_admin_mod_ban():
+    body = request.get_json(silent=True) or {}
+    discord_id, err = _require_admin(body)
+    if err:
+        return err
+    target = str(body.get("target_discord_id", "")).strip()
+    if not target:
+        return {"error": "target_discord_id requis"}, 400
+    reason = str(body.get("reason", "")).strip() or None
+    main = _bot()
+    guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    if not guild:
+        return {"error": "Serveur introuvable."}, 500
+    data, apply_err = _run_mod_action(main, main._apply_ban(guild, int(target), int(discord_id), reason))
+    if apply_err:
+        return {"error": apply_err}, 400
+    return jsonify(data)
+
+
+@app.route("/api/admin/moderation/silence", methods=["POST"])
+@_require_internal_secret
+def api_admin_mod_silence():
+    body = request.get_json(silent=True) or {}
+    discord_id, err = _require_admin(body)
+    if err:
+        return err
+    target = str(body.get("target_discord_id", "")).strip()
+    if not target:
+        return {"error": "target_discord_id requis"}, 400
+    main = _bot()
+    guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    if not guild:
+        return {"error": "Serveur introuvable."}, 500
+    data, apply_err = _run_mod_action(main, main._apply_silence(guild, int(target), int(discord_id)))
+    if apply_err:
+        return {"error": apply_err}, 400
+    return jsonify(data)
+
+
+@app.route("/api/admin/moderation/unsilence", methods=["POST"])
+@_require_internal_secret
+def api_admin_mod_unsilence():
+    body = request.get_json(silent=True) or {}
+    discord_id, err = _require_admin(body)
+    if err:
+        return err
+    target = str(body.get("target_discord_id", "")).strip()
+    if not target:
+        return {"error": "target_discord_id requis"}, 400
+    main = _bot()
+    guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    if not guild:
+        return {"error": "Serveur introuvable."}, 500
+    data, apply_err = _run_mod_action(main, main._apply_unsilence(guild, int(target), int(discord_id)))
+    if apply_err:
+        return {"error": apply_err}, 400
+    return jsonify(data)
+
+
 @app.route("/api/admin/tickets")
 @_require_internal_secret
 def api_admin_tickets_list():
