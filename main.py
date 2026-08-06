@@ -12032,7 +12032,12 @@ async def sync_trophy_history():
     if not clubs:
         return
 
-    today = datetime.now().strftime('%Y-%m-%d')
+    # Paris, comme check_bs_season/BS_SEASON_TZ — datetime.now() nu suivait
+    # le fuseau du serveur (UTC sur Railway), décalant la bascule du jour de
+    # ~2h par rapport à l'heure de Paris utilisée partout ailleurs (trouvé le
+    # 07/08/2026 : la nouvelle ligne quotidienne, donc le premier delta
+    # pusheur visible d'une saison, apparaissait avec ce retard).
+    today = datetime.now(BS_SEASON_TZ).strftime('%Y-%m-%d')
     synced_club_tags = []
     all_current_tags = []
     for club in clubs:
