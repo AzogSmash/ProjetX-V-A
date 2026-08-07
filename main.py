@@ -1420,6 +1420,10 @@ async def on_ready():
                         if p1 and p2:
                             bot.add_view(MatchView(gid, m['match_id'], p1['name'], p2['name'],
                                                    p1['captain'], p2['captain'], m['p1'], m['p2']))
+    # Relance les giveaways encore en cours (les tâches asyncio ne survivent
+    # pas à un redémarrage ; les données, elles, sont persistées dans data.json).
+    _resume_giveaways()
+
     if not check_mutes.is_running():
         check_mutes.start()
     if not update_crypto_prices.is_running():
@@ -1474,7 +1478,7 @@ ALWAYS_ALLOWED_CMDS = {'gestion', 'permission', 'cooldown', 'cd', 'aide'}
 
 # ── Commandes sensibles : admin par défaut, sauf rôle explicitement autorisé via !perm ──
 ADMIN_LOCKED_CMDS = {
-    'giveaway', 'cancelgiveaway', 'gdt', 'prix_casino', 'ouvrir_course', 'lancer_course',
+    'giveaway', 'cancelgiveaway', 'listgiveaways', 'gdt', 'prix_casino', 'ouvrir_course', 'lancer_course',
     'freeze_crypto', 'addcoins', 'removecoins', 'tournois', 'prix_tournoi',
     'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter', 'tournoi_deplacer',
     'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log',
@@ -2732,27 +2736,58 @@ async def unlock(ctx, channel: discord.TextChannel = None):
     except Exception as e:
         await ctx.send(f"❌ Une erreur est survenue lors du déverrouillage du salon : {e}")
 
-async def _run_giveaway(ctx, guild_id, message, duration_hours, winners_count, prize):
+async def _run_giveaway(message_id):
+    """Attend la fin d'un giveaway puis tire les gagnants.
+
+    Ne dépend pas d'un ctx : toutes les infos viennent de giveaway_data, ce qui
+    permet de relancer la tâche telle quelle après un redémarrage du bot.
+    """
+    info = giveaway_data.get(message_id)
+    if not info:
+        return
+
+    end_time = info.get("end_time")
+    if isinstance(end_time, datetime):
+        delay = (end_time - datetime.now()).total_seconds()
+    else:
+        delay = 0
+
     try:
-        await asyncio.sleep(duration_hours * 3600)
+        if delay > 0:
+            await asyncio.sleep(delay)
     except asyncio.CancelledError:
         return
 
-    if guild_id not in giveaway_data:
+    info = giveaway_data.get(message_id)
+    if not info:
+        return
+
+    channel_id = info["channel_id"]
+    guild_id = info.get("guild_id")
+    winners_count = info["winners"]
+    prize = info["prize"]
+
+    guild = bot.get_guild(guild_id) if guild_id else None
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        # Salon introuvable (supprimé ou bot expulsé) : on nettoie sans crasher.
+        giveaway_data.pop(message_id, None)
+        giveaway_tasks.pop(message_id, None)
+        save_data()
         return
 
     try:
-        new_msg = await ctx.channel.fetch_message(message.id)
+        new_msg = await channel.fetch_message(info["message_id"])
     except discord.NotFound:
-        await ctx.send("❌ Le message du giveaway a été supprimé. Impossible de choisir un gagnant.")
-        giveaway_data.pop(guild_id, None)
-        giveaway_tasks.pop(guild_id, None)
+        await channel.send("❌ Le message du giveaway a été supprimé. Impossible de choisir un gagnant.")
+        giveaway_data.pop(message_id, None)
+        giveaway_tasks.pop(message_id, None)
         save_data()
         return
     except Exception as e:
-        await ctx.send(f"❌ Une erreur est survenue lors de la récupération du message du giveaway : {e}")
-        giveaway_data.pop(guild_id, None)
-        giveaway_tasks.pop(guild_id, None)
+        await channel.send(f"❌ Une erreur est survenue lors de la récupération du message du giveaway : {e}")
+        giveaway_data.pop(message_id, None)
+        giveaway_tasks.pop(message_id, None)
         return
 
     users = []
@@ -2764,59 +2799,74 @@ async def _run_giveaway(ctx, guild_id, message, duration_hours, winners_count, p
             break
 
     if len(users) < winners_count:
-        await ctx.send(f"❌ Pas assez de participants ({len(users)}) pour choisir {winners_count} gagnant(s). Giveaway annulé.")
+        await channel.send(f"❌ Pas assez de participants ({len(users)}) pour choisir {winners_count} gagnant(s). Giveaway annulé.")
         fields_fail = [
             ("Lot", prize, False),
             ("Raison", f"Pas assez de participants ({len(users)})", True),
             ("Participants", str(len(users)), True)
         ]
-        await send_log_message(ctx.guild, LOG_GIVEAWAY_CHANNEL_ID, "❌ Giveaway Annulé (Manque de Participants)", f"Le giveaway pour '{prize}' n'a pas eu assez de participants.", discord.Color.dark_grey(), fields_fail)
-        giveaway_data.pop(guild_id, None)
-        giveaway_tasks.pop(guild_id, None)
+        await send_log_message(guild, LOG_GIVEAWAY_CHANNEL_ID, "❌ Giveaway Annulé (Manque de Participants)", f"Le giveaway pour '{prize}' n'a pas eu assez de participants.", discord.Color.dark_grey(), fields_fail)
+        giveaway_data.pop(message_id, None)
+        giveaway_tasks.pop(message_id, None)
         save_data()
         return
 
     winners_list = random.sample(users, winners_count)
     gagnants_mentions = ", ".join(user.mention for user in winners_list)
-    await ctx.send(f"🎉 Félicitations {gagnants_mentions} ! Vous avez gagné **{prize}** !")
+    await channel.send(f"🎉 Félicitations {gagnants_mentions} ! Vous avez gagné **{prize}** !")
 
     fields_end = [
         ("Lot", prize, False),
         ("Gagnant(s)", gagnants_mentions, True),
         ("Nombre de participants", str(len(users)), True)
     ]
-    await send_log_message(ctx.guild, LOG_GIVEAWAY_CHANNEL_ID, "✅ Giveaway Terminé", f"Le giveaway pour **{prize}** est terminé. Félicitations aux gagnants !", discord.Color.green(), fields_end)
+    await send_log_message(guild, LOG_GIVEAWAY_CHANNEL_ID, "✅ Giveaway Terminé", f"Le giveaway pour **{prize}** est terminé. Félicitations aux gagnants !", discord.Color.green(), fields_end)
 
-    giveaway_data.pop(guild_id, None)
-    giveaway_tasks.pop(guild_id, None)
+    giveaway_data.pop(message_id, None)
+    giveaway_tasks.pop(message_id, None)
     save_data()
 
 
-@bot.command()
-async def giveaway(ctx, duration_hours: float, winners_count: int, *, prize: str):
-    if duration_hours <= 0 or winners_count <= 0:
-        await ctx.send("❌ La durée et le nombre de gagnants doivent être supérieurs à zéro.")
-        return
+def _resume_giveaways():
+    """Relance les tâches des giveaways encore en cours après un redémarrage."""
+    resumed = 0
+    for message_id in list(giveaway_data.keys()):
+        if message_id in giveaway_tasks and not giveaway_tasks[message_id].done():
+            continue
+        task = asyncio.create_task(_run_giveaway(message_id))
+        giveaway_tasks[message_id] = task
+        resumed += 1
+    if resumed:
+        logging.warning("Giveaways repris après redémarrage : %d", resumed)
 
-    guild_id = ctx.guild.id
-    if guild_id in giveaway_data and giveaway_data[guild_id]:
-        await ctx.send("❌ Un giveaway est déjà en cours sur ce serveur. Annulez-le d'abord avec `!cancelgiveaway`.")
-        return
 
+def _format_duration(hours: float) -> str:
+    """Formatage lisible d'une durée en heures (ex : 1.5 → '1h30')."""
+    total_minutes = int(round(hours * 60))
+    h, m = divmod(total_minutes, 60)
+    if h and m:
+        return f"{h}h{m:02d}"
+    if h:
+        return f"{h} heure(s)"
+    return f"{m} minute(s)"
+
+
+async def _start_giveaway(channel, guild, author, duration_hours, winners_count, prize):
+    """Crée et lance réellement un giveaway dans le salon donné. Renvoie le message."""
     end_time = datetime.now() + timedelta(hours=duration_hours)
 
     embed = discord.Embed(title="🎉 Giveaway 🎉", description=f"Lot : **{prize}**", color=0xffc300)
-    embed.add_field(name="Durée", value=f"{duration_hours} heure(s)")
+    embed.add_field(name="Durée", value=_format_duration(duration_hours))
     embed.add_field(name="Nombre de gagnants", value=winners_count)
     embed.set_footer(text=f"Réagissez 🎉 pour participer ! Se termine le {end_time.strftime('%d/%m/%Y à %H:%M')}")
 
-    message = await ctx.send(embed=embed)
+    message = await channel.send(embed=embed)
     await message.add_reaction("🎉")
 
-    giveaway_data[guild_id] = {
+    giveaway_data[message.id] = {
         "message_id": message.id,
-        "channel_id": ctx.channel.id,
-        "guild_id": ctx.guild.id,
+        "channel_id": channel.id,
+        "guild_id": guild.id,
         "winners": winners_count,
         "prize": prize,
         "end_time": end_time
@@ -2824,38 +2874,193 @@ async def giveaway(ctx, duration_hours: float, winners_count: int, *, prize: str
     save_data()
 
     fields_start = [
-        ("Lancé par", ctx.author.mention, True),
+        ("Lancé par", author.mention, True),
         ("Lot", prize, False),
-        ("Durée", f"{duration_hours} heure(s)", True),
+        ("Durée", _format_duration(duration_hours), True),
         ("Gagnants", str(winners_count), True),
-        ("Canal", ctx.channel.mention, True)
+        ("Canal", channel.mention, True),
+        ("ID", str(message.id), True)
     ]
-    await send_log_message(ctx.guild, LOG_GIVEAWAY_CHANNEL_ID, "🎉 Giveaway Démarré", f"Un nouveau giveaway a été lancé par {ctx.author.mention}.", discord.Color.gold(), fields_start)
+    await send_log_message(guild, LOG_GIVEAWAY_CHANNEL_ID, "🎉 Giveaway Démarré", f"Un nouveau giveaway a été lancé par {author.mention}.", discord.Color.gold(), fields_start)
 
-    task = asyncio.create_task(_run_giveaway(ctx, guild_id, message, duration_hours, winners_count, prize))
-    giveaway_tasks[guild_id] = task
+    task = asyncio.create_task(_run_giveaway(message.id))
+    giveaway_tasks[message.id] = task
+    return message
+
+
+class GiveawayConfigModal(discord.ui.Modal, title="⚙️ Configurer le giveaway"):
+    duree_input = discord.ui.TextInput(
+        label="Durée (en heures)",
+        placeholder="Ex : 24  ·  ou 0.5 pour 30 minutes",
+        required=True, max_length=10
+    )
+    gagnants_input = discord.ui.TextInput(
+        label="Nombre de gagnants",
+        placeholder="Ex : 1",
+        required=True, max_length=4
+    )
+    lot_input = discord.ui.TextInput(
+        label="Lot à gagner",
+        placeholder="Ex : Nitro Discord 1 mois",
+        required=True, max_length=200
+    )
+
+    def __init__(self, setup_view):
+        super().__init__()
+        self.setup_view = setup_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Durée : accepte la virgule française (1,5) comme séparateur décimal
+        raw_duree = str(self.duree_input.value).strip().replace(",", ".")
+        try:
+            duration_hours = float(raw_duree)
+        except ValueError:
+            return await interaction.response.send_message("❌ Durée invalide. Entrez un nombre (ex : 24 ou 0.5).", ephemeral=True)
+
+        try:
+            winners_count = int(str(self.gagnants_input.value).strip())
+        except ValueError:
+            return await interaction.response.send_message("❌ Nombre de gagnants invalide. Entrez un entier (ex : 1).", ephemeral=True)
+
+        if duration_hours <= 0 or winners_count <= 0:
+            return await interaction.response.send_message("❌ La durée et le nombre de gagnants doivent être supérieurs à zéro.", ephemeral=True)
+
+        prize = str(self.lot_input.value).strip()
+        if not prize:
+            return await interaction.response.send_message("❌ Le lot ne peut pas être vide.", ephemeral=True)
+
+        self.setup_view.duration_hours = duration_hours
+        self.setup_view.winners_count = winners_count
+        self.setup_view.prize = prize
+        self.setup_view._refresh_launch_state()
+        await interaction.response.edit_message(embed=self.setup_view.build_embed(), view=self.setup_view)
+
+
+class GiveawaySetupView(discord.ui.View):
+    def __init__(self, author):
+        super().__init__(timeout=300)
+        self.author = author
+        self.channel_id = None
+        self.duration_hours = None
+        self.winners_count = None
+        self.prize = None
+
+        self.channel_select = discord.ui.ChannelSelect(
+            placeholder="📍 Choisir le salon du giveaway…",
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            min_values=1, max_values=1
+        )
+        self.channel_select.callback = self._on_channel_select
+        self.add_item(self.channel_select)
+
+    def _refresh_launch_state(self):
+        ready = all([self.channel_id, self.duration_hours, self.winners_count, self.prize])
+        self.launch_btn.disabled = not ready
+
+    def build_embed(self):
+        embed = discord.Embed(
+            title="🎉 Configuration du giveaway",
+            description="Choisis le salon, puis clique sur **⚙️ Configurer** pour définir la durée, le nombre de gagnants et le lot.",
+            color=0xffc300
+        )
+        salon = f"<#{self.channel_id}>" if self.channel_id else "❌ *non défini*"
+        duree = _format_duration(self.duration_hours) if self.duration_hours else "❌ *non définie*"
+        gagnants = str(self.winners_count) if self.winners_count else "❌ *non défini*"
+        lot = self.prize if self.prize else "❌ *non défini*"
+        embed.add_field(name="📍 Salon", value=salon, inline=True)
+        embed.add_field(name="⏱️ Durée", value=duree, inline=True)
+        embed.add_field(name="🏆 Gagnants", value=gagnants, inline=True)
+        embed.add_field(name="🎁 Lot", value=lot, inline=False)
+        if all([self.channel_id, self.duration_hours, self.winners_count, self.prize]):
+            embed.set_footer(text="✅ Tout est prêt ! Clique sur 🎉 Lancer.")
+        else:
+            embed.set_footer(text="Complète les champs manquants pour pouvoir lancer.")
+        return embed
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message("❌ Ce n'est pas votre menu.", ephemeral=True)
+            return False
+        return True
+
+    async def _on_channel_select(self, interaction):
+        self.channel_id = self.channel_select.values[0].id
+        self._refresh_launch_state()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Configurer", style=discord.ButtonStyle.primary, emoji="⚙️", row=1)
+    async def config_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(GiveawayConfigModal(self))
+
+    @discord.ui.button(label="Lancer", style=discord.ButtonStyle.success, emoji="🎉", row=1, disabled=True)
+    async def launch_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not all([self.channel_id, self.duration_hours, self.winners_count, self.prize]):
+            return await interaction.response.send_message("❌ Configuration incomplète.", ephemeral=True)
+
+        channel = interaction.guild.get_channel(self.channel_id)
+        if channel is None:
+            return await interaction.response.send_message("❌ Salon introuvable.", ephemeral=True)
+
+        perms = channel.permissions_for(interaction.guild.me)
+        if not (perms.send_messages and perms.add_reactions):
+            return await interaction.response.send_message(
+                f"❌ Je n'ai pas la permission d'envoyer des messages / ajouter des réactions dans {channel.mention}.",
+                ephemeral=True
+            )
+
+        await _start_giveaway(channel, interaction.guild, self.author, self.duration_hours, self.winners_count, self.prize)
+
+        for item in self.children:
+            item.disabled = True
+        self.stop()
+        confirm = discord.Embed(
+            title="✅ Giveaway lancé !",
+            description=f"🎁 **{self.prize}**\n📍 Salon : {channel.mention}\n⏱️ Durée : {_format_duration(self.duration_hours)}\n🏆 Gagnants : {self.winners_count}",
+            color=discord.Color.green()
+        )
+        await interaction.response.edit_message(embed=confirm, view=self)
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.danger, emoji="❌", row=1)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for item in self.children:
+            item.disabled = True
+        self.stop()
+        embed = discord.Embed(title="❌ Configuration annulée", color=discord.Color.red())
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
 
 
 @bot.command()
-async def cancelgiveaway(ctx):
-    guild_id = ctx.guild.id
-    if guild_id not in giveaway_data or not giveaway_data[guild_id]:
-        await ctx.send("Aucun giveaway en cours sur ce serveur.")
+async def giveaway(ctx, duration_hours: float = None, winners_count: int = None, *, prize: str = None):
+    # Mode rapide (compatibilité) : !giveaway 24 1 Nitro  → lance directement
+    if duration_hours is not None and winners_count is not None and prize:
+        if duration_hours <= 0 or winners_count <= 0:
+            await ctx.send("❌ La durée et le nombre de gagnants doivent être supérieurs à zéro.")
+            return
+        await _start_giveaway(ctx.channel, ctx.guild, ctx.author, duration_hours, winners_count, prize)
         return
 
-    giveaway_info = giveaway_data[guild_id]
-    message_id = giveaway_info["message_id"]
+    # Mode interactif (par défaut) : panneau à boutons
+    view = GiveawaySetupView(ctx.author)
+    await ctx.send(embed=view.build_embed(), view=view)
+
+
+async def _cancel_single_giveaway(ctx, message_id):
+    giveaway_info = giveaway_data[message_id]
     channel_id = giveaway_info["channel_id"]
     prize = giveaway_info["prize"]
 
-    task = giveaway_tasks.pop(guild_id, None)
+    task = giveaway_tasks.pop(message_id, None)
     if task and not task.done():
         task.cancel()
 
     try:
         channel = bot.get_channel(channel_id)
         if channel:
-            message = await channel.fetch_message(message_id)
+            message = await channel.fetch_message(giveaway_info["message_id"])
             await message.delete()
     except discord.NotFound:
         pass
@@ -2864,13 +3069,81 @@ async def cancelgiveaway(ctx):
 
     fields_cancel = [
         ("Annulé par", ctx.author.mention, True),
-        ("Lot", prize, False)
+        ("Lot", prize, False),
+        ("ID", str(message_id), True)
     ]
     await send_log_message(ctx.guild, LOG_GIVEAWAY_CHANNEL_ID, "❌ Giveaway Annulé", f"Le giveaway pour '{prize}' a été annulé par {ctx.author.mention}.", discord.Color.red(), fields_cancel)
 
-    del giveaway_data[guild_id]
+    del giveaway_data[message_id]
+    return prize
+
+
+@bot.command()
+async def cancelgiveaway(ctx, message_id: int = None):
+    guild_id = ctx.guild.id
+    # Giveaways en cours sur ce serveur
+    server_giveaways = {
+        gid: info for gid, info in giveaway_data.items()
+        if info.get("guild_id") == guild_id
+    }
+
+    if not server_giveaways:
+        await ctx.send("Aucun giveaway en cours sur ce serveur.")
+        return
+
+    # Si un ID est fourni, annuler uniquement ce giveaway
+    if message_id is not None:
+        if message_id not in server_giveaways:
+            await ctx.send("❌ Aucun giveaway avec cet ID sur ce serveur. Utilisez `!listgiveaways` pour voir les IDs.")
+            return
+        prize = await _cancel_single_giveaway(ctx, message_id)
+        save_data()
+        await ctx.send(f"❌ Giveaway annulé : **{prize}** (`{message_id}`).")
+        return
+
+    # Aucun ID fourni : si un seul giveaway, l'annuler ; sinon annuler tous
+    if len(server_giveaways) == 1:
+        only_id = next(iter(server_giveaways))
+        prize = await _cancel_single_giveaway(ctx, only_id)
+        save_data()
+        await ctx.send(f"❌ Giveaway annulé : **{prize}**.")
+        return
+
+    cancelled = []
+    for gid in list(server_giveaways.keys()):
+        prize = await _cancel_single_giveaway(ctx, gid)
+        cancelled.append(prize)
     save_data()
-    await ctx.send("❌ Giveaway annulé.")
+    await ctx.send(f"❌ {len(cancelled)} giveaways annulés : " + ", ".join(f"**{p}**" for p in cancelled) + ".")
+
+
+@bot.command()
+async def listgiveaways(ctx):
+    guild_id = ctx.guild.id
+    server_giveaways = {
+        gid: info for gid, info in giveaway_data.items()
+        if info.get("guild_id") == guild_id
+    }
+
+    if not server_giveaways:
+        await ctx.send("Aucun giveaway en cours sur ce serveur.")
+        return
+
+    embed = discord.Embed(title="🎉 Giveaways en cours", color=0xffc300)
+    for gid, info in server_giveaways.items():
+        end_time = info.get("end_time")
+        if isinstance(end_time, datetime):
+            fin = end_time.strftime('%d/%m/%Y à %H:%M')
+        else:
+            fin = "Inconnue"
+        channel = bot.get_channel(info.get("channel_id"))
+        salon = channel.mention if channel else "salon inconnu"
+        embed.add_field(
+            name=f"🎁 {info.get('prize', 'Lot inconnu')}",
+            value=f"ID : `{gid}`\nGagnants : {info.get('winners', '?')}\nSalon : {salon}\nFin : {fin}",
+            inline=False
+        )
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def nuke(ctx):
@@ -9874,8 +10147,9 @@ async def on_message(message):
             "say": "**!say message**\nFait dire quelque chose au bot (créateur du bot uniquement).",
             "dm": "**!dm @membre message**\nEnvoie un message privé à un membre (créateur du bot uniquement).",
             "dmall": "**!dmall message**\nEnvoie un message privé à tous les membres (créateur du bot uniquement).",
-            "giveaway": "**!giveaway durée_heures nb_gagnants lot**\nLance un giveaway.",
-            "cancelgiveaway": "**!cancelgiveaway**\nAnnule le giveaway en cours.",
+            "giveaway": "**!giveaway**\nOuvre un panneau à boutons pour configurer et lancer un giveaway (salon, durée, gagnants, lot).\nMode rapide : `!giveaway durée_heures nb_gagnants lot`. Plusieurs giveaways simultanés possibles.",
+            "cancelgiveaway": "**!cancelgiveaway [id]**\nAnnule un giveaway précis (par ID) ou tous ceux du serveur si aucun ID.",
+            "listgiveaways": "**!listgiveaways**\nAffiche la liste des giveaways en cours et leurs IDs.",
             "aide": "**!aide**\nAffiche la liste complète des commandes."
         }
         if command_name in command_help:
