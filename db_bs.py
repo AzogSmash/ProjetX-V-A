@@ -119,7 +119,18 @@ def _select_all_snapshots_since(since_date: str) -> list[dict]:
     dépassé en quelques semaines de saison (1785 lignes constatées le
     28/07/2026, classement pusheurs figé au 25/07 pendant que les trophées
     bruts (via une vue Postgres, pas ce chemin) continuaient d'avancer).
-    Pagine par blocs de 1000 jusqu'à épuisement plutôt que de tronquer."""
+    Pagine par blocs de 1000 jusqu'à épuisement plutôt que de tronquer.
+
+    IMPORTANT : le tri doit être TOTAL et déterministe (snapshot_date +
+    player_tag, qui forment la clé primaire), pas seulement snapshot_date.
+    Avec ~230 lignes partageant la même date chaque jour, un tri sur la seule
+    date laisse Postgres départager les ex æquo dans un ordre arbitraire qui
+    peut changer d'une requête à l'autre : à la frontière d'une page (ligne
+    1000, 2000…), une ligne pouvait alors être sautée ou dupliquée. Quand
+    c'était le snapshot de DÉBUT de saison d'un joueur qui sautait, sa
+    baseline devenait un point plus récent et sa progression !evo « repartait
+    de 0 » — de façon intermittente, puisque l'ordre était recalculé à chaque
+    appel (constaté début 08/2026)."""
     client = get_client()
     rows: list[dict] = []
     offset = 0
@@ -129,6 +140,7 @@ def _select_all_snapshots_since(since_date: str) -> list[dict]:
             .select("player_tag,snapshot_date,trophies")
             .gte("snapshot_date", since_date)
             .order("snapshot_date")
+            .order("player_tag")
             .range(offset, offset + _PAGE_SIZE - 1)
             .execute()
             .data
