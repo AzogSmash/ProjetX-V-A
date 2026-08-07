@@ -12014,9 +12014,11 @@ async def _bs_evolution_current_entries():
     """Calcule l'évolution en direct depuis le début de la saison Brawl Stars en cours
     (season_start_date, borne posée par check_bs_season au 1er jeudi 10h heure de Paris).
     La valeur de fin vient d'un appel API en direct (comme avant) ; la baseline de
-    début de saison vient de Supabase (bs_trophy_snapshots)."""
-    start_date = db_bs.get_season_state()['season_start_date'] or datetime.now(BS_SEASON_TZ).strftime('%Y-%m-%d')
-    baselines = db_bs.get_baselines_since(start_date)
+    début de saison vient de bs_season_baseline (figée au reset) quand elle
+    existe, sinon de bs_trophy_snapshots."""
+    state = db_bs.get_season_state()
+    start_date = state['season_start_date'] or datetime.now(BS_SEASON_TZ).strftime('%Y-%m-%d')
+    baselines = db_bs.get_baselines_since(start_date, state['season_month'])
     all_members, errors = [], []
     for club in db_bs.list_family_clubs():
         data, err = await _bs_fetch_club(club['tag'])
@@ -12227,7 +12229,10 @@ async def check_bs_season():
 
     if season_month is None:
         start = _most_recent_season_start(now)
-        db_bs.set_season_state(start.strftime('%Y-%m'), start.strftime('%Y-%m-%d'))
+        new_month = start.strftime('%Y-%m')
+        db_bs.set_season_state(new_month, start.strftime('%Y-%m-%d'))
+        latest = db_bs.get_latest_trophies()
+        db_bs.save_season_baseline(new_month, {p['tag']: p['trophies'] for p in latest})
         return
 
     if season_month == current_month:
@@ -12249,7 +12254,7 @@ async def check_bs_season():
 
     ended_month = season_month
     start_date = season_start_date or today
-    entries = db_bs.get_season_evolution(start_date)
+    entries = db_bs.get_season_evolution(start_date, ended_month)
     archive = [
         {'tag': e['tag'], 'name': e['name'], 'club': e['club'], 'start': e['start'], 'end': e['end'], 'delta': e['delta']}
         for e in entries
@@ -12258,7 +12263,15 @@ async def check_bs_season():
         db_bs.archive_season(ended_month, archive)
 
     new_start = _most_recent_season_start(now)
-    db_bs.set_season_state(new_start.strftime('%Y-%m'), new_start.strftime('%Y-%m-%d'))
+    new_month = new_start.strftime('%Y-%m')
+    db_bs.set_season_state(new_month, new_start.strftime('%Y-%m-%d'))
+
+    # Capture immédiate de la valeur de départ de la nouvelle saison (voir
+    # save_season_baseline) — sans ça, "start" dépendrait du premier sync
+    # quotidien classique, potentiellement écrasé plusieurs fois avant que
+    # quiconque ne le consulte (incident du 07/08/2026).
+    latest = db_bs.get_latest_trophies()
+    db_bs.save_season_baseline(new_month, {p['tag']: p['trophies'] for p in latest})
 
 
 @tasks.loop(hours=4)

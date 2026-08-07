@@ -72,7 +72,7 @@ def api_famille_ranked():
 def api_famille_evolution():
     state = db_bs.get_season_state()
     start_date = state["season_start_date"]
-    players = db_bs.get_season_evolution(start_date) if start_date else []
+    players = db_bs.get_season_evolution(start_date, state["season_month"]) if start_date else []
     players.sort(key=lambda p: p["delta"], reverse=True)
     return jsonify({
         "season_month": state["season_month"],
