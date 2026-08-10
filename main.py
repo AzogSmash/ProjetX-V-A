@@ -1549,19 +1549,26 @@ async def _global_command_gate(ctx):
                 pass
             return False
         _casino_last_use[ctx.author.id] = now
-    # Les admins du serveur passent toujours
+    # Les admins du serveur passent toujours, SAUF pour les commandes admin
+    # sensibles (ADMIN_LOCKED_CMDS) : celles-ci sont réservées au propriétaire
+    # du serveur par défaut — ctx.guild.owner_id, calculé dynamiquement,
+    # jamais un ID codé en dur — jusqu'à ce qu'un rôle soit explicitement
+    # autorisé via !permission. Décision du 09/08/2026 (remplace l'ancien
+    # PUNITION_ALLOWED_USER_IDS codé en dur, généralisée à toute commande
+    # ADMIN_LOCKED_CMDS plutôt que de garder un mécanisme à part pour !punition).
     if ctx.guild and ctx.author.guild_permissions.administrator:
-        return True
+        if cmd_name not in ADMIN_LOCKED_CMDS or ctx.author.id == ctx.guild.owner_id:
+            return True
     # Restrictions de rôle (!permission)
     allowed_roles = cmd_role_perms.get(cmd_name)
     if allowed_roles and ctx.guild:
         user_role_ids = {r.id for r in ctx.author.roles}
         if user_role_ids & set(allowed_roles):
             return True
-    # Commande sensible sans rôle explicitement autorisé : réservée aux admins
+    # Commande sensible sans rôle explicitement autorisé : réservée au propriétaire du serveur
     if cmd_name in ADMIN_LOCKED_CMDS and not (allowed_roles and ctx.guild):
         try:
-            await ctx.send(f"❌ La commande `!{cmd_name}` est réservée aux administrateurs (ou à un rôle autorisé via `!perm`).")
+            await ctx.send(f"❌ La commande `!{cmd_name}` est réservée au propriétaire du serveur (ou à un rôle autorisé via `!perm`).")
         except Exception:
             pass
         return False
@@ -9896,23 +9903,8 @@ async def cmd_fermer_ticket(ctx, arg: str = None, *, reste: str = None):
     await ctx.send(f"✅ Ticket #{ticket_id} fermé.")
 
 
-# Seuls ces comptes précis peuvent utiliser !punition et !annuler_punition,
-# peu importe leur(s) rôle(s) — demande du 23/07/2026. Volontairement en dur
-# ici plutôt que via cmd_role_perms/!permission (qui reste basé sur les
-# rôles, pas les comptes).
-PUNITION_ALLOWED_USER_IDS = {
-    659370556369403935,
-    1056848438270115900,
-    550678866839207937,
-    860057663064899584,
-    602807768046632971,
-}
-
-
 @bot.command(name="punition", aliases=["pun", "punir"])
 async def cmd_punition(ctx, nombre: int, membre: discord.Member):
-    if ctx.author.id not in PUNITION_ALLOWED_USER_IDS and not is_bot_owner(ctx.author):
-        return await ctx.send("❌ Tu n'es pas autorisé à utiliser cette commande.")
     if await _check_protected_target(ctx, membre):
         return
     if nombre <= 0:
@@ -9967,8 +9959,6 @@ async def cmd_punition(ctx, nombre: int, membre: discord.Member):
 
 @bot.command(name="annuler_punition", aliases=["apun", "unpunish"])
 async def cmd_annuler_punition(ctx, membre: discord.Member):
-    if ctx.author.id not in PUNITION_ALLOWED_USER_IDS and not is_bot_owner(ctx.author):
-        return await ctx.send("❌ Tu n'es pas autorisé à utiliser cette commande.")
     uid = str(membre.id)
     if uid not in punitions:
         return await ctx.send(f"❌ {membre.mention} n'est pas en punition.")
