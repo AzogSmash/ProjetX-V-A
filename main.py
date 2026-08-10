@@ -10,7 +10,7 @@ import json
 import io
 import re
 import unicodedata
-from collections import defaultdict
+from collections import defaultdict, deque
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -552,6 +552,155 @@ def _log_moderation(action: str, target, moderator, reason: str = None, extra: s
     })
     if len(moderation_log) > MODERATION_LOG_MAX:
         moderation_log[:] = moderation_log[-MODERATION_LOG_MAX:]
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# ── Anti-raid / anti-spam automatique ───────────────────────────────────
+# Deux détecteurs indépendants sur chaque message (voir on_message) :
+#  1) flood de messages (5 en 5s) -> avertissement, puis mute si ça continue
+#  2) pings de rôle répétés sur des messages distincts (3 en 15s) -> mute direct
+# Seuils volontairement larges pour ne jamais gêner une conversation
+# normale. Demande du 10/08/2026.
+# ═════════════════════════════════════════════════════════════════════════
+ANTIRAID_MSG_WINDOW_SECONDS = 5
+ANTIRAID_MSG_THRESHOLD = 5
+ANTIRAID_WARN_ESCALATE_SECONDS = 20  # si le flood continue dans cette fenêtre après l'avertissement -> mute
+ANTIRAID_ROLE_PING_WINDOW_SECONDS = 15
+ANTIRAID_ROLE_PING_THRESHOLD = 3
+ANTIRAID_MUTE_MINUTES = 5
+ANTIRAID_REPEAT_WINDOW_SECONDS = 30 * 60  # récidive dans les 30 min -> mute suivant plus long
+ANTIRAID_MUTE_MAX_MINUTES = 30
+ANTIRAID_STAFF_ROLE_ID = 1513110804595998788
+ANTIRAID_STAFF_CHANNEL_ID = 1516398004012318863
+
+_antiraid_msg_times: dict[int, deque] = {}
+_antiraid_role_ping_times: dict[int, deque] = {}
+_antiraid_last_warned: dict[int, datetime] = {}
+_antiraid_repeat: dict[int, tuple[int, datetime]] = {}  # uid -> (nb de mutes anti-raid consécutifs, dernier mute)
+
+
+def _antiraid_exempt(member: discord.Member) -> bool:
+    return member.id in MOD_IMMUNE_IDS or member.guild_permissions.administrator
+
+
+async def _antiraid_mute(message: discord.Message, reason: str) -> None:
+    """Mute anti-raid — réutilise exactement le mécanisme de !mute (rôle
+    'Muted' + mutes[guild.id][member.id], démute géré par check_mutes,
+    déjà en tâche de fond)."""
+    guild = message.guild
+    member = message.author
+
+    mute_role = discord.utils.get(guild.roles, name="Muted")
+    if not mute_role:
+        try:
+            mute_role = await guild.create_role(name="Muted", permissions=discord.Permissions.none())
+            for channel in guild.channels:
+                try:
+                    await channel.set_permissions(mute_role, send_messages=False, speak=False, add_reactions=False)
+                except discord.Forbidden:
+                    pass
+        except discord.Forbidden:
+            return
+    if mute_role in member.roles:
+        return
+
+    # Récidive dans les 30 min -> mute suivant plus long (10, 20, 30 min max).
+    count, last_mute = _antiraid_repeat.get(member.id, (0, None))
+    if last_mute and (datetime.now() - last_mute).total_seconds() > ANTIRAID_REPEAT_WINDOW_SECONDS:
+        count = 0
+    count += 1
+    minutes = min(ANTIRAID_MUTE_MINUTES * count, ANTIRAID_MUTE_MAX_MINUTES)
+    now = datetime.now()
+    _antiraid_repeat[member.id] = (count, now)
+    end_time = now + timedelta(minutes=minutes)
+
+    try:
+        await member.add_roles(mute_role, reason=f"Anti-raid : {reason}")
+    except discord.Forbidden:
+        return
+    guild_id = guild.id
+    user_id = member.id
+    if guild_id not in mutes:
+        mutes[guild_id] = {}
+    mutes[guild_id][user_id] = {"end_time": end_time, "reason": f"Anti-raid automatique : {reason}"}
+    _log_moderation('mute_auto_antiraid', member, guild.me, reason=reason, extra=f"{minutes} min")
+    save_data()
+
+    try:
+        await message.channel.send(
+            f"🔇 {member.mention} a été mute {minutes} min (anti-raid : {reason}).",
+            delete_after=15,
+        )
+    except Exception:
+        pass
+
+    staff_channel = guild.get_channel(ANTIRAID_STAFF_CHANNEL_ID)
+    if staff_channel:
+        try:
+            await staff_channel.send(
+                content=f"<@&{ANTIRAID_STAFF_ROLE_ID}>",
+                embed=discord.Embed(
+                    title="🚨 Anti-raid : mute automatique",
+                    description=(
+                        f"{member.mention} (`{member}`) a été mute **{minutes} min**.\n"
+                        f"**Raison :** {reason}\n"
+                        f"**Salon :** {message.channel.mention}\n"
+                        f"**Récidive :** {count}"
+                    ),
+                    color=0xe74c3c,
+                    timestamp=discord.utils.utcnow(),
+                ),
+                allowed_mentions=discord.AllowedMentions(roles=True),
+            )
+        except Exception:
+            pass
+
+
+async def _antiraid_check(message: discord.Message) -> bool:
+    """Retourne True si le message a déclenché un mute (l'appelant peut
+    alors arrêter de traiter ce message)."""
+    if not message.guild or not isinstance(message.author, discord.Member):
+        return False
+    member = message.author
+    if _antiraid_exempt(member):
+        return False
+
+    now = datetime.now()
+    uid = member.id
+
+    # Pings de rôle répétés sur des messages distincts -> mute direct.
+    if message.role_mentions:
+        ping_times = _antiraid_role_ping_times.setdefault(uid, deque())
+        ping_times.append(now)
+        while ping_times and (now - ping_times[0]).total_seconds() > ANTIRAID_ROLE_PING_WINDOW_SECONDS:
+            ping_times.popleft()
+        if len(ping_times) >= ANTIRAID_ROLE_PING_THRESHOLD:
+            ping_times.clear()
+            await _antiraid_mute(message, "pings de rôle répétés sur plusieurs messages")
+            return True
+
+    # Flood de messages -> avertissement, puis mute si ça continue.
+    times = _antiraid_msg_times.setdefault(uid, deque())
+    times.append(now)
+    while times and (now - times[0]).total_seconds() > ANTIRAID_MSG_WINDOW_SECONDS:
+        times.popleft()
+    if len(times) >= ANTIRAID_MSG_THRESHOLD:
+        last_warn = _antiraid_last_warned.get(uid)
+        if last_warn and (now - last_warn).total_seconds() < ANTIRAID_WARN_ESCALATE_SECONDS:
+            times.clear()
+            await _antiraid_mute(message, "flood de messages malgré l'avertissement")
+            return True
+        times.clear()
+        _antiraid_last_warned[uid] = now
+        try:
+            await message.channel.send(
+                f"⚠️ {member.mention} ralentis un peu, tu postes trop vite — pense aux autres membres du salon.",
+                delete_after=10,
+            )
+        except Exception:
+            pass
+    return False
+
 
 # ── Réactions Azog : surprises cosmétiques sur mention/commandes, aucun blocage ──────────
 AZOG_PING_LINES = [
@@ -10064,6 +10213,9 @@ async def on_message(message):
     morse en tapant le bon code ne marchait donc jamais (incident du
     21/07/2026). Fusionné ici, l'ancien doublon supprimé."""
     if message.author.bot:
+        return
+
+    if await _antiraid_check(message):
         return
 
     # Vérification punition
