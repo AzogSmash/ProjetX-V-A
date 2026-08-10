@@ -494,11 +494,11 @@ def api_admin_economy_status():
 @_require_internal_secret
 def api_admin_casino_pause():
     body = request.get_json(silent=True) or {}
-    _discord_id, err = _require_admin(body)
+    discord_id, err = _require_admin(body)
     if err:
         return err
     main = _bot()
-    future = asyncio.run_coroutine_threadsafe(main._apply_casino_pause(), main.bot.loop)
+    future = asyncio.run_coroutine_threadsafe(main._apply_casino_pause(int(discord_id)), main.bot.loop)
     paused = future.result(timeout=10)
     return jsonify({"ok": True, "paused": paused})
 
@@ -507,11 +507,11 @@ def api_admin_casino_pause():
 @_require_internal_secret
 def api_admin_casino_resume():
     body = request.get_json(silent=True) or {}
-    _discord_id, err = _require_admin(body)
+    discord_id, err = _require_admin(body)
     if err:
         return err
     main = _bot()
-    future = asyncio.run_coroutine_threadsafe(main._apply_casino_resume(), main.bot.loop)
+    future = asyncio.run_coroutine_threadsafe(main._apply_casino_resume(int(discord_id)), main.bot.loop)
     paused = future.result(timeout=10)
     return jsonify({"ok": True, "paused": paused})
 

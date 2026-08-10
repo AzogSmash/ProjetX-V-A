@@ -37,10 +37,13 @@ def _format_ranked_updated_at(iso_ts: str | None) -> str | None:
 # ce sont déjà les IDs numériques directs (aucune variable d'environnement ne
 # s'appelle littéralement "1515780858483576923"), ce qui rendait ces 3 logs
 # silencieusement inactifs (send_log_message ne fait rien si channel_id est
-# None). Corrigé le 26/07/2026.
-LOG_MODERATION_CHANNEL_ID = 1515780858483576923
-LOG_GIVEAWAY_CHANNEL_ID = 1515781002817966341
-LOG_GENERAL_CHANNEL_ID = 1515781072783151314
+# None). Corrigé le 26/07/2026. Salon de logs unifié le 11/08/2026 : les 3
+# constantes pointent toutes vers le même salon (demande explicite "je veux
+# tooooout les logs du bot" au même endroit, plus besoin de jongler entre
+# plusieurs salons de logs).
+LOG_MODERATION_CHANNEL_ID = 1528513026691563540
+LOG_GIVEAWAY_CHANNEL_ID = 1528513026691563540
+LOG_GENERAL_CHANNEL_ID = 1528513026691563540
 BRAWLSTARS_API_KEY = (os.getenv("BRAWLSTARS_API_KEY") or "").strip() or None
 
 # ── Système de tickets maison (remplace tickets.bot) ──
@@ -347,7 +350,7 @@ bs_role_config   = {'trophies': {}, 'ranked': {}}  # 'trophies': {str(min): role
 # officielle à chaque sync_trophy_history (toutes les heures), donc une valeur périmée
 # après un redémarrage n'a aucun intérêt à être gardée sur disque.
 bs_family_club_details = {}
-ADMIN_LOG_CHANNEL_ID = 0  # à configurer via !set_admin_log <channel_id>
+ADMIN_LOG_CHANNEL_ID = 1528513026691563540  # écrasé par load_data() si !set_admin_log a déjà été utilisé
 draft_sessions       = {}   # channel_id -> session dict (phase de ban Brawl Stars)
 theft_stats           = {}   # str(uid_victim) -> {'attempts': int, 'success': int}
 snipe_cache           = {}   # channel_id -> [{'author', 'content', 'at', 'attachments'}, ...]
@@ -1175,7 +1178,9 @@ def load_data():
                     for _sym in list(_wallet.keys()):
                         if isinstance(_wallet[_sym], dict):
                             _wallet[_sym] = [_wallet[_sym]]
-                ADMIN_LOG_CHANNEL_ID = data.get('admin_log_channel_id', 0)
+                # Défaut le 11/08/2026 : salon de logs unifié, tant que !set_admin_log
+                # n'a jamais été utilisé pour pointer ailleurs explicitement.
+                ADMIN_LOG_CHANNEL_ID = data.get('admin_log_channel_id', 1528513026691563540)
                 # punitions/morse_punitions : voir incident du 21/07/2026, un redémarrage en
                 # pleine punition laissait le membre bloqué dans tous les salons (les
                 # restrictions Discord survivent au redémarrage, mais plus le dict en mémoire
@@ -7403,6 +7408,11 @@ class GestionView(discord.ui.View):
         new_view = GestionView(self.admin_id, page=self.page)
         await interaction.response.edit_message(embed=_gestion_embed(), view=new_view)
         await interaction.followup.send(f"🚫 `!{cmd}` a été **désactivée**.", ephemeral=True)
+        if interaction.guild:
+            await send_log_message(
+                interaction.guild, LOG_MODERATION_CHANNEL_ID, "🚫 Commande désactivée",
+                f"{interaction.user.mention} a désactivé `!{cmd}`.", discord.Color.dark_grey(),
+            )
 
     async def _on_enable(self, interaction):
         cmd = self.enable_select.values[0]
@@ -7411,6 +7421,11 @@ class GestionView(discord.ui.View):
         new_view = GestionView(self.admin_id, page=self.page)
         await interaction.response.edit_message(embed=_gestion_embed(), view=new_view)
         await interaction.followup.send(f"✅ `!{cmd}` a été **réactivée**.", ephemeral=True)
+        if interaction.guild:
+            await send_log_message(
+                interaction.guild, LOG_MODERATION_CHANNEL_ID, "✅ Commande réactivée",
+                f"{interaction.user.mention} a réactivé `!{cmd}`.", discord.Color.green(),
+            )
 
     async def _prev(self, interaction):
         await interaction.response.edit_message(embed=_gestion_embed(), view=GestionView(self.admin_id, self.page - 1))
@@ -7486,6 +7501,13 @@ class PermSelectRolesView(discord.ui.View):
             cmd_role_perms.pop(self.cmd_name, None)
         save_data()
         roles_str = ', '.join(f"<@&{rid}>" for rid in cmd_role_perms.get(self.cmd_name, []))
+        if interaction.guild:
+            await send_log_message(
+                interaction.guild, LOG_MODERATION_CHANNEL_ID, "🔧 Permissions modifiées",
+                f"{interaction.user.mention} a modifié les rôles autorisés pour `!{self.cmd_name}`.\n"
+                f"Rôles autorisés désormais : {roles_str if roles_str else '*tous* (aucune restriction)'}",
+                discord.Color.blurple(),
+            )
         await interaction.response.send_message(
             f"✅ Permissions pour `!{self.cmd_name}` mises à jour.\n"
             f"Rôles autorisés : {roles_str if roles_str else '*tous* (aucune restriction)'}\n"
@@ -8900,15 +8922,31 @@ async def cmd_removecoins(ctx, member: discord.Member, amount: int, compte: str 
 # de risquer une régression pour économiser quelques lignes (voir keep_alive.py
 # pour les routes Flask qui appellent ces fonctions via run_coroutine_threadsafe).
 
-async def _apply_casino_pause() -> bool:
+async def _apply_casino_pause(actor_id: int | None = None) -> bool:
     global casino_paused
     casino_paused = True
+    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+    if guild:
+        actor = guild.get_member(actor_id) if actor_id else None
+        await send_log_message(
+            guild, LOG_MODERATION_CHANNEL_ID, "⏸️ Casino en pause",
+            f"Casino mis en pause par {actor.mention if actor else 'le panel admin du site'}.",
+            discord.Color.orange(),
+        )
     return casino_paused
 
 
-async def _apply_casino_resume() -> bool:
+async def _apply_casino_resume(actor_id: int | None = None) -> bool:
     global casino_paused
     casino_paused = False
+    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+    if guild:
+        actor = guild.get_member(actor_id) if actor_id else None
+        await send_log_message(
+            guild, LOG_MODERATION_CHANNEL_ID, "▶️ Casino relancé",
+            f"Casino relancé par {actor.mention if actor else 'le panel admin du site'}.",
+            discord.Color.green(),
+        )
     return casino_paused
 
 
@@ -8918,6 +8956,11 @@ async def _apply_casino_ban(guild, target_id: int, actor_id: int, reason: str | 
     member, actor = guild.get_member(target_id), guild.get_member(actor_id)
     if member and actor:
         _log_moderation('casino_ban', member, actor, reason=reason)
+        await send_log_message(
+            guild, LOG_MODERATION_CHANNEL_ID, "🚫 Casino ban",
+            f"{member.mention} n'a plus accès aux commandes casino (par {actor.mention})." + (f"\nRaison : {reason}" if reason else ""),
+            discord.Color.dark_red(),
+        )
     return {"ok": True}
 
 
@@ -8927,6 +8970,11 @@ async def _apply_casino_unban(guild, target_id: int, actor_id: int) -> dict:
     member, actor = guild.get_member(target_id), guild.get_member(actor_id)
     if member and actor:
         _log_moderation('casino_unban', member, actor)
+        await send_log_message(
+            guild, LOG_MODERATION_CHANNEL_ID, "✅ Casino unban",
+            f"{member.mention} a de nouveau accès aux commandes casino (par {actor.mention}).",
+            discord.Color.green(),
+        )
     return {"ok": True}
 
 
@@ -10109,6 +10157,11 @@ async def cmd_punition(ctx, nombre: int, membre: discord.Member):
     }
     _log_moderation('punition', membre, ctx.author, extra=f"compter jusqu'à {nombre}")
     save_data()
+    await send_log_message(
+        guild, LOG_MODERATION_CHANNEL_ID, "🔒 Punition",
+        f"{membre.mention} a été mis en punition par {ctx.author.mention} (compter jusqu'à {nombre}).",
+        discord.Color.dark_red(),
+    )
 
     await salon.send(
         f"🔒 {membre.mention} tu es en **punition** !\n"
@@ -10190,11 +10243,15 @@ async def _liberer_membre(guild, membre, resolved_by=None):
             pass
 
     del punitions[uid]
-    _log_moderation(
-        'punition_fin', membre, resolved_by or guild.me,
-        extra="annulée manuellement" if resolved_by else "terminée en comptant jusqu'au bout",
-    )
+    extra = "annulée manuellement" if resolved_by else "terminée en comptant jusqu'au bout"
+    _log_moderation('punition_fin', membre, resolved_by or guild.me, extra=extra)
     save_data()
+    await send_log_message(
+        guild, LOG_MODERATION_CHANNEL_ID, "🔓 Fin de punition",
+        f"La punition de {membre.mention} est terminée ({extra}, par "
+        f"{(resolved_by.mention if resolved_by else 'auto')}).",
+        discord.Color.green(),
+    )
 
     try:
         await membre.send(f"✅ Ta punition sur **{guild.name}** est terminée, tu as retrouvé accès aux salons !")
@@ -10399,6 +10456,11 @@ async def cmd_morse(ctx, membre: discord.Member):
     }
     _log_moderation('morse', membre, ctx.author)
     save_data()
+    await send_log_message(
+        guild, LOG_MODERATION_CHANNEL_ID, "🔒 Punition morse",
+        f"{membre.mention} a été mis en punition morse par {ctx.author.mention}.",
+        discord.Color.dark_red(),
+    )
 
     buf = _morse_to_image(morse, word)
     await salon.send(
@@ -10434,11 +10496,15 @@ async def _liberer_membre_morse(guild, membre, resolved_by=None):
         except:
             pass
     del morse_punitions[uid]
-    _log_moderation(
-        'morse_fin', membre, resolved_by or guild.me,
-        extra="annulée manuellement" if resolved_by else "code résolu",
-    )
+    extra = "annulée manuellement" if resolved_by else "code résolu"
+    _log_moderation('morse_fin', membre, resolved_by or guild.me, extra=extra)
     save_data()
+    await send_log_message(
+        guild, LOG_MODERATION_CHANNEL_ID, "🔓 Fin de punition morse",
+        f"La punition morse de {membre.mention} est terminée ({extra}, par "
+        f"{(resolved_by.mention if resolved_by else 'auto')}).",
+        discord.Color.green(),
+    )
     try:
         await membre.send(f"✅ Ta punition morse sur **{guild.name}** est terminée !")
     except:
@@ -13490,6 +13556,11 @@ async def cmd_casino_ban(ctx, membre: discord.Member, *, raison: str = None):
     casino_banned_users.add(membre.id)
     save_data()
     _log_moderation('casino_ban', membre, ctx.author, reason=raison)
+    await send_log_message(
+        ctx.guild, LOG_MODERATION_CHANNEL_ID, "🚫 Casino ban",
+        f"{membre.mention} n'a plus accès aux commandes casino (par {ctx.author.mention})." + (f"\nRaison : {raison}" if raison else ""),
+        discord.Color.dark_red(),
+    )
     await ctx.send(f"🚫 {membre.mention} n'a désormais plus accès aux commandes casino." + (f" Raison : {raison}" if raison else ""))
 
 
@@ -13501,6 +13572,11 @@ async def cmd_casino_unban(ctx, membre: discord.Member):
     casino_banned_users.discard(membre.id)
     save_data()
     _log_moderation('casino_unban', membre, ctx.author)
+    await send_log_message(
+        ctx.guild, LOG_MODERATION_CHANNEL_ID, "✅ Casino unban",
+        f"{membre.mention} a de nouveau accès aux commandes casino (par {ctx.author.mention}).",
+        discord.Color.green(),
+    )
     await ctx.send(f"✅ {membre.mention} a de nouveau accès aux commandes casino.")
 
 
@@ -13606,6 +13682,10 @@ async def cmd_casino_pause(ctx):
     utile juste avant un déploiement pour ne pas couper une partie en cours. Voir !casino_resume."""
     global casino_paused
     casino_paused = True
+    await send_log_message(
+        ctx.guild, LOG_MODERATION_CHANNEL_ID, "⏸️ Casino en pause",
+        f"Casino mis en pause par {ctx.author.mention}.", discord.Color.orange(),
+    )
     await ctx.send("⏸️ **Casino en pause.** Plus aucune commande casino ne sera acceptée jusqu'à `!casino_resume`.")
 
 
@@ -13614,6 +13694,10 @@ async def cmd_casino_resume(ctx):
     """Annule un !casino_pause."""
     global casino_paused
     casino_paused = False
+    await send_log_message(
+        ctx.guild, LOG_MODERATION_CHANNEL_ID, "▶️ Casino relancé",
+        f"Casino relancé par {ctx.author.mention}.", discord.Color.green(),
+    )
     await ctx.send("▶️ **Casino relancé.** Les commandes casino sont de nouveau disponibles.")
 
 
