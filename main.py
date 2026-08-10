@@ -1474,16 +1474,25 @@ async def on_ready():
 
 
 # ── Liste des commandes toujours autorisées (anti-bricking) ──────────────
-ALWAYS_ALLOWED_CMDS = {'gestion', 'permission', 'cooldown', 'cd', 'aide'}
+# !permission retiré le 09/08/2026 : c'est justement l'outil qui accorde des
+# accès, donc elle doit suivre la même règle "propriétaire par défaut" que
+# le reste (voir ADMIN_LOCKED_CMDS ci-dessous) plutôt que rester ouverte à
+# n'importe quel admin Discord. !gestion reste ici : c'est le seul filet de
+# sécurité qui permet de réactiver une commande désactivée par erreur (dont
+# !permission elle-même), il doit rester accessible à tout admin sous peine
+# de bricker le bot si jamais gestion se retrouvait lui-même bloqué.
+ALWAYS_ALLOWED_CMDS = {'gestion', 'cooldown', 'cd', 'aide'}
 
-# ── Commandes sensibles : admin par défaut, sauf rôle explicitement autorisé via !perm ──
+# ── Commandes sensibles : réservées au propriétaire du serveur par défaut,
+# sauf rôle explicitement autorisé via !perm (décision du 09/08/2026 —
+# remplace l'ancien "tout admin Discord passe") ──
 ADMIN_LOCKED_CMDS = {
     'giveaway', 'cancelgiveaway', 'listgiveaways', 'gdt', 'prix_casino', 'ouvrir_course', 'lancer_course',
     'freeze_crypto', 'addcoins', 'removecoins', 'tournois', 'prix_tournoi',
     'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter', 'tournoi_deplacer',
     'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log',
     'ranked_sanction', 'ranked_ajuster', 'ranked_set', 'reset_casino', 'reset_duels', 'ranked_liberer',
-    'casino_ban', 'casino_unban', 'casino_pause', 'casino_resume', 'ticket_panel',
+    'casino_ban', 'casino_unban', 'casino_pause', 'casino_resume', 'ticket_panel', 'permission',
 }
 
 # ── Anti-macro casino : incident du 23/07/2026 (martingale rouge/noir via
@@ -7421,8 +7430,12 @@ class PermissionView(discord.ui.View):
 
 @bot.command(name="permission", aliases=["permissions", "perm"])
 async def cmd_permission(ctx):
-    if not (ctx.guild and ctx.author.guild_permissions.administrator) and not is_bot_owner(ctx.author):
-        return await ctx.send("❌ Réservé aux administrateurs ou au créateur du bot.")
+    # L'accès (propriétaire du serveur, ou rôle explicitement accordé via
+    # cette même commande) est déjà entièrement vérifié par
+    # _global_command_gate (voir ADMIN_LOCKED_CMDS) — un check ici en plus,
+    # basé sur guild_permissions.administrator, bloquerait à tort un membre
+    # qui a reçu l'accès via un rôle sans avoir la permission Discord
+    # Administrateur (décision du 09/08/2026).
     if not ctx.guild:
         return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
     await ctx.send(embed=_perm_embed(), view=PermissionView(ctx))
