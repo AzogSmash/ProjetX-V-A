@@ -12492,38 +12492,36 @@ async def cmd_classement_trophees_famille(ctx):
 
 
 async def _bs_evolution_current_entries():
-    """Calcule l'évolution en direct depuis le début de la saison Brawl Stars en cours
-    (season_start_date, borne posée par check_bs_season au 1er jeudi 10h heure de Paris).
-    La valeur de fin vient d'un appel API en direct (comme avant) ; la baseline de
-    début de saison vient de bs_season_baseline (figée au reset) quand elle
-    existe, sinon de bs_trophy_snapshots."""
+    """Calcule l'évolution depuis le début de la saison Brawl Stars en cours à
+    partir des données déjà synchronisées (comme /api/famille/evolution côté
+    site), plutôt que d'un appel API en direct par clan comme avant — un seul
+    clan injoignable au moment précis de l'appel faisait disparaître
+    silencieusement tous ses membres du résultat (constaté le 11/08/2026 :
+    2 clans sur 7 manquants du menu de filtre, sans message d'erreur clair).
+    Les données synchronisées sont rafraîchies toutes les heures
+    (sync_trophy_history) et la baseline de saison vient de bs_season_baseline
+    (figée au reset) — largement assez à jour, et ne dépend plus de la
+    disponibilité de l'API Brawl Stars au moment précis où la commande tourne."""
     state = db_bs.get_season_state()
     start_date = state['season_start_date'] or datetime.now(BS_SEASON_TZ).strftime('%Y-%m-%d')
-    baselines = db_bs.get_baselines_since(start_date, state['season_month'])
-    all_members, errors = [], []
-    for club in db_bs.list_family_clubs():
-        data, err = await _bs_fetch_club(club['tag'])
-        if err:
-            errors.append(f"`#{club['tag']}` : {err}")
-            continue
-        for m in data['members']:
-            if not m['tag']:
-                continue
-            baseline = baselines.get(m['tag'])
-            if not baseline:
-                continue  # membre connu mais aucun point depuis le début de la saison en cours
-            delta = m['trophies'] - baseline['trophies']
-            joined_note = None
-            if baseline['date'] != start_date:
-                d = baseline['date']
-                joined_note = f"depuis le {d[8:10]}/{d[5:7]}"
-            all_members.append({'name': m['name'], 'club': data['name'], 'delta': delta, 'joined_note': joined_note})
+    raw = db_bs.get_season_evolution(start_date, state['season_month'])
+
+    all_members = []
+    for e in raw:
+        joined_note = None
+        if e.get('joined_note'):
+            d = e['joined_note']
+            joined_note = f"depuis le {d[8:10]}/{d[5:7]}"
+        all_members.append({
+            'name': e['name'] or '?',
+            'club': e['club'] or '?',
+            'delta': e['delta'],
+            'joined_note': joined_note,
+        })
 
     all_members.sort(key=lambda m: m['delta'], reverse=True)
-    clubs = list(dict.fromkeys(m['club'] for m in all_members))
+    clubs = list(dict.fromkeys(m['club'] for m in all_members if m['club'] != '?'))
     note = "Depuis le début de la saison Brawl Stars en cours"
-    if errors:
-        note += f" · {len(errors)} clan(s) injoignable(s)"
     return all_members, clubs, note
 
 
