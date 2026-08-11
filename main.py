@@ -10883,13 +10883,85 @@ LOG_CATEGORY_VARS = {
     'giveaway':   'LOG_GIVEAWAY_CHANNEL_ID',
     'ticket':     'LOG_TICKET_CHANNEL_ID',
 }
+LOG_CATEGORY_EMOJIS = {
+    'admin': '🔐', 'moderation': '🛡️', 'casino': '🪙',
+    'general': '📋', 'giveaway': '🎉', 'ticket': '🎫',
+}
+
+
+class SetLogsView(discord.ui.View):
+    """Sélecteur de catégorie + sélecteur natif de salon Discord (aucune saisie manuelle) —
+    même esprit que les autres vues à sélecteurs du bot (ex. CooldownView)."""
+
+    def __init__(self, guild, category='admin'):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.category = category
+
+        cat_options = [
+            discord.SelectOption(
+                label=cat.capitalize(), value=cat,
+                emoji=LOG_CATEGORY_EMOJIS.get(cat), default=(cat == self.category)
+            )
+            for cat in LOG_CATEGORY_VARS
+        ]
+        self.cat_select = discord.ui.Select(placeholder="📋 Choisir une catégorie de log…", options=cat_options, row=0)
+        self.cat_select.callback = self._on_category
+        self.add_item(self.cat_select)
+
+        self.channel_select = discord.ui.ChannelSelect(
+            placeholder=f"Choisir le salon pour « {self.category} »…",
+            channel_types=[discord.ChannelType.text], row=1,
+        )
+        self.channel_select.callback = self._on_channel
+        self.add_item(self.channel_select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not (interaction.user.guild_permissions.administrator or is_bot_owner(interaction.user)):
+            await interaction.response.send_message("❌ Réservé aux admins/owner.", ephemeral=True)
+            return False
+        return True
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(title="📋 Configuration des salons de logs", color=0x3498db)
+        for cat, varname in LOG_CATEGORY_VARS.items():
+            cid = globals().get(varname)
+            ch = self.guild.get_channel(cid) if cid else None
+            marker = "👉 " if cat == self.category else ""
+            emoji = LOG_CATEGORY_EMOJIS.get(cat, '')
+            embed.add_field(
+                name=f"{marker}{emoji} {cat.capitalize()}",
+                value=ch.mention if ch else "*non configuré*",
+                inline=True,
+            )
+        embed.set_footer(text="Choisis une catégorie, puis un salon dans les menus ci-dessous.")
+        return embed
+
+    async def _on_category(self, interaction: discord.Interaction):
+        view = SetLogsView(self.guild, self.cat_select.values[0])
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    async def _on_channel(self, interaction: discord.Interaction):
+        channel = self.channel_select.values[0]
+        globals()[LOG_CATEGORY_VARS[self.category]] = channel.id
+        save_data()
+        view = SetLogsView(self.guild, self.category)
+        await interaction.response.edit_message(
+            content=f"✅ Logs **{self.category}** configurés dans <#{channel.id}>.",
+            embed=view.build_embed(), view=view,
+        )
+
 
 @bot.command(name="set_logs", aliases=["logs_config"])
 async def cmd_set_logs(ctx, categorie: str = None, channel: discord.TextChannel = None):
-    if categorie is None or categorie.lower() not in LOG_CATEGORY_VARS and categorie.lower() != 'liste':
+    if categorie is None:
+        view = SetLogsView(ctx.guild)
+        return await ctx.send(embed=view.build_embed(), view=view)
+
+    if categorie.lower() not in LOG_CATEGORY_VARS and categorie.lower() != 'liste':
         cats = ", ".join(f"`{c}`" for c in LOG_CATEGORY_VARS)
         return await ctx.send(
-            f"**Usage :** `!set_logs <catégorie> [#salon]` ou `!set_logs liste`\n"
+            f"**Usage :** `!set_logs` (menus interactifs) · `!set_logs <catégorie> [#salon]` · `!set_logs liste`\n"
             f"Catégories : {cats}\n"
             f"Sans `#salon`, utilise le salon actuel."
         )
