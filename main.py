@@ -350,7 +350,8 @@ bs_role_config   = {'trophies': {}, 'ranked': {}}  # 'trophies': {str(min): role
 # officielle à chaque sync_trophy_history (toutes les heures), donc une valeur périmée
 # après un redémarrage n'a aucun intérêt à être gardée sur disque.
 bs_family_club_details = {}
-ADMIN_LOG_CHANNEL_ID = 1528513026691563540  # écrasé par load_data() si !set_admin_log a déjà été utilisé
+ADMIN_LOG_CHANNEL_ID = 1528513026691563540  # écrasé par load_data() si !set_admin_log/!set_logs a déjà été utilisé
+CASINO_LOG_CHANNEL_ID = None  # pas de salon dédié par défaut — à configurer via !set_logs casino
 draft_sessions       = {}   # channel_id -> session dict (phase de ban Brawl Stars)
 theft_stats           = {}   # str(uid_victim) -> {'attempts': int, 'success': int}
 snipe_cache           = {}   # channel_id -> [{'author', 'content', 'at', 'attachments'}, ...]
@@ -1067,6 +1068,7 @@ def load_data():
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments, casino_banned_users
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
+    global CASINO_LOG_CHANNEL_ID, LOG_MODERATION_CHANNEL_ID, LOG_GIVEAWAY_CHANNEL_ID, LOG_GENERAL_CHANNEL_ID, LOG_TICKET_CHANNEL_ID
     global bs_accounts, bs_role_config
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
@@ -1181,6 +1183,11 @@ def load_data():
                 # Défaut le 11/08/2026 : salon de logs unifié, tant que !set_admin_log
                 # n'a jamais été utilisé pour pointer ailleurs explicitement.
                 ADMIN_LOG_CHANNEL_ID = data.get('admin_log_channel_id', 1528513026691563540)
+                CASINO_LOG_CHANNEL_ID     = data.get('casino_log_channel_id')
+                LOG_MODERATION_CHANNEL_ID = data.get('log_moderation_channel_id', LOG_MODERATION_CHANNEL_ID)
+                LOG_GIVEAWAY_CHANNEL_ID   = data.get('log_giveaway_channel_id', LOG_GIVEAWAY_CHANNEL_ID)
+                LOG_GENERAL_CHANNEL_ID    = data.get('log_general_channel_id', LOG_GENERAL_CHANNEL_ID)
+                LOG_TICKET_CHANNEL_ID     = data.get('log_ticket_channel_id', LOG_TICKET_CHANNEL_ID)
                 # punitions/morse_punitions : voir incident du 21/07/2026, un redémarrage en
                 # pleine punition laissait le membre bloqué dans tous les salons (les
                 # restrictions Discord survivent au redémarrage, mais plus le dict en mémoire
@@ -1374,6 +1381,11 @@ def save_data(force: bool = False):
     data_to_save['crypto_hold_since']     = crypto_hold_since
     data_to_save['cold_wallets']         = cold_wallets
     data_to_save['admin_log_channel_id'] = ADMIN_LOG_CHANNEL_ID
+    data_to_save['casino_log_channel_id'] = CASINO_LOG_CHANNEL_ID
+    data_to_save['log_moderation_channel_id'] = LOG_MODERATION_CHANNEL_ID
+    data_to_save['log_giveaway_channel_id']   = LOG_GIVEAWAY_CHANNEL_ID
+    data_to_save['log_general_channel_id']    = LOG_GENERAL_CHANNEL_ID
+    data_to_save['log_ticket_channel_id']     = LOG_TICKET_CHANNEL_ID
     data_to_save['punitions']       = punitions
     data_to_save['morse_punitions'] = morse_punitions
     data_to_save['moderation_log']  = moderation_log
@@ -1644,7 +1656,7 @@ ADMIN_LOCKED_CMDS = {
     'giveaway', 'cancelgiveaway', 'listgiveaways', 'gdt', 'prix_casino', 'ouvrir_course', 'lancer_course',
     'freeze_crypto', 'addcoins', 'removecoins', 'tournois', 'prix_tournoi',
     'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter', 'tournoi_deplacer',
-    'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log',
+    'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log', 'set_logs',
     'ranked_sanction', 'ranked_ajuster', 'ranked_set', 'reset_casino', 'reset_duels', 'ranked_liberer',
     'casino_ban', 'casino_unban', 'casino_pause', 'casino_resume', 'ticket_panel', 'permission',
 }
@@ -2011,6 +2023,8 @@ def _build_help_categories(ctx):
                      "`!tournoi_ajouter @m [équipe]` / `!tournoi_retirer @m` — Gérer les inscrits\n"
                      "`!tournoi_deplacer #salon` — Déplacer le tableau du tournoi\n"
                      "`!set_admin_log #salon` (`!admin_log`) — Logs admin\n"
+                     "`!set_logs <catégorie> [#salon]` (`!logs_config`) — Choisir le salon par type de log "
+                     "(`admin`/`moderation`/`casino`/`general`/`giveaway`/`ticket`) · `!set_logs liste` pour voir la config\n"
                      "`!lock` / `!unlock` — Verrouiller un salon\n"
                      "`!commandes_admin` — Index complet des commandes admin/modération\n"
                      "\n**Ranked 1v1 :**\n"
@@ -8877,7 +8891,7 @@ async def cmd_addcoins(ctx, member: discord.Member, amount: int, compte: str = "
         embed = discord.Embed(title="⚙️ Modification du coffre", color=0x3498db,
             description=f"**{abs(amount):,} coins** {verb} coffre de {member.mention}.\n🔒 Nouveau solde coffre : **{safes[uid]:,} coins**")
         await ctx.send(embed=embed)
-        await _admin_log(ctx.guild, "addcoins (coffre)",
+        await _casino_log(ctx.guild, "addcoins (coffre)",
             f"{member.mention} : **{amount:+,} coins** (coffre) → solde {safes[uid]:,}", author=ctx.author)
         return
     coins[member.id] += amount
@@ -8886,7 +8900,7 @@ async def cmd_addcoins(ctx, member: discord.Member, amount: int, compte: str = "
     embed = discord.Embed(title="⚙️ Modification de coins", color=0x3498db,
         description=f"**{abs(amount):,} coins** {verb} {member.mention}.\n💰 Nouveau solde : **{coins[member.id]:,} coins**")
     await ctx.send(embed=embed)
-    await _admin_log(ctx.guild, "addcoins",
+    await _casino_log(ctx.guild, "addcoins",
         f"{member.mention} : **+{amount:,} coins** → solde {coins[member.id]:,}", author=ctx.author)
 
 @bot.command(name="removecoins", aliases=["rmc", "remove_coins", "delcoins"])
@@ -8902,7 +8916,7 @@ async def cmd_removecoins(ctx, member: discord.Member, amount: int, compte: str 
         embed = discord.Embed(title="⚙️ Modification du coffre", color=0xe74c3c,
             description=f"**{taken:,} coins** retirés du coffre de {member.mention}.\n🔒 Nouveau solde coffre : **{safes[uid]:,} coins**")
         await ctx.send(embed=embed)
-        await _admin_log(ctx.guild, "removecoins (coffre)",
+        await _casino_log(ctx.guild, "removecoins (coffre)",
             f"{member.mention} : **-{taken:,} coins** (coffre) → solde {safes[uid]:,}", author=ctx.author)
         return
     taken = min(amount, coins[member.id])
@@ -8911,7 +8925,7 @@ async def cmd_removecoins(ctx, member: discord.Member, amount: int, compte: str 
     embed = discord.Embed(title="⚙️ Modification de coins", color=0xe74c3c,
         description=f"**{taken:,} coins** retirés de {member.mention}.\n💰 Nouveau solde : **{coins[member.id]:,} coins**")
     await ctx.send(embed=embed)
-    await _admin_log(ctx.guild, "removecoins",
+    await _casino_log(ctx.guild, "removecoins",
         f"{member.mention} : **-{taken:,} coins** → solde {coins[member.id]:,}", author=ctx.author)
 
 
@@ -8929,7 +8943,7 @@ async def _apply_casino_pause(actor_id: int | None = None) -> bool:
     if guild:
         actor = guild.get_member(actor_id) if actor_id else None
         await send_log_message(
-            guild, LOG_MODERATION_CHANNEL_ID, "⏸️ Casino en pause",
+            guild, CASINO_LOG_CHANNEL_ID, "⏸️ Casino en pause",
             f"Casino mis en pause par {actor.mention if actor else 'le panel admin du site'}.",
             discord.Color.orange(),
         )
@@ -8943,7 +8957,7 @@ async def _apply_casino_resume(actor_id: int | None = None) -> bool:
     if guild:
         actor = guild.get_member(actor_id) if actor_id else None
         await send_log_message(
-            guild, LOG_MODERATION_CHANNEL_ID, "▶️ Casino relancé",
+            guild, CASINO_LOG_CHANNEL_ID, "▶️ Casino relancé",
             f"Casino relancé par {actor.mention if actor else 'le panel admin du site'}.",
             discord.Color.green(),
         )
@@ -8957,7 +8971,7 @@ async def _apply_casino_ban(guild, target_id: int, actor_id: int, reason: str | 
     if member and actor:
         _log_moderation('casino_ban', member, actor, reason=reason)
         await send_log_message(
-            guild, LOG_MODERATION_CHANNEL_ID, "🚫 Casino ban",
+            guild, CASINO_LOG_CHANNEL_ID, "🚫 Casino ban",
             f"{member.mention} n'a plus accès aux commandes casino (par {actor.mention})." + (f"\nRaison : {reason}" if reason else ""),
             discord.Color.dark_red(),
         )
@@ -8971,7 +8985,7 @@ async def _apply_casino_unban(guild, target_id: int, actor_id: int) -> dict:
     if member and actor:
         _log_moderation('casino_unban', member, actor)
         await send_log_message(
-            guild, LOG_MODERATION_CHANNEL_ID, "✅ Casino unban",
+            guild, CASINO_LOG_CHANNEL_ID, "✅ Casino unban",
             f"{member.mention} a de nouveau accès aux commandes casino (par {actor.mention}).",
             discord.Color.green(),
         )
@@ -9016,7 +9030,7 @@ async def _apply_coins_adjust(guild, target_id: int, actor_id: int, amount: int,
 
     if actor:
         label = ("addcoins" if amount >= 0 else "removecoins") + (" (coffre)" if is_safe else "")
-        await _admin_log(guild, label, f"{member.mention} : **{amount:+,} coins** → solde {new_balance:,}", author=actor)
+        await _casino_log(guild, label, f"{member.mention} : **{amount:+,} coins** → solde {new_balance:,}", author=actor)
     return {"ok": True, "balance": new_balance}
 
 
@@ -10850,7 +10864,7 @@ async def cmd_classement_tournoi(ctx):
     await ctx.send(embed=embed)
 
 
-# ── Config salon logs admin ───────────────────────────────────────────────
+# ── Config salons de logs ─────────────────────────────────────────────────
 @bot.command(name="set_admin_log", aliases=["admin_log"])
 async def cmd_set_admin_log(ctx, channel: discord.TextChannel = None):
     global ADMIN_LOG_CHANNEL_ID
@@ -10861,6 +10875,41 @@ async def cmd_set_admin_log(ctx, channel: discord.TextChannel = None):
     await ctx.send(f"✅ Logs admin configurés dans {channel.mention}.")
 
 
+LOG_CATEGORY_VARS = {
+    'admin':      'ADMIN_LOG_CHANNEL_ID',
+    'moderation': 'LOG_MODERATION_CHANNEL_ID',
+    'casino':     'CASINO_LOG_CHANNEL_ID',
+    'general':    'LOG_GENERAL_CHANNEL_ID',
+    'giveaway':   'LOG_GIVEAWAY_CHANNEL_ID',
+    'ticket':     'LOG_TICKET_CHANNEL_ID',
+}
+
+@bot.command(name="set_logs", aliases=["logs_config"])
+async def cmd_set_logs(ctx, categorie: str = None, channel: discord.TextChannel = None):
+    if categorie is None or categorie.lower() not in LOG_CATEGORY_VARS and categorie.lower() != 'liste':
+        cats = ", ".join(f"`{c}`" for c in LOG_CATEGORY_VARS)
+        return await ctx.send(
+            f"**Usage :** `!set_logs <catégorie> [#salon]` ou `!set_logs liste`\n"
+            f"Catégories : {cats}\n"
+            f"Sans `#salon`, utilise le salon actuel."
+        )
+    categorie = categorie.lower()
+
+    if categorie == 'liste':
+        lines = []
+        for cat, varname in LOG_CATEGORY_VARS.items():
+            cid = globals().get(varname)
+            ch = ctx.guild.get_channel(cid) if (ctx.guild and cid) else None
+            lines.append(f"**{cat}** : {ch.mention if ch else '*non configuré*'}")
+        return await ctx.send("📋 **Salons de logs configurés :**\n" + "\n".join(lines))
+
+    if channel is None:
+        channel = ctx.channel
+    globals()[LOG_CATEGORY_VARS[categorie]] = channel.id
+    save_data()
+    await ctx.send(f"✅ Logs **{categorie}** configurés dans {channel.mention}.")
+
+
 async def _admin_log(guild, title: str, description: str, color=0xe74c3c, author: discord.Member = None):
     if not ADMIN_LOG_CHANNEL_ID:
         return
@@ -10868,6 +10917,24 @@ async def _admin_log(guild, title: str, description: str, color=0xe74c3c, author
     if not ch:
         return
     embed = discord.Embed(title=f"🔐 {title}", description=description, color=color, timestamp=discord.utils.utcnow())
+    if author:
+        embed.set_footer(text=f"Par {author.display_name} ({author.id})", icon_url=author.display_avatar.url)
+    try:
+        await ch.send(embed=embed)
+    except Exception:
+        pass
+
+
+async def _casino_log(guild, title: str, description: str, color=0x2ecc71, author: discord.Member = None):
+    """Même mécanique que _admin_log, mais dans le salon casino dédié (!set_logs casino).
+    Si non configuré, ne fait rien (pas de fallback silencieux vers admin — évite de mélanger
+    les deux catégories tant que l'admin n'a pas explicitement choisi un salon)."""
+    if not CASINO_LOG_CHANNEL_ID:
+        return
+    ch = guild.get_channel(CASINO_LOG_CHANNEL_ID)
+    if not ch:
+        return
+    embed = discord.Embed(title=f"🪙 {title}", description=description, color=color, timestamp=discord.utils.utcnow())
     if author:
         embed.set_footer(text=f"Par {author.display_name} ({author.id})", icon_url=author.display_avatar.url)
     try:
@@ -13557,7 +13624,7 @@ async def cmd_casino_ban(ctx, membre: discord.Member, *, raison: str = None):
     save_data()
     _log_moderation('casino_ban', membre, ctx.author, reason=raison)
     await send_log_message(
-        ctx.guild, LOG_MODERATION_CHANNEL_ID, "🚫 Casino ban",
+        ctx.guild, CASINO_LOG_CHANNEL_ID, "🚫 Casino ban",
         f"{membre.mention} n'a plus accès aux commandes casino (par {ctx.author.mention})." + (f"\nRaison : {raison}" if raison else ""),
         discord.Color.dark_red(),
     )
@@ -13573,7 +13640,7 @@ async def cmd_casino_unban(ctx, membre: discord.Member):
     save_data()
     _log_moderation('casino_unban', membre, ctx.author)
     await send_log_message(
-        ctx.guild, LOG_MODERATION_CHANNEL_ID, "✅ Casino unban",
+        ctx.guild, CASINO_LOG_CHANNEL_ID, "✅ Casino unban",
         f"{membre.mention} a de nouveau accès aux commandes casino (par {ctx.author.mention}).",
         discord.Color.green(),
     )
@@ -13683,7 +13750,7 @@ async def cmd_casino_pause(ctx):
     global casino_paused
     casino_paused = True
     await send_log_message(
-        ctx.guild, LOG_MODERATION_CHANNEL_ID, "⏸️ Casino en pause",
+        ctx.guild, CASINO_LOG_CHANNEL_ID, "⏸️ Casino en pause",
         f"Casino mis en pause par {ctx.author.mention}.", discord.Color.orange(),
     )
     await ctx.send("⏸️ **Casino en pause.** Plus aucune commande casino ne sera acceptée jusqu'à `!casino_resume`.")
@@ -13695,7 +13762,7 @@ async def cmd_casino_resume(ctx):
     global casino_paused
     casino_paused = False
     await send_log_message(
-        ctx.guild, LOG_MODERATION_CHANNEL_ID, "▶️ Casino relancé",
+        ctx.guild, CASINO_LOG_CHANNEL_ID, "▶️ Casino relancé",
         f"Casino relancé par {ctx.author.mention}.", discord.Color.green(),
     )
     await ctx.send("▶️ **Casino relancé.** Les commandes casino sont de nouveau disponibles.")
