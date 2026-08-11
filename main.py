@@ -44,6 +44,7 @@ def _format_ranked_updated_at(iso_ts: str | None) -> str | None:
 LOG_MODERATION_CHANNEL_ID = 1528513026691563540
 LOG_GIVEAWAY_CHANNEL_ID = 1528513026691563540
 LOG_GENERAL_CHANNEL_ID = 1528513026691563540
+LEAVE_LOG_CHANNEL_ID = 1513110805707620405  # salon staff uniquement — rapport de départ détaillé
 BRAWLSTARS_API_KEY = (os.getenv("BRAWLSTARS_API_KEY") or "").strip() or None
 
 # ── Système de tickets maison (remplace tickets.bot) ──
@@ -1069,6 +1070,7 @@ def load_data():
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments, casino_banned_users
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
     global CASINO_LOG_CHANNEL_ID, LOG_MODERATION_CHANNEL_ID, LOG_GIVEAWAY_CHANNEL_ID, LOG_GENERAL_CHANNEL_ID, LOG_TICKET_CHANNEL_ID
+    global LEAVE_LOG_CHANNEL_ID
     global bs_accounts, bs_role_config
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
@@ -1188,6 +1190,7 @@ def load_data():
                 LOG_GIVEAWAY_CHANNEL_ID   = data.get('log_giveaway_channel_id', LOG_GIVEAWAY_CHANNEL_ID)
                 LOG_GENERAL_CHANNEL_ID    = data.get('log_general_channel_id', LOG_GENERAL_CHANNEL_ID)
                 LOG_TICKET_CHANNEL_ID     = data.get('log_ticket_channel_id', LOG_TICKET_CHANNEL_ID)
+                LEAVE_LOG_CHANNEL_ID      = data.get('leave_log_channel_id', LEAVE_LOG_CHANNEL_ID)
                 # punitions/morse_punitions : voir incident du 21/07/2026, un redémarrage en
                 # pleine punition laissait le membre bloqué dans tous les salons (les
                 # restrictions Discord survivent au redémarrage, mais plus le dict en mémoire
@@ -1386,6 +1389,7 @@ def save_data(force: bool = False):
     data_to_save['log_giveaway_channel_id']   = LOG_GIVEAWAY_CHANNEL_ID
     data_to_save['log_general_channel_id']    = LOG_GENERAL_CHANNEL_ID
     data_to_save['log_ticket_channel_id']     = LOG_TICKET_CHANNEL_ID
+    data_to_save['leave_log_channel_id']      = LEAVE_LOG_CHANNEL_ID
     data_to_save['punitions']       = punitions
     data_to_save['morse_punitions'] = morse_punitions
     data_to_save['moderation_log']  = moderation_log
@@ -2188,6 +2192,128 @@ async def on_member_join(member):
             ("Erreur", "Le rôle 'Membre' n'existe pas.", False)
         ]
         await send_log_message(guild, LOG_GENERAL_CHANNEL_ID, "⚠️ Rôle Manquant", "Le rôle 'Membre' n'a pas été trouvé pour l'attribution automatique.", discord.Color.dark_orange(), fields)
+
+
+def _human_duration(delta: timedelta) -> str:
+    days = delta.days
+    if days >= 365:
+        y, r = divmod(days, 365)
+        return f"{y} an{'s' if y > 1 else ''}" + (f" et {r // 30} mois" if r >= 30 else "")
+    if days >= 30:
+        m, r = divmod(days, 30)
+        return f"{m} mois" + (f" et {r} jour{'s' if r > 1 else ''}" if r else "")
+    if days >= 1:
+        return f"{days} jour{'s' if days > 1 else ''}"
+    h = delta.seconds // 3600
+    return f"{h}h" if h else "moins d'1h"
+
+
+async def _departure_reason(guild, member):
+    """Consulte les logs d'audit pour distinguer un départ volontaire d'un kick/ban —
+    marche que l'action ait été faite via le bot ou manuellement dans Discord, puisque
+    Discord crée l'entrée d'audit log dans les deux cas. Un petit délai avant de lire
+    laisse le temps à l'entrée de se propager. Retourne (résumé: str, couleur: discord.Color)."""
+    await asyncio.sleep(1.5)
+    try:
+        async for entry in guild.audit_logs(limit=5):
+            if not entry.target or entry.target.id != member.id:
+                continue
+            if (discord.utils.utcnow() - entry.created_at).total_seconds() > 20:
+                continue
+            mod = entry.user.display_name if entry.user else "modérateur inconnu"
+            if entry.action == discord.AuditLogAction.ban:
+                txt = f"🔨 **Banni** par {mod}"
+                return (txt + (f"\nRaison : {entry.reason}" if entry.reason else ""), discord.Color.dark_red())
+            if entry.action == discord.AuditLogAction.kick:
+                txt = f"👢 **Expulsé (kick)** par {mod}"
+                return (txt + (f"\nRaison : {entry.reason}" if entry.reason else ""), discord.Color.orange())
+    except discord.Forbidden:
+        return ("❓ Inconnu — le bot n'a pas la permission « Voir les journaux d'audit »", discord.Color.dark_grey())
+    except Exception:
+        pass
+    return ("🚪 Parti de lui-même (aucun kick/ban trouvé dans les logs d'audit)", discord.Color.dark_grey())
+
+
+@bot.event
+async def on_member_remove(member):
+    """Log de départ détaillé (salon staff uniquement, LEAVE_LOG_CHANNEL_ID) — utilise
+    volontairement le pseudo en texte brut (member.name / member.display_name), jamais
+    member.mention : une fois le membre parti, Discord ne peut plus résoudre le mention
+    côté client et affiche "utilisateur inconnu" à la place (le défaut qu'on voulait
+    justement éviter par rapport à ProBot). Regroupe aussi tout ce qu'on a sur lui côté
+    bot (modération, 1v1 classé, compte Brawl Stars lié) en plus des infos Discord.
+    Note : Discord ne distingue pas un ban/kick "temporaire" nativement — ce bot n'a pas
+    non plus de système de tempban/tempkick, donc impossible à détecter pour l'instant."""
+    if member.bot:
+        return
+    guild = member.guild
+    now = discord.utils.utcnow()
+
+    created_str = member.created_at.strftime('%d/%m/%Y')
+    compte_age = _human_duration(now - member.created_at)
+
+    if member.joined_at:
+        joined_str = member.joined_at.strftime('%d/%m/%Y à %Hh%M')
+        duree_serveur = _human_duration(now - member.joined_at)
+    else:
+        joined_str, duree_serveur = "inconnue", "inconnue"
+
+    role_names = [r.name for r in member.roles if r.name != "@everyone"]
+    roles_str = ", ".join(role_names) if role_names else "Aucun"
+    if len(roles_str) > 1000:
+        roles_str = roles_str[:1000] + "…"
+
+    bs_link = bs_accounts.get(str(member.id))
+    bs_str = f"`#{bs_link['tag']}` — {bs_link.get('trophies', 0):,} 🏆" if bs_link else "Non lié"
+
+    guild_warns = warns.get(guild.id, {}).get(member.id, [])
+    nb_warns = len(guild_warns)
+    is_muted = guild.id in mutes and member.id in mutes.get(guild.id, {})
+
+    r1v1 = ranked_1v1.get(str(member.id))
+    if r1v1 and (r1v1.get('wins', 0) or r1v1.get('losses', 0)):
+        r1v1_str = f"{r1v1.get('points', 0)} pts ({_r1v1_tier_name(r1v1.get('points', 0))}) — {r1v1.get('wins', 0)}V/{r1v1.get('losses', 0)}D"
+    else:
+        r1v1_str = "N'a jamais joué"
+
+    boost_str = "Oui" if member.premium_since else "Non"
+
+    reason_str, color = await _departure_reason(guild, member)
+
+    fields = [
+        ("Comment il/elle est parti(e)", reason_str, False),
+        ("Membre", f"{member.display_name} (`{member.name}`)", True),
+        ("ID", f"`{member.id}`", True),
+        ("Compte Discord créé le", f"{created_str}\n({compte_age})", True),
+        ("Arrivé sur le serveur le", joined_str, True),
+        ("Temps passé sur le serveur", duree_serveur, True),
+        ("Boost serveur", boost_str, True),
+        ("Rôles au départ", roles_str, False),
+        ("Modération", f"{nb_warns} avertissement(s)" + (" · actuellement mute" if is_muted else ""), True),
+        ("1v1 classé", r1v1_str, True),
+        ("Compte Brawl Stars lié", bs_str, True),
+    ]
+
+    ch = guild.get_channel(LEAVE_LOG_CHANNEL_ID) if LEAVE_LOG_CHANNEL_ID else None
+    if not ch:
+        return
+    embed = discord.Embed(
+        title="👋 Départ d'un membre",
+        description=f"**{member.display_name}** (`{member.name}`) n'est plus sur le serveur.",
+        color=color,
+        timestamp=now,
+    )
+    for name, value, inline in fields:
+        embed.add_field(name=name, value=value, inline=inline)
+    try:
+        embed.set_thumbnail(url=member.display_avatar.url)
+    except Exception:
+        pass
+    try:
+        await ch.send(embed=embed)
+    except Exception:
+        pass
+
 
 @bot.event
 async def on_message_delete(message):
@@ -10882,10 +11008,11 @@ LOG_CATEGORY_VARS = {
     'general':    'LOG_GENERAL_CHANNEL_ID',
     'giveaway':   'LOG_GIVEAWAY_CHANNEL_ID',
     'ticket':     'LOG_TICKET_CHANNEL_ID',
+    'depart':     'LEAVE_LOG_CHANNEL_ID',
 }
 LOG_CATEGORY_EMOJIS = {
     'admin': '🔐', 'moderation': '🛡️', 'casino': '🪙',
-    'general': '📋', 'giveaway': '🎉', 'ticket': '🎫',
+    'general': '📋', 'giveaway': '🎉', 'ticket': '🎫', 'depart': '👋',
 }
 
 
