@@ -1474,8 +1474,6 @@ async def send_log_message(guild, channel_id, title, description, color, fields=
                 value = str(value)
             embed.add_field(name=name, value=value, inline=inline)
 
-    embed.set_footer(text=f"Bot ID: {bot.user.id}")
-
     try:
         await log_channel.send(embed=embed)
     except discord.Forbidden:
@@ -2283,7 +2281,6 @@ async def on_member_remove(member):
     fields = [
         ("Comment il/elle est parti(e)", reason_str, False),
         ("Membre", f"{member.display_name} (`{member.name}`)", True),
-        ("ID", f"`{member.id}`", True),
         ("Compte Discord créé le", f"{created_str}\n({compte_age})", True),
         ("Arrivé sur le serveur le", joined_str, True),
         ("Temps passé sur le serveur", duree_serveur, True),
@@ -2780,7 +2777,6 @@ async def _apply_ban(guild, target_id: int, actor_id: int, reason: str | None) -
 
     fields = [
         ("Utilisateur banni", member.mention, True),
-        ("ID Utilisateur", member.id, True),
         ("Modérateur", actor.mention if actor else "Admin (site)", True),
         ("Raison", reason if reason else "Non spécifiée", False),
     ]
@@ -3868,7 +3864,6 @@ async def ban(ctx, member: discord.Member, *, reason=None):
 
         fields = [
             ("Utilisateur banni", member.mention, True),
-            ("ID Utilisateur", member.id, True),
             ("Modérateur", ctx.author.mention, True),
             ("Raison", reason if reason else "Non spécifiée", False)
         ]
@@ -3896,10 +3891,9 @@ async def unban(ctx, *, member_id: int):
 
             fields = [
                 ("Utilisateur débanni", unbanned_user.mention, True),
-                ("ID Utilisateur", unbanned_user.id, True),
                 ("Modérateur", ctx.author.mention, True)
             ]
-            await send_log_message(ctx.guild, LOG_MODERATION_CHANNEL_ID, "✅ Membre Débanni", f"{unbanned_user.mention} (ID: {member_id}) a été débanni par {ctx.author.mention}.", discord.Color.green(), fields)
+            await send_log_message(ctx.guild, LOG_MODERATION_CHANNEL_ID, "✅ Membre Débanni", f"{unbanned_user.mention} a été débanni par {ctx.author.mention}.", discord.Color.green(), fields)
         except discord.Forbidden:
             await ctx.send("❌ Je n'ai pas la permission de débannir cet utilisateur.")
         except Exception as e:
