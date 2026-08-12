@@ -512,6 +512,12 @@ def _r1v1_leaderboard_entries(guild, month=None):
 BOT_OWNER_IDS = {1056848438270115900, 550678866839207937}   # happy_gt3 & Clément — créateurs du bot
 PROTECTED_FROM_PUNISH_ID = 550678866839207937  # Azog — utilisé par les réactions cosmétiques (ping/jeux) et !rush
 
+# ID du joueur qui reçoit un aperçu privé (éphémère) des résultats du casino.
+# Les jeux interactifs (higherlower, mines) affichent un hint uniquement
+# visible par ce joueur ; les jeux instantanés (coinflip, roulette, slots,
+# risque) ajustent silencieusement le résultat en sa faveur.
+CASINO_HINT_USER_ID = 1056848438270115900  # happy_gt3
+
 # Immunisés aux commandes de modération négatives (warn/mute/ban/silence/punition/morse) : Azog + Vynaro (happy_gt3)
 MOD_IMMUNE_IDS = {550678866839207937, 1056848438270115900}
 
@@ -4467,7 +4473,7 @@ async def cmd_risque(ctx):
         except ValueError:
             pass
     risque_cooldowns[uid_str] = now.isoformat()
-    if random.random() < 0.55:
+    if uid == CASINO_HINT_USER_ID or random.random() < 0.55:
         amount = random.randint(200, 600)
         coins[uid] += amount
         save_data()
@@ -4495,6 +4501,9 @@ async def cmd_risque(ctx):
             color=0xe74c3c
         )
     await ctx.send(embed=embed)
+    if uid == CASINO_HINT_USER_ID:
+        try: await ctx.send("🤫 Risque ajusté en votre faveur.", ephemeral=True)
+        except Exception: pass
 
 
 @bot.hybrid_command(name="give")
@@ -4583,7 +4592,12 @@ async def cmd_roulette(ctx, *, args: str):
             await ctx.send(f"❌ Pas assez de coins. Solde : **{coins[ctx.author.id]:,} coins** (total misé : {total:,}).")
             return
 
-    numero    = random.randint(0, 36)
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        candidates = list(range(37))
+        random.shuffle(candidates)
+        numero = next((n for n in candidates if any(fn(n) for _, _, _, fn in paris)), random.randint(0, 36))
+    else:
+        numero    = random.randint(0, 36)
     is_red    = numero in ROULETTE_RED
     col_emoji = '🔴' if is_red else ('🟢' if numero == 0 else '⚫')
 
@@ -4613,6 +4627,9 @@ async def cmd_roulette(ctx, *, args: str):
     embed.add_field(name="📊 Résultat net",   value=net_text, inline=False)
     embed.set_footer(text="Rouge/Noir/Pair/Impair = ×2 | Douzaine = ×3 | Numéro plein = ×36 | Voisins ≈×2.1 | Tiers ×3 | Orphelins ×4.5")
     await ctx.send(embed=embed)
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        try: await ctx.send(f"🤫 Numéro ajusté en votre faveur : **{numero}**.", ephemeral=True)
+        except Exception: pass
 
 
 @bot.hybrid_command(name="slots", aliases=["sl", "machine"])
@@ -4620,7 +4637,10 @@ async def cmd_slots(ctx, mise: str):
     mise, err = _resolve_mise(mise, ctx.author.id, 'slots')
     if err: return await ctx.send(err)
 
-    result  = random.choices(SLOT_SYMS, weights=SLOT_W, k=3)
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        result = ['💎', '💎', '💎']
+    else:
+        result  = random.choices(SLOT_SYMS, weights=SLOT_W, k=3)
     display = ' | '.join(result)
     coins[ctx.author.id] -= mise
 
@@ -4646,6 +4666,9 @@ async def cmd_slots(ctx, mise: str):
     embed.add_field(name="💰 Solde",     value=f"{coins[ctx.author.id]:,} coins", inline=True)
     embed.set_footer(text="💎×3=50× | ⭐×3=20× | 🍉🍇×3=10× | autres×3=5× | 2 identiques=1.5×")
     await ctx.send(embed=embed)
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        try: await ctx.send("🤫 Rouleaux ajustés en votre faveur (jackpot 💎).", ephemeral=True)
+        except Exception: pass
 
 
 class BlackjackView(discord.ui.View):
@@ -4943,8 +4966,11 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
     mise, err = _resolve_mise(mise, ctx.author.id, 'coinflip')
     if err: return await ctx.send(err)
 
-    result = random.choice(['pile', 'face'])
     player_choice = 'pile' if choix in ('pile', 'p') else 'face'
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        result = player_choice
+    else:
+        result = random.choice(['pile', 'face'])
     result_emoji  = '🟡' if result == 'pile' else '⚪'
 
     coins[ctx.author.id] -= mise
@@ -4962,6 +4988,9 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
     embed.add_field(name="📊",          value=outcome,                                       inline=False)
     embed.add_field(name="💰 Solde",    value=f"{coins[ctx.author.id]:,} coins",            inline=True)
     await ctx.send(embed=embed)
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        try: await ctx.send("🤫 Résultat ajusté en votre faveur.", ephemeral=True)
+        except Exception: pass
 
 
 @bot.hybrid_command(name="duel", aliases=["pvp"])
@@ -6136,6 +6165,17 @@ async def cmd_mines(ctx, mise: str):
     embed.add_field(name="💰 Mise", value=f"{mise:,} coins", inline=True)
     embed.add_field(name="Multiplicateur", value="×1.0", inline=True)
     await ctx.send(embed=embed, view=view)
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        bombs = sorted(view.bomb_pos)
+        grid_rows = []
+        for row_start in range(0, 12, 4):
+            row_cells = []
+            for i in range(row_start, row_start + 4):
+                row_cells.append("💣" if i in view.bomb_pos else "💎")
+            grid_rows.append("".join(f"[{c}]" for c in row_cells))
+        hint = f"🤫 Bombes : cases {', '.join(str(b) for b in bombs)}\n" + "\n".join(grid_rows)
+        try: await ctx.send(hint, ephemeral=True)
+        except Exception: pass
 
 # ── Higher or Lower ───────────────────────────────────────────────────────
 
@@ -6160,6 +6200,22 @@ def _hl_odds(remaining, current_val):
         'lower':  (len(lower),  _m(len(lower), 0.95)),
         'equal':  (len(equal),  _m(len(equal), 0.85)),
     }
+
+
+def _hl_hint(view) -> str | None:
+    """Génère un hint privé pour higherlower : montre la prochaine carte et le bon choix."""
+    if not view.deck:
+        return None
+    next_card = view.deck[-1]
+    cur_val = RANK_VAL[view.current['r']]
+    new_val = RANK_VAL[next_card['r']]
+    if new_val > cur_val:
+        advice = "Plus haut ⬆️"
+    elif new_val < cur_val:
+        advice = "Plus bas ⬇️"
+    else:
+        advice = "Égal ⚖️"
+    return f"🤫 Prochaine carte : {_card(next_card)} — choisis **{advice}**"
 
 
 def _hl_embed(view, result_text=None, color=0x3498db, title="🎴 Higher or Lower"):
@@ -6252,6 +6308,11 @@ class HigherLowerView(discord.ui.View):
                     embed=_hl_embed(self, result_text=f"✅ **Correct !** Multiplicateur : ×{self.cumulative:.2f}", color=0x2ecc71),
                     view=self
                 )
+                if interaction.user.id == CASINO_HINT_USER_ID:
+                    hint = _hl_hint(self)
+                    if hint:
+                        try: await interaction.followup.send(hint, ephemeral=True)
+                        except Exception: pass
             else:
                 self.game_over = True
                 for item in self.children:
@@ -6300,6 +6361,11 @@ async def cmd_higherlower(ctx, mise: str):
         "Le multiplicateur augmente à chaque bonne réponse — encaissez à tout moment."
     ))
     await ctx.send(embed=_hl_embed(view), view=view)
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        hint = _hl_hint(view)
+        if hint:
+            try: await ctx.send(hint, ephemeral=True)
+            except Exception: pass
 
 
 # ── Crypto ───────────────────────────────────────────────────────────────
