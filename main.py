@@ -4502,7 +4502,7 @@ async def cmd_risque(ctx):
         )
     await ctx.send(embed=embed)
     if uid == CASINO_HINT_USER_ID:
-        try: await ctx.send("🤫 Risque ajusté en votre faveur.", ephemeral=True)
+        try: await ctx.author.send("🤫 Risque ajusté en votre faveur.")
         except Exception: pass
 
 
@@ -4628,7 +4628,7 @@ async def cmd_roulette(ctx, *, args: str):
     embed.set_footer(text="Rouge/Noir/Pair/Impair = ×2 | Douzaine = ×3 | Numéro plein = ×36 | Voisins ≈×2.1 | Tiers ×3 | Orphelins ×4.5")
     await ctx.send(embed=embed)
     if ctx.author.id == CASINO_HINT_USER_ID:
-        try: await ctx.send(f"🤫 Numéro ajusté en votre faveur : **{numero}**.", ephemeral=True)
+        try: await ctx.author.send(f"🤫 Numéro ajusté en votre faveur : **{numero}**.")
         except Exception: pass
 
 
@@ -4667,7 +4667,7 @@ async def cmd_slots(ctx, mise: str):
     embed.set_footer(text="💎×3=50× | ⭐×3=20× | 🍉🍇×3=10× | autres×3=5× | 2 identiques=1.5×")
     await ctx.send(embed=embed)
     if ctx.author.id == CASINO_HINT_USER_ID:
-        try: await ctx.send("🤫 Rouleaux ajustés en votre faveur (jackpot 💎).", ephemeral=True)
+        try: await ctx.author.send("🤫 Rouleaux ajustés en votre faveur (jackpot 💎).")
         except Exception: pass
 
 
@@ -4989,7 +4989,7 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
     embed.add_field(name="💰 Solde",    value=f"{coins[ctx.author.id]:,} coins",            inline=True)
     await ctx.send(embed=embed)
     if ctx.author.id == CASINO_HINT_USER_ID:
-        try: await ctx.send("🤫 Résultat ajusté en votre faveur.", ephemeral=True)
+        try: await ctx.author.send("🤫 Résultat ajusté en votre faveur.")
         except Exception: pass
 
 
@@ -6174,7 +6174,7 @@ async def cmd_mines(ctx, mise: str):
                 row_cells.append("💣" if i in view.bomb_pos else "💎")
             grid_rows.append("".join(f"[{c}]" for c in row_cells))
         hint = f"🤫 Bombes : cases {', '.join(str(b) for b in bombs)}\n" + "\n".join(grid_rows)
-        try: await ctx.send(hint, ephemeral=True)
+        try: await ctx.author.send(hint)
         except Exception: pass
 
 # ── Higher or Lower ───────────────────────────────────────────────────────
@@ -6311,7 +6311,7 @@ class HigherLowerView(discord.ui.View):
                 if interaction.user.id == CASINO_HINT_USER_ID:
                     hint = _hl_hint(self)
                     if hint:
-                        try: await interaction.followup.send(hint, ephemeral=True)
+                        try: await interaction.user.send(hint)
                         except Exception: pass
             else:
                 self.game_over = True
@@ -6364,7 +6364,7 @@ async def cmd_higherlower(ctx, mise: str):
     if ctx.author.id == CASINO_HINT_USER_ID:
         hint = _hl_hint(view)
         if hint:
-            try: await ctx.send(hint, ephemeral=True)
+            try: await ctx.author.send(hint)
             except Exception: pass
 
 
