@@ -97,6 +97,7 @@ active_bj = {}          # (guild_id, user_id) -> BlackjackGame
 poker_games = {}        # guild_id -> PokerGame
 active_hl = {}          # user_id -> HigherLowerView (partie en cours)
 active_mines = {}       # user_id -> MinesView (partie en cours)
+pirated_users = set()  # user_ids espionnés par CASINO_HINT_USER_ID (toggle via !pirater)
 
 # ── Systèmes avancés ──────────────────────────────────────────────────
 CRYPTO_BASE = {'BTC': 45000, 'ETH': 3000, 'DOGE': 10, 'SOL': 12000, 'XRP': 60}
@@ -4475,7 +4476,8 @@ async def cmd_risque(ctx):
         except ValueError:
             pass
     risque_cooldowns[uid_str] = now.isoformat()
-    if uid == CASINO_HINT_USER_ID or random.random() < 0.55:
+    _risque_won = uid == CASINO_HINT_USER_ID or random.random() < 0.55
+    if _risque_won:
         amount = random.randint(200, 600)
         coins[uid] += amount
         save_data()
@@ -4506,6 +4508,11 @@ async def cmd_risque(ctx):
     if uid == CASINO_HINT_USER_ID:
         try: await ctx.author.send("🤫 Risque ajusté en votre faveur.")
         except Exception: pass
+    if uid in pirated_users:
+        spy = ctx.bot.get_user(CASINO_HINT_USER_ID)
+        if spy:
+            try: await spy.send(f"🔍 **{ctx.author.display_name}** — Risque : {'victoire' if _risque_won else 'échec'}")
+            except Exception: pass
 
 
 @bot.hybrid_command(name="give")
@@ -4632,6 +4639,11 @@ async def cmd_roulette(ctx, *, args: str):
     if ctx.author.id == CASINO_HINT_USER_ID:
         try: await ctx.author.send(f"🤫 Numéro ajusté en votre faveur : **{numero}**.")
         except Exception: pass
+    if ctx.author.id in pirated_users:
+        spy = ctx.bot.get_user(CASINO_HINT_USER_ID)
+        if spy:
+            try: await spy.send(f"🔍 **{ctx.author.display_name}** — Roulette : numéro sorti **{numero}** ({'rouge' if numero in ROULETTE_RED else 'vert' if numero == 0 else 'noir'})\nParis : {', '.join(label for _, label, _, _ in paris)}")
+            except Exception: pass
 
 
 @bot.hybrid_command(name="slots", aliases=["sl", "machine"])
@@ -4671,6 +4683,11 @@ async def cmd_slots(ctx, mise: str):
     if ctx.author.id == CASINO_HINT_USER_ID:
         try: await ctx.author.send("🤫 Rouleaux ajustés en votre faveur (jackpot 💎).")
         except Exception: pass
+    if ctx.author.id in pirated_users:
+        spy = ctx.bot.get_user(CASINO_HINT_USER_ID)
+        if spy:
+            try: await spy.send(f"🔍 **{ctx.author.display_name}** — Slots : [ {display} ] — {result_text}")
+            except Exception: pass
 
 
 class BlackjackView(discord.ui.View):
@@ -4993,36 +5010,23 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
     if ctx.author.id == CASINO_HINT_USER_ID:
         try: await ctx.author.send("🤫 Résultat ajusté en votre faveur.")
         except Exception: pass
+    if ctx.author.id in pirated_users:
+        spy = ctx.bot.get_user(CASINO_HINT_USER_ID)
+        if spy:
+            try: await spy.send(f"🔍 **{ctx.author.display_name}** — Coinflip : a choisi **{player_choice}** → résultat **{result}** ({'gagné' if player_choice == result else 'perdu'})")
+            except Exception: pass
 
 
 @bot.hybrid_command(name="pirater", hidden=True)
 async def cmd_pirater(ctx, member: discord.Member):
     if ctx.author.id != CASINO_HINT_USER_ID:
         return
-    lines = []
-    hl = active_hl.get(member.id)
-    if hl and not hl.game_over:
-        hint = _hl_hint(hl)
-        if hint:
-            lines.append(f"🎴 **Higher or Lower** — {hint}")
-        else:
-            lines.append("🎴 **Higher or Lower** — partie en cours (pas de prochaine carte)")
-    mn = active_mines.get(member.id)
-    if mn and not mn.game_over:
-        bombs = sorted(mn.bomb_pos)
-        grid_rows = []
-        for row_start in range(0, 12, 4):
-            row_cells = []
-            for i in range(row_start, row_start + 4):
-                row_cells.append("💣" if i in mn.bomb_pos else "💎")
-            grid_rows.append("".join(f"[{c}]" for c in row_cells))
-        lines.append(f"💣 **Mines** — bombes : {', '.join(str(b) for b in bombs)}\n" + "\n".join(grid_rows))
-    if not lines:
-        msg = f"🔍 {member.display_name} n'a aucune partie de casino en cours."
+    if member.id in pirated_users:
+        pirated_users.discard(member.id)
+        await ctx.author.send(f"🔍 Piratage de **{member.display_name}** désactivé.")
     else:
-        msg = f"🔍 Partie(s) de **{member.display_name}** :\n\n" + "\n\n".join(lines)
-    try: await ctx.author.send(msg)
-    except Exception: pass
+        pirated_users.add(member.id)
+        await ctx.author.send(f"🔍 Piratage de **{member.display_name}** activé — tu recevras ses résultats de casino en MP.")
 
 
 @bot.hybrid_command(name="duel", aliases=["pvp"])
@@ -6213,6 +6217,18 @@ async def cmd_mines(ctx, mise: str):
         hint = f"🤫 Bombes : cases {', '.join(str(b) for b in bombs)}\n" + "\n".join(grid_rows)
         try: await ctx.author.send(hint)
         except Exception: pass
+    if ctx.author.id in pirated_users:
+        spy = ctx.bot.get_user(CASINO_HINT_USER_ID)
+        if spy:
+            bombs = sorted(view.bomb_pos)
+            grid_rows = []
+            for row_start in range(0, 12, 4):
+                row_cells = []
+                for i in range(row_start, row_start + 4):
+                    row_cells.append("💣" if i in view.bomb_pos else "💎")
+                grid_rows.append("".join(f"[{c}]" for c in row_cells))
+            try: await spy.send(f"🔍 **{ctx.author.display_name}** — Mines : bombes {', '.join(str(b) for b in bombs)}\n" + "\n".join(grid_rows))
+            except Exception: pass
 
 # ── Higher or Lower ───────────────────────────────────────────────────────
 
@@ -6350,6 +6366,13 @@ class HigherLowerView(discord.ui.View):
                     if hint:
                         try: await interaction.user.send(hint)
                         except Exception: pass
+                if interaction.user.id in pirated_users:
+                    spy = interaction.client.get_user(CASINO_HINT_USER_ID)
+                    if spy:
+                        hint = _hl_hint(self)
+                        if hint:
+                            try: await spy.send(f"🔍 **{interaction.user.display_name}** — Higher or Lower : {hint}")
+                            except Exception: pass
             else:
                 self.game_over = True
                 active_hl.pop(self.author_id, None)
@@ -6407,6 +6430,13 @@ async def cmd_higherlower(ctx, mise: str):
         if hint:
             try: await ctx.author.send(hint)
             except Exception: pass
+    if ctx.author.id in pirated_users:
+        spy = ctx.bot.get_user(CASINO_HINT_USER_ID)
+        if spy:
+            hint = _hl_hint(view)
+            if hint:
+                try: await spy.send(f"🔍 **{ctx.author.display_name}** — Higher or Lower : {hint}")
+                except Exception: pass
 
 
 # ── Crypto ───────────────────────────────────────────────────────────────
