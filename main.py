@@ -95,6 +95,8 @@ work_cooldowns = {}     # str(user_id) -> ISO datetime
 beg_cooldowns = {}      # str(user_id) -> ISO datetime
 active_bj = {}          # (guild_id, user_id) -> BlackjackGame
 poker_games = {}        # guild_id -> PokerGame
+active_hl = {}          # user_id -> HigherLowerView (partie en cours)
+active_mines = {}       # user_id -> MinesView (partie en cours)
 
 # ── Systèmes avancés ──────────────────────────────────────────────────
 CRYPTO_BASE = {'BTC': 45000, 'ETH': 3000, 'DOGE': 10, 'SOL': 12000, 'XRP': 60}
@@ -4993,6 +4995,36 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
         except Exception: pass
 
 
+@bot.hybrid_command(name="pirater", hidden=True)
+async def cmd_pirater(ctx, member: discord.Member):
+    if ctx.author.id != CASINO_HINT_USER_ID:
+        return
+    lines = []
+    hl = active_hl.get(member.id)
+    if hl and not hl.game_over:
+        hint = _hl_hint(hl)
+        if hint:
+            lines.append(f"🎴 **Higher or Lower** — {hint}")
+        else:
+            lines.append("🎴 **Higher or Lower** — partie en cours (pas de prochaine carte)")
+    mn = active_mines.get(member.id)
+    if mn and not mn.game_over:
+        bombs = sorted(mn.bomb_pos)
+        grid_rows = []
+        for row_start in range(0, 12, 4):
+            row_cells = []
+            for i in range(row_start, row_start + 4):
+                row_cells.append("💣" if i in mn.bomb_pos else "💎")
+            grid_rows.append("".join(f"[{c}]" for c in row_cells))
+        lines.append(f"💣 **Mines** — bombes : {', '.join(str(b) for b in bombs)}\n" + "\n".join(grid_rows))
+    if not lines:
+        msg = f"🔍 {member.display_name} n'a aucune partie de casino en cours."
+    else:
+        msg = f"🔍 Partie(s) de **{member.display_name}** :\n\n" + "\n\n".join(lines)
+    try: await ctx.author.send(msg)
+    except Exception: pass
+
+
 @bot.hybrid_command(name="duel", aliases=["pvp"])
 async def cmd_duel(ctx, member: discord.Member, mise: str):
     if member.id == ctx.author.id:
@@ -6086,6 +6118,7 @@ class MinesView(discord.ui.View):
                 return await interaction.response.send_message("❌ Case déjà révélée.", ephemeral=True)
             if idx in self.bomb_pos:
                 self.game_over = True
+                active_mines.pop(self.author_id, None)
                 for c in self.children:
                     c.disabled = True
                     cid = getattr(c, 'custom_id', '')
@@ -6103,6 +6136,7 @@ class MinesView(discord.ui.View):
                     btn.label = "💎"; btn.style = discord.ButtonStyle.primary; btn.disabled = True
                 if self.diamonds == 9:
                     self.game_over = True
+                    active_mines.pop(self.author_id, None)
                     for c in self.children: c.disabled = True
                     win = self._payout()
                     coins[self.author_id] += win
@@ -6128,6 +6162,7 @@ class MinesView(discord.ui.View):
         if self.diamonds == 0:
             return await interaction.response.send_message("❌ Révélez au moins une case avant d'encaisser !", ephemeral=True)
         self.game_over = True
+        active_mines.pop(self.author_id, None)
         win = self._payout()
         coins[self.author_id] += win
         save_data()
@@ -6140,6 +6175,7 @@ class MinesView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def on_timeout(self):
+        active_mines.pop(self.author_id, None)
         if not self.game_over and self.diamonds > 0:
             self.game_over = True
             win = self._payout()
@@ -6156,6 +6192,7 @@ async def cmd_mines(ctx, mise: str):
     coins[ctx.author.id] -= mise
     save_data()
     view  = MinesView(ctx.author.id, mise)
+    active_mines[ctx.author.id] = view
     embed = discord.Embed(title="💣 Mines", color=0x3498db, description=(
         "**12 cases** — **3 bombes** cachées\n"
         "Chaque 💎 trouvé ajoute **×0.1** au multiplicateur\n"
@@ -6315,6 +6352,7 @@ class HigherLowerView(discord.ui.View):
                         except Exception: pass
             else:
                 self.game_over = True
+                active_hl.pop(self.author_id, None)
                 for item in self.children:
                     item.disabled = True
                 await interaction.response.edit_message(
@@ -6331,17 +6369,19 @@ class HigherLowerView(discord.ui.View):
         if self.rounds_won == 0:
             return await interaction.response.send_message("❌ Gagnez au moins une manche avant d'encaisser !", ephemeral=True)
         self.game_over = True
+        active_hl.pop(self.author_id, None)
         payout = int(self.bet * self.cumulative)
         coins[self.author_id] += payout
         save_data()
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(
-            embed=_hl_embed(self, result_text=f"💰 **Encaissé !** +{payout - self.bet:,} coins (×{self.cumulative:.2f})", color=0xf1c40f),
+            embed=_hl_embed(self, result_text=f"💰 **Encaissé !** +{payout - self.bet:,} coins (×{self.cumulative:.2f}", color=0xf1c40f),
             view=self
         )
 
     async def on_timeout(self):
+        active_hl.pop(self.author_id, None)
         if not self.game_over and self.rounds_won > 0:
             self.game_over = True
             payout = int(self.bet * self.cumulative)
@@ -6356,6 +6396,7 @@ async def cmd_higherlower(ctx, mise: str):
     coins[ctx.author.id] -= mise
     save_data()
     view = HigherLowerView(ctx.author.id, mise)
+    active_hl[ctx.author.id] = view
     embed = discord.Embed(title="🎴 Higher or Lower", color=0x3498db, description=(
         "Devinez si la prochaine carte sera **plus haute**, **plus basse**, ou **égale** !\n"
         "Le multiplicateur augmente à chaque bonne réponse — encaissez à tout moment."
