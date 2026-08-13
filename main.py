@@ -2793,6 +2793,106 @@ async def _apply_ban(guild, target_id: int, actor_id: int, reason: str | None) -
     return {"dm_sent": dm_sent}, None
 
 
+async def _apply_kick(guild, target_id: int, actor_id: int, reason: str | None) -> tuple[dict | None, str | None]:
+    """Pas de !kick en commande Discord dans ce bot — cette fonction existe
+    pour le verdict de !jugement (voir plus loin), même forme que _apply_ban."""
+    member = guild.get_member(target_id)
+    actor = guild.get_member(actor_id)
+    if not member:
+        return None, "Membre introuvable sur le serveur."
+    if _is_mod_immune(member):
+        return None, "Ce membre est protégé."
+    if member.id == actor_id:
+        return None, "Impossible de se kick soi-même."
+    if member.id == bot.user.id:
+        return None, "Je ne peux pas me kick moi-même."
+    if member.id == guild.owner_id:
+        return None, "Impossible de kick le propriétaire du serveur."
+    if actor and actor.top_role <= member.top_role and actor.id != guild.owner_id:
+        return None, "Ce membre a un rôle égal ou supérieur au tien."
+
+    dm_sent = True
+    try:
+        await member.send(f"👢 Vous avez été expulsé du serveur **{guild.name}**.\nRaison : {reason if reason else 'Non spécifiée'}")
+    except Exception:
+        dm_sent = False
+
+    try:
+        await member.kick(reason=reason)
+    except discord.Forbidden:
+        return None, "Permissions insuffisantes pour kick ce membre."
+
+    if actor:
+        _log_moderation('kick', member, actor, reason=reason)
+    save_data()
+
+    fields = [
+        ("Utilisateur kick", member.mention, True),
+        ("Modérateur", actor.mention if actor else "Admin (site)", True),
+        ("Raison", reason if reason else "Non spécifiée", False),
+    ]
+    await send_log_message(guild, LOG_MODERATION_CHANNEL_ID, "👢 Membre Kick", f"{member.mention} a été expulsé du serveur.", discord.Color.dark_orange(), fields)
+    return {"dm_sent": dm_sent}, None
+
+
+async def _apply_punition(guild, target_id: int, actor_id: int, nombre: int) -> tuple[dict | None, str | None]:
+    """Version paramétrée de !punition, réutilisable hors d'une commande
+    (verdict de !jugement) — même logique que cmd_punition, volontairement
+    dupliquée plutôt que refactorée (même raisonnement que les autres
+    _apply_* de cette section : ne pas toucher une commande éprouvée)."""
+    member = guild.get_member(target_id)
+    actor = guild.get_member(actor_id)
+    if not member:
+        return None, "Membre introuvable sur le serveur."
+    if _is_mod_immune(member):
+        return None, "Ce membre est protégé."
+    if nombre <= 0:
+        return None, "Le nombre doit être supérieur à 0."
+    if str(member.id) in punitions:
+        return None, "Ce membre est déjà en punition."
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+    }
+    if actor:
+        overwrites[actor] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+    for rid in cmd_role_perms.get('punition', []):
+        role = guild.get_role(rid)
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+    salon = await guild.create_text_channel(
+        f"punition-{member.display_name}"[:100],
+        overwrites=overwrites,
+        reason=f"Punition pour {member.display_name}",
+    )
+    for channel in guild.channels:
+        if channel.id != salon.id:
+            try:
+                await channel.set_permissions(member, view_channel=False, send_messages=False)
+            except Exception:
+                pass
+
+    punitions[str(member.id)] = {'salon_id': salon.id, 'nombre': nombre, 'actuel': 0, 'guild_id': guild.id}
+    if actor:
+        _log_moderation('punition', member, actor, extra=f"compter jusqu'à {nombre}")
+    save_data()
+    await send_log_message(
+        guild, LOG_MODERATION_CHANNEL_ID, "🔒 Punition",
+        f"{member.mention} a été mis en punition par {actor.mention if actor else 'Admin (site)'} (compter jusqu'à {nombre}).",
+        discord.Color.dark_red(),
+    )
+    await salon.send(
+        f"🔒 {member.mention} tu es en **punition** !\n"
+        f"Tu dois compter de **1** jusqu'à **{nombre}** sans faire de faute.\n"
+        f"⚠️ Si tu te trompes, ça repart de **0** !\n\n"
+        f"Commence à compter : **1**"
+    )
+    return {"salon_id": salon.id}, None
+
+
 async def _apply_silence(guild, target_id: int, actor_id: int) -> tuple[dict | None, str | None]:
     member = guild.get_member(target_id)
     actor = guild.get_member(actor_id)
@@ -10382,6 +10482,152 @@ async def cmd_fermer_ticket(ctx, arg: str = None, *, reste: str = None):
 
     await _finish_ticket_close(channel, ctx.author, ctx.guild, ticket_id, ticket, reste)
     await ctx.send(f"✅ Ticket #{ticket_id} fermé.")
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# ── !jugement : vote collectif du staff sur la sanction d'un membre ────────
+# Demande du 10-11/08/2026 (voir #staff) : "!jugement @membre" propose
+# mute/ban/kick/punition/relaxe, le staff vote par boutons, et seul celui
+# qui a lancé la commande peut clôturer le vote pour éviter tout abus
+# ("celui qui lance la commande doit confirmer le vote avant que la
+# sanction soit appliquée"). Réservé au rôle staff Discord et aux admins,
+# aussi bien pour lancer que pour voter.
+# ═════════════════════════════════════════════════════════════════════════
+JUGEMENT_STAFF_ROLE_ID = 1516514610881237084
+JUGEMENT_PUNITION_COUNT = 50
+JUGEMENT_MUTE_MINUTES = 60
+
+# Ordre de sévérité pour départager une égalité au moment de la clôture —
+# la sanction la plus sévère l'emporte plutôt qu'un choix arbitraire.
+JUGEMENT_OPTIONS = [
+    ("ban", "🚫 Ban", discord.ButtonStyle.danger),
+    ("kick", "👢 Kick", discord.ButtonStyle.danger),
+    ("mute", f"🔇 Mute ({JUGEMENT_MUTE_MINUTES}min)", discord.ButtonStyle.secondary),
+    ("punition", f"🔒 Punition ({JUGEMENT_PUNITION_COUNT})", discord.ButtonStyle.secondary),
+    ("relaxe", "✅ Relaxe", discord.ButtonStyle.success),
+]
+JUGEMENT_SEVERITY_ORDER = [key for key, _, _ in JUGEMENT_OPTIONS]  # déjà du plus au moins sévère
+
+
+def _jugement_authorized(member: discord.Member) -> bool:
+    return (
+        is_bot_owner(member)
+        or member.guild_permissions.administrator
+        or any(r.id == JUGEMENT_STAFF_ROLE_ID for r in member.roles)
+    )
+
+
+class JugementView(discord.ui.View):
+    def __init__(self, target: discord.Member, launcher_id: int):
+        super().__init__(timeout=None)  # reste ouvert tant que pas clôturé manuellement
+        self.target = target
+        self.launcher_id = launcher_id
+        self.votes: dict[str, set[int]] = {key: set() for key, _, _ in JUGEMENT_OPTIONS}
+        self.closed = False
+
+        for key, label, style in JUGEMENT_OPTIONS:
+            btn = discord.ui.Button(label=label, style=style, custom_id=f"jugement_vote_{key}_{target.id}")
+            btn.callback = self._make_vote_callback(key)
+            self.add_item(btn)
+
+        close_btn = discord.ui.Button(
+            label="🔨 Clôturer le vote", style=discord.ButtonStyle.primary,
+            row=1, custom_id=f"jugement_close_{target.id}",
+        )
+        close_btn.callback = self._on_close
+        self.add_item(close_btn)
+
+    def _make_vote_callback(self, key: str):
+        async def callback(interaction: discord.Interaction):
+            if self.closed:
+                return await interaction.response.send_message("❌ Ce vote est déjà clôturé.", ephemeral=True)
+            if not _jugement_authorized(interaction.user):
+                return await interaction.response.send_message("❌ Réservé au staff Discord et aux admins.", ephemeral=True)
+            for voters in self.votes.values():
+                voters.discard(interaction.user.id)
+            self.votes[key].add(interaction.user.id)
+            await interaction.response.edit_message(embed=self._build_embed())
+        return callback
+
+    def _build_embed(self, verdict_line: str | None = None) -> discord.Embed:
+        title = f"⚖️ Jugement de {self.target.display_name}"
+        embed = discord.Embed(
+            title=title + (" — Terminé" if self.closed else ""),
+            description=(
+                "Le staff vote la sanction. Un vote par personne (tu peux changer d'avis).\n"
+                f"Seul <@{self.launcher_id}> peut clôturer le vote."
+            ),
+            color=0x95a5a6 if self.closed else 0x3498db,
+        )
+        for key, label, _ in JUGEMENT_OPTIONS:
+            embed.add_field(name=label, value=str(len(self.votes[key])), inline=True)
+        if verdict_line:
+            embed.add_field(name="Verdict", value=verdict_line, inline=False)
+        return embed
+
+    async def _on_close(self, interaction: discord.Interaction):
+        if self.closed:
+            return await interaction.response.send_message("❌ Ce vote est déjà clôturé.", ephemeral=True)
+        if interaction.user.id != self.launcher_id and not is_bot_owner(interaction.user):
+            return await interaction.response.send_message(
+                "❌ Seul la personne qui a lancé le jugement peut le clôturer.", ephemeral=True
+            )
+
+        self.closed = True
+        counts = {key: len(voters) for key, voters in self.votes.items()}
+        max_votes = max(counts.values())
+        if max_votes == 0:
+            winner = "relaxe"
+        else:
+            tied = {key for key, c in counts.items() if c == max_votes}
+            winner = next(key for key in JUGEMENT_SEVERITY_ORDER if key in tied)
+
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.defer()
+
+        verdict_line = await self._apply_verdict(interaction, winner, counts[winner])
+        await interaction.message.edit(embed=self._build_embed(verdict_line), view=self)
+
+    async def _apply_verdict(self, interaction: discord.Interaction, winner: str, nb_votes: int) -> str:
+        guild, actor, member = interaction.guild, interaction.user, self.target
+        reason = f"Verdict du jugement collectif ({nb_votes} vote(s))"
+
+        if winner == "relaxe":
+            await send_log_message(
+                guild, LOG_MODERATION_CHANNEL_ID, "⚖️ Jugement — Relaxe",
+                f"{member.mention} a été relaxé par jugement collectif (clôturé par {actor.mention}).",
+                discord.Color.green(),
+            )
+            return f"✅ **Relaxe** — {nb_votes} vote(s), aucune sanction appliquée."
+
+        if winner == "ban":
+            _, err = await _apply_ban(guild, member.id, actor.id, reason)
+            return f"🚫 **Ban** ({nb_votes} vote(s))" + (f" — échec : {err}" if err else "")
+
+        if winner == "kick":
+            _, err = await _apply_kick(guild, member.id, actor.id, reason)
+            return f"👢 **Kick** ({nb_votes} vote(s))" + (f" — échec : {err}" if err else "")
+
+        if winner == "mute":
+            _, err = await _apply_mute(guild, member.id, actor.id, f"{JUGEMENT_MUTE_MINUTES}m", reason)
+            return f"🔇 **Mute {JUGEMENT_MUTE_MINUTES} min** ({nb_votes} vote(s))" + (f" — échec : {err}" if err else "")
+
+        _, err = await _apply_punition(guild, member.id, actor.id, JUGEMENT_PUNITION_COUNT)
+        return f"🔒 **Punition** (compter jusqu'à {JUGEMENT_PUNITION_COUNT}, {nb_votes} vote(s))" + (f" — échec : {err}" if err else "")
+
+
+@bot.command(name="jugement", aliases=["judge", "tribunal"])
+async def cmd_jugement(ctx, membre: discord.Member):
+    if not _jugement_authorized(ctx.author):
+        return await ctx.send("❌ Réservé au staff Discord et aux admins.")
+    if _is_mod_immune(membre):
+        return await ctx.send(random.choice(PROTECTED_REJECT_LINES).format(target=membre.mention))
+    if membre.id == bot.user.id:
+        return await ctx.send("❌ On ne juge pas le juge.")
+
+    view = JugementView(membre, ctx.author.id)
+    await ctx.send(embed=view._build_embed(), view=view)
 
 
 @bot.command(name="punition", aliases=["pun", "punir"])
