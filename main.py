@@ -2324,16 +2324,32 @@ class BsTagOnboardingView(discord.ui.View):
         await interaction.response.send_modal(BsTagOnboardingModal())
 
 
-def _bs_tag_prompt_embed() -> discord.Embed:
-    embed = discord.Embed(
-        title="🏷️ Dernière étape : ton tag Brawl Stars",
-        description=(
-            "Pour apparaître dans les classements et le suivi de trophées, "
-            "renseigne ton tag Brawl Stars (visible dans ton profil en jeu, "
-            "voir l'image ci-dessous) en cliquant sur le bouton."
-        ),
-        color=0x8B5CF6,
+def _bs_tag_prompt_embed(weekly: bool = False) -> discord.Embed:
+    benefits = (
+        "tu apparais dans les classements (trophées, ranked, pusheurs), tu débloques des "
+        "rôles automatiques selon ton niveau, et tu as ta fiche perso sur le site"
     )
+    if weekly:
+        embed = discord.Embed(
+            title="🏷️ Rappel hebdomadaire — ton tag Brawl Stars",
+            description=(
+                "📅 Ceci est le rappel automatique envoyé chaque semaine aux membres qui n'ont pas "
+                "encore lié leur tag — pas un bug, ignore-le si tu ne comptes pas jouer.\n\n"
+                f"En le renseignant, {benefits}. Ça prend 10 secondes : clique sur le bouton, "
+                "renseigne ton tag (visible dans ton profil en jeu, voir l'image ci-dessous)."
+            ),
+            color=0x8B5CF6,
+        )
+    else:
+        embed = discord.Embed(
+            title="🏷️ Dernière étape : ton tag Brawl Stars",
+            description=(
+                f"En renseignant ton tag Brawl Stars, {benefits}. "
+                "Clique sur le bouton ci-dessous (le tag est visible dans ton profil en jeu, "
+                "voir l'image)."
+            ),
+            color=0x8B5CF6,
+        )
     if os.path.exists(BS_TAG_HELP_IMAGE_PATH):
         embed.set_image(url="attachment://bs_tag_help.png")
     return embed
@@ -2395,7 +2411,7 @@ async def _send_bs_tag_reminder_dm(member: discord.Member) -> bool:
     republier dans #arrivées chaque semaine pour des membres présents
     depuis longtemps serait intrusif pour ce salon d'accueil."""
     try:
-        await member.send(embed=_bs_tag_prompt_embed(), files=_bs_tag_prompt_file(), view=BsTagOnboardingView())
+        await member.send(embed=_bs_tag_prompt_embed(weekly=True), files=_bs_tag_prompt_file(), view=BsTagOnboardingView())
         return True
     except discord.HTTPException:
         return False
@@ -2484,9 +2500,15 @@ async def cmd_excuser_relance_tag(ctx):
     for member in missing:
         try:
             await member.send(
-                "🙏 Désolé pour les MP en double aujourd'hui à propos du tag Brawl Stars — "
-                "un bug de notre côté a fait répéter le rappel plusieurs fois. C'est corrigé, "
-                "ça ne se reproduira pas. Merci pour ta patience !"
+                "🙏 Dernier MP promis, vraiment cette fois — désolé pour le spam de MP en double "
+                "aujourd'hui à propos du tag Brawl Stars, un bug de notre côté a fait boucler le "
+                "rappel. C'est réglé pour de bon, plus aucune raison que ça se reproduise.\n\n"
+                "Si tu veux te défouler, tu as le droit de nous insulter copieusement 😄 mais le "
+                "moyen le plus sûr de ne **plus jamais** recevoir ce MP, c'est encore de lier ton "
+                "tag juste en dessous 👇",
+                embed=_bs_tag_prompt_embed(),
+                files=_bs_tag_prompt_file(),
+                view=BsTagOnboardingView(),
             )
             sent += 1
         except discord.HTTPException:
