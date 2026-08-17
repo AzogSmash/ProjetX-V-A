@@ -2175,10 +2175,43 @@ async def on_guild_join(guild):
 # l'attribution à chaque arrivée, voir #logs-general du 17/08/2026).
 AUTO_JOIN_ROLE_NAME = "Membres"
 
+# ── Message de bienvenue dans #arrivées (remplace ProBot pour ce salon,
+# demande du 17/08/2026 : utiliser notre propre bot avec la bannière du
+# serveur plutôt que le visuel générique de ProBot) ──
+ARRIVEE_CHANNEL_ID = 1513110805707620404
+# URL de la bannière "PROJET X — BUILT DIFFERENT" à renseigner (héberger
+# l'image quelque part — ex: la mettre en bannière du serveur Discord puis
+# copier son URL CDN, ou un lien direct) : tant que c'est None, le message
+# de bienvenue est envoyé sans image plutôt que de planter.
+WELCOME_BANNER_URL = None
+
+
+async def _send_welcome_message(member: discord.Member):
+    channel = member.guild.get_channel(ARRIVEE_CHANNEL_ID)
+    if not channel:
+        return
+    embed = discord.Embed(
+        title="Bienvenue sur Projet X !",
+        description=(
+            f"Bienvenue {member.mention} !\n"
+            f"Tu es notre **{member.guild.member_count}ème** membre.\n"
+            "Viens te poser avec nous 👋"
+        ),
+        color=0x8B5CF6,
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    if WELCOME_BANNER_URL:
+        embed.set_image(url=WELCOME_BANNER_URL)
+    try:
+        await channel.send(content=member.mention, embed=embed)
+    except discord.HTTPException as e:
+        print(f"Erreur en envoyant le message de bienvenue pour {member.name} : {e}")
+
 
 @bot.event
 async def on_member_join(member):
     guild = member.guild
+    await _send_welcome_message(member)
     role = discord.utils.get(guild.roles, name=AUTO_JOIN_ROLE_NAME)
     if role:
         try:
