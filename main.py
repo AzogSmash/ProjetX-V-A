@@ -2179,11 +2179,10 @@ AUTO_JOIN_ROLE_NAME = "Membres"
 # demande du 17/08/2026 : utiliser notre propre bot avec la bannière du
 # serveur plutôt que le visuel générique de ProBot) ──
 ARRIVEE_CHANNEL_ID = 1513110805707620404
-# URL de la bannière "PROJET X — BUILT DIFFERENT" à renseigner (héberger
-# l'image quelque part — ex: la mettre en bannière du serveur Discord puis
-# copier son URL CDN, ou un lien direct) : tant que c'est None, le message
-# de bienvenue est envoyé sans image plutôt que de planter.
-WELCOME_BANNER_URL = None
+# Fichier local plutôt qu'une URL Discord CDN : les liens media.discordapp.net
+# collés depuis le client sont signés et expirent (~24h, voir paramètre
+# "ex="), donc inutilisables tels quels comme image d'embed permanente.
+WELCOME_BANNER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "welcome_banner.png")
 
 
 async def _send_welcome_message(member: discord.Member):
@@ -2200,10 +2199,12 @@ async def _send_welcome_message(member: discord.Member):
         color=0x8B5CF6,
     )
     embed.set_thumbnail(url=member.display_avatar.url)
-    if WELCOME_BANNER_URL:
-        embed.set_image(url=WELCOME_BANNER_URL)
+    files = []
+    if os.path.exists(WELCOME_BANNER_PATH):
+        files.append(discord.File(WELCOME_BANNER_PATH, filename="welcome_banner.png"))
+        embed.set_image(url="attachment://welcome_banner.png")
     try:
-        await channel.send(content=member.mention, embed=embed)
+        await channel.send(content=member.mention, embed=embed, files=files)
     except discord.HTTPException as e:
         print(f"Erreur en envoyant le message de bienvenue pour {member.name} : {e}")
 
