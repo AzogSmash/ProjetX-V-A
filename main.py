@@ -2020,7 +2020,8 @@ def _build_help_categories(ctx):
                  "Chaque clan ajouté obtient aussi sa propre commande (ex : `!projetx`) — voir `!bs_famille liste`"))
     cats.append(("absences", "🌴 Absences",
                  "Déclarer, consulter et gérer les absences",
-                 "`!absence_panel` — Poste le panel de déclaration dans le salon courant\n"
+                 "`!absence_panel` — Poste le panel de déclaration dans le salon courant "
+                 "(club → 🟡 partielle/🔴 totale → formulaire)\n"
                  "`!absences` *(Staff)* — Panel interactif : filtrer par club, trier, "
                  "modifier/supprimer une absence via les menus (pas de saisie manuelle de club)\n"
                  "`!absence_ajouter @membre` *(Staff)* — Déclarer une absence pour quelqu'un d'autre\n"
@@ -11256,7 +11257,8 @@ class AbsenceStaffPanelView(discord.ui.View):
             embed.description = "Aucune absence enregistrée."
         for row in self._rows[:25]:  # limite embed : 25 champs max
             retour = row["return_date"] or "?"
-            value = f"<@{row['discord_id']}> — retour prévu : {retour}\n{row['reason']}"
+            type_label = ABSENCE_TYPE_LABELS.get(row.get("absence_type"), row.get("absence_type") or "?")
+            value = f"<@{row['discord_id']}> — {type_label} — retour prévu : {retour}\n{row['reason']}"
             if row.get("missed_event"):
                 value += f"\n🎯 Manqué : {row['missed_event']}"
             embed.add_field(name=f"#{row['id']} — {row['club']} — {row['start_date']}", value=value, inline=False)
@@ -11293,8 +11295,9 @@ class AbsenceStaffPanelView(discord.ui.View):
         absence = db_bs.get_absence(absence_id)
         if not absence:
             return await interaction.response.send_message("❌ Absence introuvable (déjà supprimée ?).", ephemeral=True)
+        type_label = ABSENCE_TYPE_LABELS.get(absence.get("absence_type"), absence.get("absence_type") or "?")
         await interaction.response.send_message(
-            f"**Absence #{absence_id}** — {absence['club']} — <@{absence['discord_id']}>",
+            f"**Absence #{absence_id}** — {absence['club']} — <@{absence['discord_id']}> — {type_label}",
             view=AbsenceActionView(absence, interaction.user.id),
             ephemeral=True,
         )
@@ -11308,7 +11311,8 @@ async def cmd_absence_panel(ctx):
     ré-enregistrement de la vue existante)."""
     embed = discord.Embed(
         title="🌴 Déclarer une absence",
-        description="Choisis ton club ci-dessous pour indiquer une absence (dates, raison, événement manqué éventuel).",
+        description="Choisis ton club ci-dessous, puis le type d'absence (partielle ou totale), "
+        "avant de remplir le formulaire (dates, raison, événement manqué éventuel).",
         color=discord.Color.blue(),
     )
     await ctx.send(embed=embed, view=AbsencePanelView())
