@@ -2357,12 +2357,20 @@ async def _prompt_bs_tag_onboarding(member: discord.Member):
     de comparer before/after — incident du 17/08/2026 (plusieurs
     redéploiements le même jour, MP répétés pour un même membre)."""
     discord_id = str(member.id)
-    last_prompt = db_bs.get_bs_tag_onboarding_last_prompt(discord_id)
-    if last_prompt:
-        elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(last_prompt)
-        if elapsed < timedelta(days=6):  # même délai que remind_bs_tag_missing
-            return
-    db_bs.set_bs_tag_onboarding_last_prompt(discord_id)
+    try:
+        last_prompt = db_bs.get_bs_tag_onboarding_last_prompt(discord_id)
+        if last_prompt:
+            elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(last_prompt)
+            if elapsed < timedelta(days=6):  # même délai que remind_bs_tag_missing
+                return
+        db_bs.set_bs_tag_onboarding_last_prompt(discord_id)
+    except Exception as e:
+        # Échec du garde-fou (ex: table pas encore créée côté Supabase) : on
+        # préfère ne RIEN envoyer plutôt que risquer un nouveau spam — le but
+        # même de ce garde-fou est d'empêcher les envois répétés, donc une
+        # panne dessus doit fermer la porte, pas l'ouvrir en grand.
+        print(f"Garde-fou tag BS indisponible, MP non envoyé à {member.name} par prudence : {e}")
+        return
 
     embed = _bs_tag_prompt_embed()
     view = BsTagOnboardingView()
@@ -2434,7 +2442,14 @@ async def remind_bs_tag_missing():
     cause de plusieurs déploiements successifs."""
     await bot.wait_until_ready()
 
-    last_sent = db_bs.get_bs_tag_reminder_last_sent()
+    try:
+        last_sent = db_bs.get_bs_tag_reminder_last_sent()
+    except Exception as e:
+        # Même logique que _prompt_bs_tag_onboarding : si le garde-fou est
+        # indisponible (ex: table pas encore créée côté Supabase), on
+        # n'envoie rien plutôt que de risquer une vague complète de MP.
+        print(f"Garde-fou relance tag BS indisponible, relance annulée par prudence : {e}")
+        return
     if last_sent:
         elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(last_sent)
         if elapsed < timedelta(days=6):
