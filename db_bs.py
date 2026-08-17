@@ -119,7 +119,18 @@ def _select_all_snapshots_since(since_date: str) -> list[dict]:
     dépassé en quelques semaines de saison (1785 lignes constatées le
     28/07/2026, classement pusheurs figé au 25/07 pendant que les trophées
     bruts (via une vue Postgres, pas ce chemin) continuaient d'avancer).
-    Pagine par blocs de 1000 jusqu'à épuisement plutôt que de tronquer."""
+    Pagine par blocs de 1000 jusqu'à épuisement plutôt que de tronquer.
+
+    IMPORTANT : le tri doit être TOTAL et déterministe (snapshot_date +
+    player_tag, qui forment la clé primaire), pas seulement snapshot_date.
+    Avec ~230 lignes partageant la même date chaque jour, un tri sur la seule
+    date laisse Postgres départager les ex æquo dans un ordre arbitraire qui
+    peut changer d'une requête à l'autre : à la frontière d'une page (ligne
+    1000, 2000…), une ligne pouvait alors être sautée ou dupliquée. Quand
+    c'était le snapshot de DÉBUT de saison d'un joueur qui sautait, sa
+    baseline devenait un point plus récent et sa progression !evo « repartait
+    de 0 » — de façon intermittente, puisque l'ordre était recalculé à chaque
+    appel (constaté début 08/2026)."""
     client = get_client()
     rows: list[dict] = []
     offset = 0
@@ -129,6 +140,7 @@ def _select_all_snapshots_since(since_date: str) -> list[dict]:
             .select("player_tag,snapshot_date,trophies")
             .gte("snapshot_date", since_date)
             .order("snapshot_date")
+            .order("player_tag")
             .range(offset, offset + _PAGE_SIZE - 1)
             .execute()
             .data
@@ -140,11 +152,47 @@ def _select_all_snapshots_since(since_date: str) -> list[dict]:
     return rows
 
 
-def get_season_evolution(since_date: str) -> list[dict]:
+def save_season_baseline(season_month: str, trophies_by_tag: dict[str, int]) -> None:
+    """Capture immuable des trophées de chaque joueur au moment exact du
+    reset de saison détecté par check_bs_season — jamais écrasée par les
+    syncs quotidiens suivants (contrairement à bs_trophy_snapshots, une
+    seule ligne par jour réécrite à chaque sync horaire). Demande du
+    07/08/2026, suite à un delta resté à 0 pendant ~14h après un reset :
+    "je veux save tout le temps les stats de début de saison en cas de
+    problème". Upsert idempotent (safe si rejoué après un redémarrage)."""
+    if not trophies_by_tag:
+        return
+    get_client().table("bs_season_baseline").upsert(
+        [
+            {"season_month": season_month, "player_tag": tag, "trophies": t}
+            for tag, t in trophies_by_tag.items()
+        ],
+        on_conflict="season_month,player_tag",
+    ).execute()
+
+
+def get_season_baseline(season_month: str) -> dict[str, int]:
+    """{'tag': trophées}, ...} — figé au moment du reset (voir save_season_baseline)."""
+    res = (
+        get_client()
+        .table("bs_season_baseline")
+        .select("player_tag,trophies")
+        .eq("season_month", season_month)
+        .execute()
+    )
+    return {r["player_tag"]: r["trophies"] for r in res.data}
+
+
+def get_season_evolution(since_date: str, season_month: str | None = None) -> list[dict]:
     """[{'tag','name','club','start','end','delta','joined_note'}, ...] pour
     tous les joueurs ayant au moins un point depuis `since_date`. Équivalent
     de l'ancien _bs_evolution_current_entries, mais borné dans le temps donc
-    pas besoin de tout l'historique complet."""
+    pas besoin de tout l'historique complet.
+
+    `start` vient de bs_season_baseline (valeur figée au reset) quand elle
+    existe pour ce joueur — sinon repli sur le premier snapshot quotidien
+    connu (ancien comportement, pour les saisons passées sans baseline ou un
+    joueur ajouté au tracking après le reset)."""
     client = get_client()
     snaps = _select_all_snapshots_since(since_date)
     by_player: dict[str, list[dict]] = {}
@@ -152,6 +200,8 @@ def get_season_evolution(since_date: str) -> list[dict]:
         by_player.setdefault(row["player_tag"], []).append(row)
     if not by_player:
         return []
+
+    baseline = get_season_baseline(season_month) if season_month else {}
 
     players = {
         p["tag"]: p
@@ -167,30 +217,36 @@ def get_season_evolution(since_date: str) -> list[dict]:
     for tag, points in by_player.items():
         first, last = points[0], points[-1]
         p = players.get(tag, {})
+        start = baseline.get(tag, first["trophies"])
         out.append(
             {
                 "tag": tag,
                 "name": p.get("name"),
                 "club": club_names.get(p.get("club_tag")),
-                "start": first["trophies"],
+                "start": start,
                 "end": last["trophies"],
-                "delta": last["trophies"] - first["trophies"],
-                "joined_note": first["snapshot_date"] if first["snapshot_date"] != since_date else None,
+                "delta": last["trophies"] - start,
+                "joined_note": first["snapshot_date"] if (tag not in baseline and first["snapshot_date"] != since_date) else None,
             }
         )
     return out
 
 
-def get_baselines_since(since_date: str) -> dict:
+def get_baselines_since(since_date: str, season_month: str | None = None) -> dict:
     """{'tag': {'trophies': int, 'date': str}, ...} — premier point connu par
-    joueur depuis `since_date`. Utilisé quand le delta se calcule contre une
-    valeur de trophées fraîchement récupérée en direct (ex: !evo), plutôt
-    que contre le dernier snapshot stocké."""
+    joueur depuis `since_date`, ou la valeur figée de bs_season_baseline
+    quand elle existe (prioritaire, voir get_season_evolution). Utilisé
+    quand le delta se calcule contre une valeur de trophées fraîchement
+    récupérée en direct (ex: !evo), plutôt que contre le dernier snapshot
+    stocké."""
     res = _select_all_snapshots_since(since_date)
     baselines: dict = {}
     for row in res:
         if row["player_tag"] not in baselines:
             baselines[row["player_tag"]] = {"trophies": row["trophies"], "date": row["snapshot_date"]}
+    if season_month:
+        for tag, trophies in get_season_baseline(season_month).items():
+            baselines[tag] = {"trophies": trophies, "date": since_date}
     return baselines
 
 
@@ -600,6 +656,20 @@ def list_absences(club: str | None = None) -> list[dict]:
         query = query.eq("club", club)
     res = query.order("start_date", desc=True).execute()
     return res.data
+
+
+def update_absence(
+    absence_id: int, start_date: str, return_date: str | None,
+    reason: str, missed_event: str | None,
+) -> None:
+    get_client().table("absences").update(
+        {
+            "start_date": start_date,
+            "return_date": return_date,
+            "reason": reason,
+            "missed_event": missed_event,
+        }
+    ).eq("id", absence_id).execute()
 
 
 def delete_absence(absence_id: int) -> None:

@@ -72,7 +72,7 @@ def api_famille_ranked():
 def api_famille_evolution():
     state = db_bs.get_season_state()
     start_date = state["season_start_date"]
-    players = db_bs.get_season_evolution(start_date) if start_date else []
+    players = db_bs.get_season_evolution(start_date, state["season_month"]) if start_date else []
     players.sort(key=lambda p: p["delta"], reverse=True)
     return jsonify({
         "season_month": state["season_month"],
@@ -494,11 +494,11 @@ def api_admin_economy_status():
 @_require_internal_secret
 def api_admin_casino_pause():
     body = request.get_json(silent=True) or {}
-    _discord_id, err = _require_admin(body)
+    discord_id, err = _require_admin(body)
     if err:
         return err
     main = _bot()
-    future = asyncio.run_coroutine_threadsafe(main._apply_casino_pause(), main.bot.loop)
+    future = asyncio.run_coroutine_threadsafe(main._apply_casino_pause(int(discord_id)), main.bot.loop)
     paused = future.result(timeout=10)
     return jsonify({"ok": True, "paused": paused})
 
@@ -507,11 +507,11 @@ def api_admin_casino_pause():
 @_require_internal_secret
 def api_admin_casino_resume():
     body = request.get_json(silent=True) or {}
-    _discord_id, err = _require_admin(body)
+    discord_id, err = _require_admin(body)
     if err:
         return err
     main = _bot()
-    future = asyncio.run_coroutine_threadsafe(main._apply_casino_resume(), main.bot.loop)
+    future = asyncio.run_coroutine_threadsafe(main._apply_casino_resume(int(discord_id)), main.bot.loop)
     paused = future.result(timeout=10)
     return jsonify({"ok": True, "paused": paused})
 
@@ -804,9 +804,10 @@ def api_admin_tickets_fermer():
 def api_admin_absences_list():
     """Liste triée par date de début décroissante, filtrable par ?club= —
     pour l'onglet Absences du panel staff/admin du site (le site peut
-    re-trier côté client sur le jeu complet renvoyé ici)."""
+    re-trier côté client sur le jeu complet renvoyé ici). Staff ticket ou
+    admin, même règle que côté Discord (_is_absence_staff dans main.py)."""
     discord_id = request.args.get("discord_id", "")
-    _actor, err = _require_admin({"discord_id": discord_id})
+    _actor, err = _require_ticket_staff({"discord_id": discord_id})
     if err:
         return err
     club = request.args.get("club") or None
@@ -816,11 +817,11 @@ def api_admin_absences_list():
 @app.route("/api/admin/absences/supprimer", methods=["POST"])
 @_require_internal_secret
 def api_admin_absences_supprimer():
-    """Suppression depuis le site — admin uniquement, même règle que côté
-    Discord (!supprimer_absence permet aussi à l'auteur de retirer la
-    sienne, mais ce chemin site est réservé au panel admin)."""
+    """Suppression depuis le site — staff ticket ou admin (même règle que
+    !supprimer_absence côté Discord, qui autorise aussi l'auteur à retirer
+    la sienne ; ce chemin site reste réservé au panel staff/admin)."""
     body = request.get_json(silent=True) or {}
-    discord_id, err = _require_admin(body)
+    discord_id, err = _require_ticket_staff(body)
     if err:
         return err
     try:

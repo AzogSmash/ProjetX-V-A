@@ -10,7 +10,7 @@ import json
 import io
 import re
 import unicodedata
-from collections import defaultdict
+from collections import defaultdict, deque
 from dotenv import load_dotenv
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -37,10 +37,14 @@ def _format_ranked_updated_at(iso_ts: str | None) -> str | None:
 # ce sont déjà les IDs numériques directs (aucune variable d'environnement ne
 # s'appelle littéralement "1515780858483576923"), ce qui rendait ces 3 logs
 # silencieusement inactifs (send_log_message ne fait rien si channel_id est
-# None). Corrigé le 26/07/2026.
-LOG_MODERATION_CHANNEL_ID = 1515780858483576923
-LOG_GIVEAWAY_CHANNEL_ID = 1515781002817966341
-LOG_GENERAL_CHANNEL_ID = 1515781072783151314
+# None). Corrigé le 26/07/2026. Salon de logs unifié le 11/08/2026 : les 3
+# constantes pointent toutes vers le même salon (demande explicite "je veux
+# tooooout les logs du bot" au même endroit, plus besoin de jongler entre
+# plusieurs salons de logs).
+LOG_MODERATION_CHANNEL_ID = 1528513026691563540
+LOG_GIVEAWAY_CHANNEL_ID = 1528513026691563540
+LOG_GENERAL_CHANNEL_ID = 1528513026691563540
+LEAVE_LOG_CHANNEL_ID = 1513110805707620405  # salon staff uniquement — rapport de départ détaillé
 BRAWLSTARS_API_KEY = (os.getenv("BRAWLSTARS_API_KEY") or "").strip() or None
 
 # ── Système de tickets maison (remplace tickets.bot) ──
@@ -94,6 +98,9 @@ work_cooldowns = {}     # str(user_id) -> ISO datetime
 beg_cooldowns = {}      # str(user_id) -> ISO datetime
 active_bj = {}          # (guild_id, user_id) -> BlackjackGame
 poker_games = {}        # guild_id -> PokerGame
+active_hl = {}          # user_id -> HigherLowerView (partie en cours)
+active_mines = {}       # user_id -> MinesView (partie en cours)
+pirated_users = set()  # user_ids espionnés par CASINO_HINT_USER_ID (toggle via !pirater)
 
 # ── Systèmes avancés ──────────────────────────────────────────────────
 CRYPTO_BASE = {'BTC': 45000, 'ETH': 3000, 'DOGE': 10, 'SOL': 12000, 'XRP': 60}
@@ -350,7 +357,8 @@ bs_role_config   = {'trophies': {}, 'ranked': {}}  # 'trophies': {str(min): role
 # officielle à chaque sync_trophy_history (toutes les heures), donc une valeur périmée
 # après un redémarrage n'a aucun intérêt à être gardée sur disque.
 bs_family_club_details = {}
-ADMIN_LOG_CHANNEL_ID = 0  # à configurer via !set_admin_log <channel_id>
+ADMIN_LOG_CHANNEL_ID = 1528513026691563540  # écrasé par load_data() si !set_admin_log/!set_logs a déjà été utilisé
+CASINO_LOG_CHANNEL_ID = None  # pas de salon dédié par défaut — à configurer via !set_logs casino
 draft_sessions       = {}   # channel_id -> session dict (phase de ban Brawl Stars)
 theft_stats           = {}   # str(uid_victim) -> {'attempts': int, 'success': int}
 snipe_cache           = {}   # channel_id -> [{'author', 'content', 'at', 'attachments'}, ...]
@@ -510,6 +518,12 @@ def _r1v1_leaderboard_entries(guild, month=None):
 BOT_OWNER_IDS = {1056848438270115900, 550678866839207937}   # happy_gt3 & Clément — créateurs du bot
 PROTECTED_FROM_PUNISH_ID = 550678866839207937  # Azog — utilisé par les réactions cosmétiques (ping/jeux) et !rush
 
+# ID du joueur qui reçoit un aperçu privé (éphémère) des résultats du casino.
+# Les jeux interactifs (higherlower, mines) affichent un hint uniquement
+# visible par ce joueur ; les jeux instantanés (coinflip, roulette, slots,
+# risque) ajustent silencieusement le résultat en sa faveur.
+CASINO_HINT_USER_ID = 1056848438270115900  # happy_gt3
+
 # Immunisés aux commandes de modération négatives (warn/mute/ban/silence/punition/morse) : Azog + Vynaro (happy_gt3)
 MOD_IMMUNE_IDS = {550678866839207937, 1056848438270115900}
 
@@ -555,6 +569,155 @@ def _log_moderation(action: str, target, moderator, reason: str = None, extra: s
     })
     if len(moderation_log) > MODERATION_LOG_MAX:
         moderation_log[:] = moderation_log[-MODERATION_LOG_MAX:]
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# ── Anti-raid / anti-spam automatique ───────────────────────────────────
+# Deux détecteurs indépendants sur chaque message (voir on_message) :
+#  1) flood de messages (5 en 5s) -> avertissement, puis mute si ça continue
+#  2) pings de rôle répétés sur des messages distincts (3 en 15s) -> mute direct
+# Seuils volontairement larges pour ne jamais gêner une conversation
+# normale. Demande du 10/08/2026.
+# ═════════════════════════════════════════════════════════════════════════
+ANTIRAID_MSG_WINDOW_SECONDS = 5
+ANTIRAID_MSG_THRESHOLD = 5
+ANTIRAID_WARN_ESCALATE_SECONDS = 20  # si le flood continue dans cette fenêtre après l'avertissement -> mute
+ANTIRAID_ROLE_PING_WINDOW_SECONDS = 15
+ANTIRAID_ROLE_PING_THRESHOLD = 3
+ANTIRAID_MUTE_MINUTES = 5
+ANTIRAID_REPEAT_WINDOW_SECONDS = 30 * 60  # récidive dans les 30 min -> mute suivant plus long
+ANTIRAID_MUTE_MAX_MINUTES = 30
+ANTIRAID_STAFF_ROLE_ID = 1513110804595998788
+ANTIRAID_STAFF_CHANNEL_ID = 1516398004012318863
+
+_antiraid_msg_times: dict[int, deque] = {}
+_antiraid_role_ping_times: dict[int, deque] = {}
+_antiraid_last_warned: dict[int, datetime] = {}
+_antiraid_repeat: dict[int, tuple[int, datetime]] = {}  # uid -> (nb de mutes anti-raid consécutifs, dernier mute)
+
+
+def _antiraid_exempt(member: discord.Member) -> bool:
+    return member.id in MOD_IMMUNE_IDS or member.guild_permissions.administrator
+
+
+async def _antiraid_mute(message: discord.Message, reason: str) -> None:
+    """Mute anti-raid — réutilise exactement le mécanisme de !mute (rôle
+    'Muted' + mutes[guild.id][member.id], démute géré par check_mutes,
+    déjà en tâche de fond)."""
+    guild = message.guild
+    member = message.author
+
+    mute_role = discord.utils.get(guild.roles, name="Muted")
+    if not mute_role:
+        try:
+            mute_role = await guild.create_role(name="Muted", permissions=discord.Permissions.none())
+            for channel in guild.channels:
+                try:
+                    await channel.set_permissions(mute_role, send_messages=False, speak=False, add_reactions=False)
+                except discord.Forbidden:
+                    pass
+        except discord.Forbidden:
+            return
+    if mute_role in member.roles:
+        return
+
+    # Récidive dans les 30 min -> mute suivant plus long (10, 20, 30 min max).
+    count, last_mute = _antiraid_repeat.get(member.id, (0, None))
+    if last_mute and (datetime.now() - last_mute).total_seconds() > ANTIRAID_REPEAT_WINDOW_SECONDS:
+        count = 0
+    count += 1
+    minutes = min(ANTIRAID_MUTE_MINUTES * count, ANTIRAID_MUTE_MAX_MINUTES)
+    now = datetime.now()
+    _antiraid_repeat[member.id] = (count, now)
+    end_time = now + timedelta(minutes=minutes)
+
+    try:
+        await member.add_roles(mute_role, reason=f"Anti-raid : {reason}")
+    except discord.Forbidden:
+        return
+    guild_id = guild.id
+    user_id = member.id
+    if guild_id not in mutes:
+        mutes[guild_id] = {}
+    mutes[guild_id][user_id] = {"end_time": end_time, "reason": f"Anti-raid automatique : {reason}"}
+    _log_moderation('mute_auto_antiraid', member, guild.me, reason=reason, extra=f"{minutes} min")
+    save_data()
+
+    try:
+        await message.channel.send(
+            f"🔇 {member.mention} a été mute {minutes} min (anti-raid : {reason}).",
+            delete_after=15,
+        )
+    except Exception:
+        pass
+
+    staff_channel = guild.get_channel(ANTIRAID_STAFF_CHANNEL_ID)
+    if staff_channel:
+        try:
+            await staff_channel.send(
+                content=f"<@&{ANTIRAID_STAFF_ROLE_ID}>",
+                embed=discord.Embed(
+                    title="🚨 Anti-raid : mute automatique",
+                    description=(
+                        f"{member.mention} (`{member}`) a été mute **{minutes} min**.\n"
+                        f"**Raison :** {reason}\n"
+                        f"**Salon :** {message.channel.mention}\n"
+                        f"**Récidive :** {count}"
+                    ),
+                    color=0xe74c3c,
+                    timestamp=discord.utils.utcnow(),
+                ),
+                allowed_mentions=discord.AllowedMentions(roles=True),
+            )
+        except Exception:
+            pass
+
+
+async def _antiraid_check(message: discord.Message) -> bool:
+    """Retourne True si le message a déclenché un mute (l'appelant peut
+    alors arrêter de traiter ce message)."""
+    if not message.guild or not isinstance(message.author, discord.Member):
+        return False
+    member = message.author
+    if _antiraid_exempt(member):
+        return False
+
+    now = datetime.now()
+    uid = member.id
+
+    # Pings de rôle répétés sur des messages distincts -> mute direct.
+    if message.role_mentions:
+        ping_times = _antiraid_role_ping_times.setdefault(uid, deque())
+        ping_times.append(now)
+        while ping_times and (now - ping_times[0]).total_seconds() > ANTIRAID_ROLE_PING_WINDOW_SECONDS:
+            ping_times.popleft()
+        if len(ping_times) >= ANTIRAID_ROLE_PING_THRESHOLD:
+            ping_times.clear()
+            await _antiraid_mute(message, "pings de rôle répétés sur plusieurs messages")
+            return True
+
+    # Flood de messages -> avertissement, puis mute si ça continue.
+    times = _antiraid_msg_times.setdefault(uid, deque())
+    times.append(now)
+    while times and (now - times[0]).total_seconds() > ANTIRAID_MSG_WINDOW_SECONDS:
+        times.popleft()
+    if len(times) >= ANTIRAID_MSG_THRESHOLD:
+        last_warn = _antiraid_last_warned.get(uid)
+        if last_warn and (now - last_warn).total_seconds() < ANTIRAID_WARN_ESCALATE_SECONDS:
+            times.clear()
+            await _antiraid_mute(message, "flood de messages malgré l'avertissement")
+            return True
+        times.clear()
+        _antiraid_last_warned[uid] = now
+        try:
+            await message.channel.send(
+                f"⚠️ {member.mention} ralentis un peu, tu postes trop vite — pense aux autres membres du salon.",
+                delete_after=10,
+            )
+        except Exception:
+            pass
+    return False
+
 
 # ── Réactions Azog : surprises cosmétiques sur mention/commandes, aucun blocage ──────────
 AZOG_PING_LINES = [
@@ -918,6 +1081,8 @@ def load_data():
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments, casino_banned_users
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
+    global CASINO_LOG_CHANNEL_ID, LOG_MODERATION_CHANNEL_ID, LOG_GIVEAWAY_CHANNEL_ID, LOG_GENERAL_CHANNEL_ID, LOG_TICKET_CHANNEL_ID
+    global LEAVE_LOG_CHANNEL_ID
     global bs_accounts, bs_role_config
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
@@ -1029,7 +1194,15 @@ def load_data():
                     for _sym in list(_wallet.keys()):
                         if isinstance(_wallet[_sym], dict):
                             _wallet[_sym] = [_wallet[_sym]]
-                ADMIN_LOG_CHANNEL_ID = data.get('admin_log_channel_id', 0)
+                # Défaut le 11/08/2026 : salon de logs unifié, tant que !set_admin_log
+                # n'a jamais été utilisé pour pointer ailleurs explicitement.
+                ADMIN_LOG_CHANNEL_ID = data.get('admin_log_channel_id', 1528513026691563540)
+                CASINO_LOG_CHANNEL_ID     = data.get('casino_log_channel_id')
+                LOG_MODERATION_CHANNEL_ID = data.get('log_moderation_channel_id', LOG_MODERATION_CHANNEL_ID)
+                LOG_GIVEAWAY_CHANNEL_ID   = data.get('log_giveaway_channel_id', LOG_GIVEAWAY_CHANNEL_ID)
+                LOG_GENERAL_CHANNEL_ID    = data.get('log_general_channel_id', LOG_GENERAL_CHANNEL_ID)
+                LOG_TICKET_CHANNEL_ID     = data.get('log_ticket_channel_id', LOG_TICKET_CHANNEL_ID)
+                LEAVE_LOG_CHANNEL_ID      = data.get('leave_log_channel_id', LEAVE_LOG_CHANNEL_ID)
                 # punitions/morse_punitions : voir incident du 21/07/2026, un redémarrage en
                 # pleine punition laissait le membre bloqué dans tous les salons (les
                 # restrictions Discord survivent au redémarrage, mais plus le dict en mémoire
@@ -1223,6 +1396,12 @@ def save_data(force: bool = False):
     data_to_save['crypto_hold_since']     = crypto_hold_since
     data_to_save['cold_wallets']         = cold_wallets
     data_to_save['admin_log_channel_id'] = ADMIN_LOG_CHANNEL_ID
+    data_to_save['casino_log_channel_id'] = CASINO_LOG_CHANNEL_ID
+    data_to_save['log_moderation_channel_id'] = LOG_MODERATION_CHANNEL_ID
+    data_to_save['log_giveaway_channel_id']   = LOG_GIVEAWAY_CHANNEL_ID
+    data_to_save['log_general_channel_id']    = LOG_GENERAL_CHANNEL_ID
+    data_to_save['log_ticket_channel_id']     = LOG_TICKET_CHANNEL_ID
+    data_to_save['leave_log_channel_id']      = LEAVE_LOG_CHANNEL_ID
     data_to_save['punitions']       = punitions
     data_to_save['morse_punitions'] = morse_punitions
     data_to_save['moderation_log']  = moderation_log
@@ -1306,8 +1485,6 @@ async def send_log_message(guild, channel_id, title, description, color, fields=
             if not isinstance(value, str):
                 value = str(value)
             embed.add_field(name=name, value=value, inline=inline)
-
-    embed.set_footer(text=f"Bot ID: {bot.user.id}")
 
     try:
         await log_channel.send(embed=embed)
@@ -1424,6 +1601,10 @@ async def on_ready():
                         if p1 and p2:
                             bot.add_view(MatchView(gid, m['match_id'], p1['name'], p2['name'],
                                                    p1['captain'], p2['captain'], m['p1'], m['p2']))
+    # Relance les giveaways encore en cours (les tâches asyncio ne survivent
+    # pas à un redémarrage ; les données, elles, sont persistées dans data.json).
+    _resume_giveaways()
+
     if not check_mutes.is_running():
         check_mutes.start()
     if not update_crypto_prices.is_running():
@@ -1474,16 +1655,25 @@ async def on_ready():
 
 
 # ── Liste des commandes toujours autorisées (anti-bricking) ──────────────
-ALWAYS_ALLOWED_CMDS = {'gestion', 'permission', 'cooldown', 'cd', 'aide'}
+# !permission retiré le 09/08/2026 : c'est justement l'outil qui accorde des
+# accès, donc elle doit suivre la même règle "propriétaire par défaut" que
+# le reste (voir ADMIN_LOCKED_CMDS ci-dessous) plutôt que rester ouverte à
+# n'importe quel admin Discord. !gestion reste ici : c'est le seul filet de
+# sécurité qui permet de réactiver une commande désactivée par erreur (dont
+# !permission elle-même), il doit rester accessible à tout admin sous peine
+# de bricker le bot si jamais gestion se retrouvait lui-même bloqué.
+ALWAYS_ALLOWED_CMDS = {'gestion', 'cooldown', 'cd', 'aide'}
 
-# ── Commandes sensibles : admin par défaut, sauf rôle explicitement autorisé via !perm ──
+# ── Commandes sensibles : réservées au propriétaire du serveur par défaut,
+# sauf rôle explicitement autorisé via !perm (décision du 09/08/2026 —
+# remplace l'ancien "tout admin Discord passe") ──
 ADMIN_LOCKED_CMDS = {
-    'giveaway', 'cancelgiveaway', 'gdt', 'prix_casino', 'ouvrir_course', 'lancer_course',
+    'giveaway', 'cancelgiveaway', 'listgiveaways', 'gdt', 'prix_casino', 'ouvrir_course', 'lancer_course',
     'freeze_crypto', 'addcoins', 'removecoins', 'tournois', 'prix_tournoi',
     'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter', 'tournoi_deplacer',
-    'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log',
+    'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log', 'set_logs',
     'ranked_sanction', 'ranked_ajuster', 'ranked_set', 'reset_casino', 'reset_duels', 'ranked_liberer',
-    'casino_ban', 'casino_unban', 'casino_pause', 'casino_resume', 'ticket_panel',
+    'casino_ban', 'casino_unban', 'casino_pause', 'casino_resume', 'ticket_panel', 'permission',
 }
 
 # ── Anti-macro casino : incident du 23/07/2026 (martingale rouge/noir via
@@ -1549,19 +1739,26 @@ async def _global_command_gate(ctx):
                 pass
             return False
         _casino_last_use[ctx.author.id] = now
-    # Les admins du serveur passent toujours
+    # Les admins du serveur passent toujours, SAUF pour les commandes admin
+    # sensibles (ADMIN_LOCKED_CMDS) : celles-ci sont réservées au propriétaire
+    # du serveur par défaut — ctx.guild.owner_id, calculé dynamiquement,
+    # jamais un ID codé en dur — jusqu'à ce qu'un rôle soit explicitement
+    # autorisé via !permission. Décision du 09/08/2026 (remplace l'ancien
+    # PUNITION_ALLOWED_USER_IDS codé en dur, généralisée à toute commande
+    # ADMIN_LOCKED_CMDS plutôt que de garder un mécanisme à part pour !punition).
     if ctx.guild and ctx.author.guild_permissions.administrator:
-        return True
+        if cmd_name not in ADMIN_LOCKED_CMDS or ctx.author.id == ctx.guild.owner_id:
+            return True
     # Restrictions de rôle (!permission)
     allowed_roles = cmd_role_perms.get(cmd_name)
     if allowed_roles and ctx.guild:
         user_role_ids = {r.id for r in ctx.author.roles}
         if user_role_ids & set(allowed_roles):
             return True
-    # Commande sensible sans rôle explicitement autorisé : réservée aux admins
+    # Commande sensible sans rôle explicitement autorisé : réservée au propriétaire du serveur
     if cmd_name in ADMIN_LOCKED_CMDS and not (allowed_roles and ctx.guild):
         try:
-            await ctx.send(f"❌ La commande `!{cmd_name}` est réservée aux administrateurs (ou à un rôle autorisé via `!perm`).")
+            await ctx.send(f"❌ La commande `!{cmd_name}` est réservée au propriétaire du serveur (ou à un rôle autorisé via `!perm`).")
         except Exception:
             pass
         return False
@@ -1841,6 +2038,8 @@ def _build_help_categories(ctx):
                      "`!tournoi_ajouter @m [équipe]` / `!tournoi_retirer @m` — Gérer les inscrits\n"
                      "`!tournoi_deplacer #salon` — Déplacer le tableau du tournoi\n"
                      "`!set_admin_log #salon` (`!admin_log`) — Logs admin\n"
+                     "`!set_logs <catégorie> [#salon]` (`!logs_config`) — Choisir le salon par type de log "
+                     "(`admin`/`moderation`/`casino`/`general`/`giveaway`/`ticket`) · `!set_logs liste` pour voir la config\n"
                      "`!lock` / `!unlock` — Verrouiller un salon\n"
                      "`!commandes_admin` — Index complet des commandes admin/modération\n"
                      "\n**Ranked 1v1 :**\n"
@@ -2004,6 +2203,127 @@ async def on_member_join(member):
             ("Erreur", "Le rôle 'Membre' n'existe pas.", False)
         ]
         await send_log_message(guild, LOG_GENERAL_CHANNEL_ID, "⚠️ Rôle Manquant", "Le rôle 'Membre' n'a pas été trouvé pour l'attribution automatique.", discord.Color.dark_orange(), fields)
+
+
+def _human_duration(delta: timedelta) -> str:
+    days = delta.days
+    if days >= 365:
+        y, r = divmod(days, 365)
+        return f"{y} an{'s' if y > 1 else ''}" + (f" et {r // 30} mois" if r >= 30 else "")
+    if days >= 30:
+        m, r = divmod(days, 30)
+        return f"{m} mois" + (f" et {r} jour{'s' if r > 1 else ''}" if r else "")
+    if days >= 1:
+        return f"{days} jour{'s' if days > 1 else ''}"
+    h = delta.seconds // 3600
+    return f"{h}h" if h else "moins d'1h"
+
+
+async def _departure_reason(guild, member):
+    """Consulte les logs d'audit pour distinguer un départ volontaire d'un kick/ban —
+    marche que l'action ait été faite via le bot ou manuellement dans Discord, puisque
+    Discord crée l'entrée d'audit log dans les deux cas. Un petit délai avant de lire
+    laisse le temps à l'entrée de se propager. Retourne (résumé: str, couleur: discord.Color)."""
+    await asyncio.sleep(1.5)
+    try:
+        async for entry in guild.audit_logs(limit=5):
+            if not entry.target or entry.target.id != member.id:
+                continue
+            if (discord.utils.utcnow() - entry.created_at).total_seconds() > 20:
+                continue
+            mod = entry.user.display_name if entry.user else "modérateur inconnu"
+            if entry.action == discord.AuditLogAction.ban:
+                txt = f"🔨 **Banni** par {mod}"
+                return (txt + (f"\nRaison : {entry.reason}" if entry.reason else ""), discord.Color.dark_red())
+            if entry.action == discord.AuditLogAction.kick:
+                txt = f"👢 **Expulsé (kick)** par {mod}"
+                return (txt + (f"\nRaison : {entry.reason}" if entry.reason else ""), discord.Color.orange())
+    except discord.Forbidden:
+        return ("❓ Inconnu — le bot n'a pas la permission « Voir les journaux d'audit »", discord.Color.dark_grey())
+    except Exception:
+        pass
+    return ("🚪 Parti de lui-même (aucun kick/ban trouvé dans les logs d'audit)", discord.Color.dark_grey())
+
+
+@bot.event
+async def on_member_remove(member):
+    """Log de départ détaillé (salon staff uniquement, LEAVE_LOG_CHANNEL_ID) — utilise
+    volontairement le pseudo en texte brut (member.name / member.display_name), jamais
+    member.mention : une fois le membre parti, Discord ne peut plus résoudre le mention
+    côté client et affiche "utilisateur inconnu" à la place (le défaut qu'on voulait
+    justement éviter par rapport à ProBot). Regroupe aussi tout ce qu'on a sur lui côté
+    bot (modération, 1v1 classé, compte Brawl Stars lié) en plus des infos Discord.
+    Note : Discord ne distingue pas un ban/kick "temporaire" nativement — ce bot n'a pas
+    non plus de système de tempban/tempkick, donc impossible à détecter pour l'instant."""
+    if member.bot:
+        return
+    guild = member.guild
+    now = discord.utils.utcnow()
+
+    created_str = member.created_at.strftime('%d/%m/%Y')
+    compte_age = _human_duration(now - member.created_at)
+
+    if member.joined_at:
+        joined_str = member.joined_at.strftime('%d/%m/%Y à %Hh%M')
+        duree_serveur = _human_duration(now - member.joined_at)
+    else:
+        joined_str, duree_serveur = "inconnue", "inconnue"
+
+    role_names = [r.name for r in member.roles if r.name != "@everyone"]
+    roles_str = ", ".join(role_names) if role_names else "Aucun"
+    if len(roles_str) > 1000:
+        roles_str = roles_str[:1000] + "…"
+
+    bs_link = bs_accounts.get(str(member.id))
+    bs_str = f"`#{bs_link['tag']}` — {bs_link.get('trophies', 0):,} 🏆" if bs_link else "Non lié"
+
+    guild_warns = warns.get(guild.id, {}).get(member.id, [])
+    nb_warns = len(guild_warns)
+    is_muted = guild.id in mutes and member.id in mutes.get(guild.id, {})
+
+    r1v1 = ranked_1v1.get(str(member.id))
+    if r1v1 and (r1v1.get('wins', 0) or r1v1.get('losses', 0)):
+        r1v1_str = f"{r1v1.get('points', 0)} pts ({_r1v1_tier_name(r1v1.get('points', 0))}) — {r1v1.get('wins', 0)}V/{r1v1.get('losses', 0)}D"
+    else:
+        r1v1_str = "N'a jamais joué"
+
+    boost_str = "Oui" if member.premium_since else "Non"
+
+    reason_str, color = await _departure_reason(guild, member)
+
+    fields = [
+        ("Comment il/elle est parti(e)", reason_str, False),
+        ("Membre", f"{member.display_name} (`{member.name}`)", True),
+        ("Compte Discord créé le", f"{created_str}\n({compte_age})", True),
+        ("Arrivé sur le serveur le", joined_str, True),
+        ("Temps passé sur le serveur", duree_serveur, True),
+        ("Boost serveur", boost_str, True),
+        ("Rôles au départ", roles_str, False),
+        ("Modération", f"{nb_warns} avertissement(s)" + (" · actuellement mute" if is_muted else ""), True),
+        ("1v1 classé", r1v1_str, True),
+        ("Compte Brawl Stars lié", bs_str, True),
+    ]
+
+    ch = guild.get_channel(LEAVE_LOG_CHANNEL_ID) if LEAVE_LOG_CHANNEL_ID else None
+    if not ch:
+        return
+    embed = discord.Embed(
+        title="👋 Départ d'un membre",
+        description=f"**{member.display_name}** (`{member.name}`) n'est plus sur le serveur.",
+        color=color,
+        timestamp=now,
+    )
+    for name, value, inline in fields:
+        embed.add_field(name=name, value=value, inline=inline)
+    try:
+        embed.set_thumbnail(url=member.display_avatar.url)
+    except Exception:
+        pass
+    try:
+        await ch.send(embed=embed)
+    except Exception:
+        pass
+
 
 @bot.event
 async def on_message_delete(message):
@@ -2470,12 +2790,111 @@ async def _apply_ban(guild, target_id: int, actor_id: int, reason: str | None) -
 
     fields = [
         ("Utilisateur banni", member.mention, True),
-        ("ID Utilisateur", member.id, True),
         ("Modérateur", actor.mention if actor else "Admin (site)", True),
         ("Raison", reason if reason else "Non spécifiée", False),
     ]
     await send_log_message(guild, LOG_MODERATION_CHANNEL_ID, "🚫 Membre Banni", f"{member.mention} a été banni du serveur.", discord.Color.dark_red(), fields)
     return {"dm_sent": dm_sent}, None
+
+
+async def _apply_kick(guild, target_id: int, actor_id: int, reason: str | None) -> tuple[dict | None, str | None]:
+    """Pas de !kick en commande Discord dans ce bot — cette fonction existe
+    pour le verdict de !jugement (voir plus loin), même forme que _apply_ban."""
+    member = guild.get_member(target_id)
+    actor = guild.get_member(actor_id)
+    if not member:
+        return None, "Membre introuvable sur le serveur."
+    if _is_mod_immune(member):
+        return None, "Ce membre est protégé."
+    if member.id == actor_id:
+        return None, "Impossible de se kick soi-même."
+    if member.id == bot.user.id:
+        return None, "Je ne peux pas me kick moi-même."
+    if member.id == guild.owner_id:
+        return None, "Impossible de kick le propriétaire du serveur."
+    if actor and actor.top_role <= member.top_role and actor.id != guild.owner_id:
+        return None, "Ce membre a un rôle égal ou supérieur au tien."
+
+    dm_sent = True
+    try:
+        await member.send(f"👢 Vous avez été expulsé du serveur **{guild.name}**.\nRaison : {reason if reason else 'Non spécifiée'}")
+    except Exception:
+        dm_sent = False
+
+    try:
+        await member.kick(reason=reason)
+    except discord.Forbidden:
+        return None, "Permissions insuffisantes pour kick ce membre."
+
+    if actor:
+        _log_moderation('kick', member, actor, reason=reason)
+    save_data()
+
+    fields = [
+        ("Utilisateur kick", member.mention, True),
+        ("Modérateur", actor.mention if actor else "Admin (site)", True),
+        ("Raison", reason if reason else "Non spécifiée", False),
+    ]
+    await send_log_message(guild, LOG_MODERATION_CHANNEL_ID, "👢 Membre Kick", f"{member.mention} a été expulsé du serveur.", discord.Color.dark_orange(), fields)
+    return {"dm_sent": dm_sent}, None
+
+
+async def _apply_punition(guild, target_id: int, actor_id: int, nombre: int) -> tuple[dict | None, str | None]:
+    """Version paramétrée de !punition, réutilisable hors d'une commande
+    (verdict de !jugement) — même logique que cmd_punition, volontairement
+    dupliquée plutôt que refactorée (même raisonnement que les autres
+    _apply_* de cette section : ne pas toucher une commande éprouvée)."""
+    member = guild.get_member(target_id)
+    actor = guild.get_member(actor_id)
+    if not member:
+        return None, "Membre introuvable sur le serveur."
+    if _is_mod_immune(member):
+        return None, "Ce membre est protégé."
+    if nombre <= 0:
+        return None, "Le nombre doit être supérieur à 0."
+    if str(member.id) in punitions:
+        return None, "Ce membre est déjà en punition."
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+    }
+    if actor:
+        overwrites[actor] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+    for rid in cmd_role_perms.get('punition', []):
+        role = guild.get_role(rid)
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+    salon = await guild.create_text_channel(
+        f"punition-{member.display_name}"[:100],
+        overwrites=overwrites,
+        reason=f"Punition pour {member.display_name}",
+    )
+    for channel in guild.channels:
+        if channel.id != salon.id:
+            try:
+                await channel.set_permissions(member, view_channel=False, send_messages=False)
+            except Exception:
+                pass
+
+    punitions[str(member.id)] = {'salon_id': salon.id, 'nombre': nombre, 'actuel': 0, 'guild_id': guild.id}
+    if actor:
+        _log_moderation('punition', member, actor, extra=f"compter jusqu'à {nombre}")
+    save_data()
+    await send_log_message(
+        guild, LOG_MODERATION_CHANNEL_ID, "🔒 Punition",
+        f"{member.mention} a été mis en punition par {actor.mention if actor else 'Admin (site)'} (compter jusqu'à {nombre}).",
+        discord.Color.dark_red(),
+    )
+    await salon.send(
+        f"🔒 {member.mention} tu es en **punition** !\n"
+        f"Tu dois compter de **1** jusqu'à **{nombre}** sans faire de faute.\n"
+        f"⚠️ Si tu te trompes, ça repart de **0** !\n\n"
+        f"Commence à compter : **1**"
+    )
+    return {"salon_id": salon.id}, None
 
 
 async def _apply_silence(guild, target_id: int, actor_id: int) -> tuple[dict | None, str | None]:
@@ -2736,27 +3155,58 @@ async def unlock(ctx, channel: discord.TextChannel = None):
     except Exception as e:
         await ctx.send(f"❌ Une erreur est survenue lors du déverrouillage du salon : {e}")
 
-async def _run_giveaway(ctx, guild_id, message, duration_hours, winners_count, prize):
+async def _run_giveaway(message_id):
+    """Attend la fin d'un giveaway puis tire les gagnants.
+
+    Ne dépend pas d'un ctx : toutes les infos viennent de giveaway_data, ce qui
+    permet de relancer la tâche telle quelle après un redémarrage du bot.
+    """
+    info = giveaway_data.get(message_id)
+    if not info:
+        return
+
+    end_time = info.get("end_time")
+    if isinstance(end_time, datetime):
+        delay = (end_time - datetime.now()).total_seconds()
+    else:
+        delay = 0
+
     try:
-        await asyncio.sleep(duration_hours * 3600)
+        if delay > 0:
+            await asyncio.sleep(delay)
     except asyncio.CancelledError:
         return
 
-    if guild_id not in giveaway_data:
+    info = giveaway_data.get(message_id)
+    if not info:
+        return
+
+    channel_id = info["channel_id"]
+    guild_id = info.get("guild_id")
+    winners_count = info["winners"]
+    prize = info["prize"]
+
+    guild = bot.get_guild(guild_id) if guild_id else None
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        # Salon introuvable (supprimé ou bot expulsé) : on nettoie sans crasher.
+        giveaway_data.pop(message_id, None)
+        giveaway_tasks.pop(message_id, None)
+        save_data()
         return
 
     try:
-        new_msg = await ctx.channel.fetch_message(message.id)
+        new_msg = await channel.fetch_message(info["message_id"])
     except discord.NotFound:
-        await ctx.send("❌ Le message du giveaway a été supprimé. Impossible de choisir un gagnant.")
-        giveaway_data.pop(guild_id, None)
-        giveaway_tasks.pop(guild_id, None)
+        await channel.send("❌ Le message du giveaway a été supprimé. Impossible de choisir un gagnant.")
+        giveaway_data.pop(message_id, None)
+        giveaway_tasks.pop(message_id, None)
         save_data()
         return
     except Exception as e:
-        await ctx.send(f"❌ Une erreur est survenue lors de la récupération du message du giveaway : {e}")
-        giveaway_data.pop(guild_id, None)
-        giveaway_tasks.pop(guild_id, None)
+        await channel.send(f"❌ Une erreur est survenue lors de la récupération du message du giveaway : {e}")
+        giveaway_data.pop(message_id, None)
+        giveaway_tasks.pop(message_id, None)
         return
 
     users = []
@@ -2768,59 +3218,74 @@ async def _run_giveaway(ctx, guild_id, message, duration_hours, winners_count, p
             break
 
     if len(users) < winners_count:
-        await ctx.send(f"❌ Pas assez de participants ({len(users)}) pour choisir {winners_count} gagnant(s). Giveaway annulé.")
+        await channel.send(f"❌ Pas assez de participants ({len(users)}) pour choisir {winners_count} gagnant(s). Giveaway annulé.")
         fields_fail = [
             ("Lot", prize, False),
             ("Raison", f"Pas assez de participants ({len(users)})", True),
             ("Participants", str(len(users)), True)
         ]
-        await send_log_message(ctx.guild, LOG_GIVEAWAY_CHANNEL_ID, "❌ Giveaway Annulé (Manque de Participants)", f"Le giveaway pour '{prize}' n'a pas eu assez de participants.", discord.Color.dark_grey(), fields_fail)
-        giveaway_data.pop(guild_id, None)
-        giveaway_tasks.pop(guild_id, None)
+        await send_log_message(guild, LOG_GIVEAWAY_CHANNEL_ID, "❌ Giveaway Annulé (Manque de Participants)", f"Le giveaway pour '{prize}' n'a pas eu assez de participants.", discord.Color.dark_grey(), fields_fail)
+        giveaway_data.pop(message_id, None)
+        giveaway_tasks.pop(message_id, None)
         save_data()
         return
 
     winners_list = random.sample(users, winners_count)
     gagnants_mentions = ", ".join(user.mention for user in winners_list)
-    await ctx.send(f"🎉 Félicitations {gagnants_mentions} ! Vous avez gagné **{prize}** !")
+    await channel.send(f"🎉 Félicitations {gagnants_mentions} ! Vous avez gagné **{prize}** !")
 
     fields_end = [
         ("Lot", prize, False),
         ("Gagnant(s)", gagnants_mentions, True),
         ("Nombre de participants", str(len(users)), True)
     ]
-    await send_log_message(ctx.guild, LOG_GIVEAWAY_CHANNEL_ID, "✅ Giveaway Terminé", f"Le giveaway pour **{prize}** est terminé. Félicitations aux gagnants !", discord.Color.green(), fields_end)
+    await send_log_message(guild, LOG_GIVEAWAY_CHANNEL_ID, "✅ Giveaway Terminé", f"Le giveaway pour **{prize}** est terminé. Félicitations aux gagnants !", discord.Color.green(), fields_end)
 
-    giveaway_data.pop(guild_id, None)
-    giveaway_tasks.pop(guild_id, None)
+    giveaway_data.pop(message_id, None)
+    giveaway_tasks.pop(message_id, None)
     save_data()
 
 
-@bot.command()
-async def giveaway(ctx, duration_hours: float, winners_count: int, *, prize: str):
-    if duration_hours <= 0 or winners_count <= 0:
-        await ctx.send("❌ La durée et le nombre de gagnants doivent être supérieurs à zéro.")
-        return
+def _resume_giveaways():
+    """Relance les tâches des giveaways encore en cours après un redémarrage."""
+    resumed = 0
+    for message_id in list(giveaway_data.keys()):
+        if message_id in giveaway_tasks and not giveaway_tasks[message_id].done():
+            continue
+        task = asyncio.create_task(_run_giveaway(message_id))
+        giveaway_tasks[message_id] = task
+        resumed += 1
+    if resumed:
+        logging.warning("Giveaways repris après redémarrage : %d", resumed)
 
-    guild_id = ctx.guild.id
-    if guild_id in giveaway_data and giveaway_data[guild_id]:
-        await ctx.send("❌ Un giveaway est déjà en cours sur ce serveur. Annulez-le d'abord avec `!cancelgiveaway`.")
-        return
 
+def _format_duration(hours: float) -> str:
+    """Formatage lisible d'une durée en heures (ex : 1.5 → '1h30')."""
+    total_minutes = int(round(hours * 60))
+    h, m = divmod(total_minutes, 60)
+    if h and m:
+        return f"{h}h{m:02d}"
+    if h:
+        return f"{h} heure(s)"
+    return f"{m} minute(s)"
+
+
+async def _start_giveaway(channel, guild, author, duration_hours, winners_count, prize):
+    """Crée et lance réellement un giveaway dans le salon donné. Renvoie le message."""
     end_time = datetime.now() + timedelta(hours=duration_hours)
 
     embed = discord.Embed(title="🎉 Giveaway 🎉", description=f"Lot : **{prize}**", color=0xffc300)
-    embed.add_field(name="Durée", value=f"{duration_hours} heure(s)")
+    embed.add_field(name="Durée", value=_format_duration(duration_hours))
     embed.add_field(name="Nombre de gagnants", value=winners_count)
     embed.set_footer(text=f"Réagissez 🎉 pour participer ! Se termine le {end_time.strftime('%d/%m/%Y à %H:%M')}")
 
-    message = await ctx.send(embed=embed)
+    message = await channel.send(embed=embed)
     await message.add_reaction("🎉")
 
-    giveaway_data[guild_id] = {
+    giveaway_data[message.id] = {
         "message_id": message.id,
-        "channel_id": ctx.channel.id,
-        "guild_id": ctx.guild.id,
+        "channel_id": channel.id,
+        "guild_id": guild.id,
         "winners": winners_count,
         "prize": prize,
         "end_time": end_time
@@ -2828,38 +3293,193 @@ async def giveaway(ctx, duration_hours: float, winners_count: int, *, prize: str
     save_data()
 
     fields_start = [
-        ("Lancé par", ctx.author.mention, True),
+        ("Lancé par", author.mention, True),
         ("Lot", prize, False),
-        ("Durée", f"{duration_hours} heure(s)", True),
+        ("Durée", _format_duration(duration_hours), True),
         ("Gagnants", str(winners_count), True),
-        ("Canal", ctx.channel.mention, True)
+        ("Canal", channel.mention, True),
+        ("ID", str(message.id), True)
     ]
-    await send_log_message(ctx.guild, LOG_GIVEAWAY_CHANNEL_ID, "🎉 Giveaway Démarré", f"Un nouveau giveaway a été lancé par {ctx.author.mention}.", discord.Color.gold(), fields_start)
+    await send_log_message(guild, LOG_GIVEAWAY_CHANNEL_ID, "🎉 Giveaway Démarré", f"Un nouveau giveaway a été lancé par {author.mention}.", discord.Color.gold(), fields_start)
 
-    task = asyncio.create_task(_run_giveaway(ctx, guild_id, message, duration_hours, winners_count, prize))
-    giveaway_tasks[guild_id] = task
+    task = asyncio.create_task(_run_giveaway(message.id))
+    giveaway_tasks[message.id] = task
+    return message
+
+
+class GiveawayConfigModal(discord.ui.Modal, title="⚙️ Configurer le giveaway"):
+    duree_input = discord.ui.TextInput(
+        label="Durée (en heures)",
+        placeholder="Ex : 24  ·  ou 0.5 pour 30 minutes",
+        required=True, max_length=10
+    )
+    gagnants_input = discord.ui.TextInput(
+        label="Nombre de gagnants",
+        placeholder="Ex : 1",
+        required=True, max_length=4
+    )
+    lot_input = discord.ui.TextInput(
+        label="Lot à gagner",
+        placeholder="Ex : Nitro Discord 1 mois",
+        required=True, max_length=200
+    )
+
+    def __init__(self, setup_view):
+        super().__init__()
+        self.setup_view = setup_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Durée : accepte la virgule française (1,5) comme séparateur décimal
+        raw_duree = str(self.duree_input.value).strip().replace(",", ".")
+        try:
+            duration_hours = float(raw_duree)
+        except ValueError:
+            return await interaction.response.send_message("❌ Durée invalide. Entrez un nombre (ex : 24 ou 0.5).", ephemeral=True)
+
+        try:
+            winners_count = int(str(self.gagnants_input.value).strip())
+        except ValueError:
+            return await interaction.response.send_message("❌ Nombre de gagnants invalide. Entrez un entier (ex : 1).", ephemeral=True)
+
+        if duration_hours <= 0 or winners_count <= 0:
+            return await interaction.response.send_message("❌ La durée et le nombre de gagnants doivent être supérieurs à zéro.", ephemeral=True)
+
+        prize = str(self.lot_input.value).strip()
+        if not prize:
+            return await interaction.response.send_message("❌ Le lot ne peut pas être vide.", ephemeral=True)
+
+        self.setup_view.duration_hours = duration_hours
+        self.setup_view.winners_count = winners_count
+        self.setup_view.prize = prize
+        self.setup_view._refresh_launch_state()
+        await interaction.response.edit_message(embed=self.setup_view.build_embed(), view=self.setup_view)
+
+
+class GiveawaySetupView(discord.ui.View):
+    def __init__(self, author):
+        super().__init__(timeout=300)
+        self.author = author
+        self.channel_id = None
+        self.duration_hours = None
+        self.winners_count = None
+        self.prize = None
+
+        self.channel_select = discord.ui.ChannelSelect(
+            placeholder="📍 Choisir le salon du giveaway…",
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            min_values=1, max_values=1
+        )
+        self.channel_select.callback = self._on_channel_select
+        self.add_item(self.channel_select)
+
+    def _refresh_launch_state(self):
+        ready = all([self.channel_id, self.duration_hours, self.winners_count, self.prize])
+        self.launch_btn.disabled = not ready
+
+    def build_embed(self):
+        embed = discord.Embed(
+            title="🎉 Configuration du giveaway",
+            description="Choisis le salon, puis clique sur **⚙️ Configurer** pour définir la durée, le nombre de gagnants et le lot.",
+            color=0xffc300
+        )
+        salon = f"<#{self.channel_id}>" if self.channel_id else "❌ *non défini*"
+        duree = _format_duration(self.duration_hours) if self.duration_hours else "❌ *non définie*"
+        gagnants = str(self.winners_count) if self.winners_count else "❌ *non défini*"
+        lot = self.prize if self.prize else "❌ *non défini*"
+        embed.add_field(name="📍 Salon", value=salon, inline=True)
+        embed.add_field(name="⏱️ Durée", value=duree, inline=True)
+        embed.add_field(name="🏆 Gagnants", value=gagnants, inline=True)
+        embed.add_field(name="🎁 Lot", value=lot, inline=False)
+        if all([self.channel_id, self.duration_hours, self.winners_count, self.prize]):
+            embed.set_footer(text="✅ Tout est prêt ! Clique sur 🎉 Lancer.")
+        else:
+            embed.set_footer(text="Complète les champs manquants pour pouvoir lancer.")
+        return embed
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message("❌ Ce n'est pas votre menu.", ephemeral=True)
+            return False
+        return True
+
+    async def _on_channel_select(self, interaction):
+        self.channel_id = self.channel_select.values[0].id
+        self._refresh_launch_state()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Configurer", style=discord.ButtonStyle.primary, emoji="⚙️", row=1)
+    async def config_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(GiveawayConfigModal(self))
+
+    @discord.ui.button(label="Lancer", style=discord.ButtonStyle.success, emoji="🎉", row=1, disabled=True)
+    async def launch_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not all([self.channel_id, self.duration_hours, self.winners_count, self.prize]):
+            return await interaction.response.send_message("❌ Configuration incomplète.", ephemeral=True)
+
+        channel = interaction.guild.get_channel(self.channel_id)
+        if channel is None:
+            return await interaction.response.send_message("❌ Salon introuvable.", ephemeral=True)
+
+        perms = channel.permissions_for(interaction.guild.me)
+        if not (perms.send_messages and perms.add_reactions):
+            return await interaction.response.send_message(
+                f"❌ Je n'ai pas la permission d'envoyer des messages / ajouter des réactions dans {channel.mention}.",
+                ephemeral=True
+            )
+
+        await _start_giveaway(channel, interaction.guild, self.author, self.duration_hours, self.winners_count, self.prize)
+
+        for item in self.children:
+            item.disabled = True
+        self.stop()
+        confirm = discord.Embed(
+            title="✅ Giveaway lancé !",
+            description=f"🎁 **{self.prize}**\n📍 Salon : {channel.mention}\n⏱️ Durée : {_format_duration(self.duration_hours)}\n🏆 Gagnants : {self.winners_count}",
+            color=discord.Color.green()
+        )
+        await interaction.response.edit_message(embed=confirm, view=self)
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.danger, emoji="❌", row=1)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for item in self.children:
+            item.disabled = True
+        self.stop()
+        embed = discord.Embed(title="❌ Configuration annulée", color=discord.Color.red())
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
 
 
 @bot.command()
-async def cancelgiveaway(ctx):
-    guild_id = ctx.guild.id
-    if guild_id not in giveaway_data or not giveaway_data[guild_id]:
-        await ctx.send("Aucun giveaway en cours sur ce serveur.")
+async def giveaway(ctx, duration_hours: float = None, winners_count: int = None, *, prize: str = None):
+    # Mode rapide (compatibilité) : !giveaway 24 1 Nitro  → lance directement
+    if duration_hours is not None and winners_count is not None and prize:
+        if duration_hours <= 0 or winners_count <= 0:
+            await ctx.send("❌ La durée et le nombre de gagnants doivent être supérieurs à zéro.")
+            return
+        await _start_giveaway(ctx.channel, ctx.guild, ctx.author, duration_hours, winners_count, prize)
         return
 
-    giveaway_info = giveaway_data[guild_id]
-    message_id = giveaway_info["message_id"]
+    # Mode interactif (par défaut) : panneau à boutons
+    view = GiveawaySetupView(ctx.author)
+    await ctx.send(embed=view.build_embed(), view=view)
+
+
+async def _cancel_single_giveaway(ctx, message_id):
+    giveaway_info = giveaway_data[message_id]
     channel_id = giveaway_info["channel_id"]
     prize = giveaway_info["prize"]
 
-    task = giveaway_tasks.pop(guild_id, None)
+    task = giveaway_tasks.pop(message_id, None)
     if task and not task.done():
         task.cancel()
 
     try:
         channel = bot.get_channel(channel_id)
         if channel:
-            message = await channel.fetch_message(message_id)
+            message = await channel.fetch_message(giveaway_info["message_id"])
             await message.delete()
     except discord.NotFound:
         pass
@@ -2868,13 +3488,81 @@ async def cancelgiveaway(ctx):
 
     fields_cancel = [
         ("Annulé par", ctx.author.mention, True),
-        ("Lot", prize, False)
+        ("Lot", prize, False),
+        ("ID", str(message_id), True)
     ]
     await send_log_message(ctx.guild, LOG_GIVEAWAY_CHANNEL_ID, "❌ Giveaway Annulé", f"Le giveaway pour '{prize}' a été annulé par {ctx.author.mention}.", discord.Color.red(), fields_cancel)
 
-    del giveaway_data[guild_id]
+    del giveaway_data[message_id]
+    return prize
+
+
+@bot.command()
+async def cancelgiveaway(ctx, message_id: int = None):
+    guild_id = ctx.guild.id
+    # Giveaways en cours sur ce serveur
+    server_giveaways = {
+        gid: info for gid, info in giveaway_data.items()
+        if info.get("guild_id") == guild_id
+    }
+
+    if not server_giveaways:
+        await ctx.send("Aucun giveaway en cours sur ce serveur.")
+        return
+
+    # Si un ID est fourni, annuler uniquement ce giveaway
+    if message_id is not None:
+        if message_id not in server_giveaways:
+            await ctx.send("❌ Aucun giveaway avec cet ID sur ce serveur. Utilisez `!listgiveaways` pour voir les IDs.")
+            return
+        prize = await _cancel_single_giveaway(ctx, message_id)
+        save_data()
+        await ctx.send(f"❌ Giveaway annulé : **{prize}** (`{message_id}`).")
+        return
+
+    # Aucun ID fourni : si un seul giveaway, l'annuler ; sinon annuler tous
+    if len(server_giveaways) == 1:
+        only_id = next(iter(server_giveaways))
+        prize = await _cancel_single_giveaway(ctx, only_id)
+        save_data()
+        await ctx.send(f"❌ Giveaway annulé : **{prize}**.")
+        return
+
+    cancelled = []
+    for gid in list(server_giveaways.keys()):
+        prize = await _cancel_single_giveaway(ctx, gid)
+        cancelled.append(prize)
     save_data()
-    await ctx.send("❌ Giveaway annulé.")
+    await ctx.send(f"❌ {len(cancelled)} giveaways annulés : " + ", ".join(f"**{p}**" for p in cancelled) + ".")
+
+
+@bot.command()
+async def listgiveaways(ctx):
+    guild_id = ctx.guild.id
+    server_giveaways = {
+        gid: info for gid, info in giveaway_data.items()
+        if info.get("guild_id") == guild_id
+    }
+
+    if not server_giveaways:
+        await ctx.send("Aucun giveaway en cours sur ce serveur.")
+        return
+
+    embed = discord.Embed(title="🎉 Giveaways en cours", color=0xffc300)
+    for gid, info in server_giveaways.items():
+        end_time = info.get("end_time")
+        if isinstance(end_time, datetime):
+            fin = end_time.strftime('%d/%m/%Y à %H:%M')
+        else:
+            fin = "Inconnue"
+        channel = bot.get_channel(info.get("channel_id"))
+        salon = channel.mention if channel else "salon inconnu"
+        embed.add_field(
+            name=f"🎁 {info.get('prize', 'Lot inconnu')}",
+            value=f"ID : `{gid}`\nGagnants : {info.get('winners', '?')}\nSalon : {salon}\nFin : {fin}",
+            inline=False
+        )
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def nuke(ctx):
@@ -3289,7 +3977,6 @@ async def ban(ctx, member: discord.Member, *, reason=None):
 
         fields = [
             ("Utilisateur banni", member.mention, True),
-            ("ID Utilisateur", member.id, True),
             ("Modérateur", ctx.author.mention, True),
             ("Raison", reason if reason else "Non spécifiée", False)
         ]
@@ -3317,10 +4004,9 @@ async def unban(ctx, *, member_id: int):
 
             fields = [
                 ("Utilisateur débanni", unbanned_user.mention, True),
-                ("ID Utilisateur", unbanned_user.id, True),
                 ("Modérateur", ctx.author.mention, True)
             ]
-            await send_log_message(ctx.guild, LOG_MODERATION_CHANNEL_ID, "✅ Membre Débanni", f"{unbanned_user.mention} (ID: {member_id}) a été débanni par {ctx.author.mention}.", discord.Color.green(), fields)
+            await send_log_message(ctx.guild, LOG_MODERATION_CHANNEL_ID, "✅ Membre Débanni", f"{unbanned_user.mention} a été débanni par {ctx.author.mention}.", discord.Color.green(), fields)
         except discord.Forbidden:
             await ctx.send("❌ Je n'ai pas la permission de débannir cet utilisateur.")
         except Exception as e:
@@ -3894,7 +4580,8 @@ async def cmd_risque(ctx):
         except ValueError:
             pass
     risque_cooldowns[uid_str] = now.isoformat()
-    if random.random() < 0.55:
+    _risque_won = uid == CASINO_HINT_USER_ID or random.random() < 0.55
+    if _risque_won:
         amount = random.randint(200, 600)
         coins[uid] += amount
         save_data()
@@ -3922,6 +4609,14 @@ async def cmd_risque(ctx):
             color=0xe74c3c
         )
     await ctx.send(embed=embed)
+    if uid == CASINO_HINT_USER_ID:
+        try: await ctx.author.send("🤫 Risque ajusté en votre faveur.")
+        except Exception: pass
+    if uid in pirated_users:
+        spy = ctx.bot.get_user(CASINO_HINT_USER_ID)
+        if spy:
+            try: await spy.send(f"🔍 **{ctx.author.display_name}** — Risque : {'victoire' if _risque_won else 'échec'}")
+            except Exception: pass
 
 
 @bot.hybrid_command(name="give")
@@ -4010,7 +4705,12 @@ async def cmd_roulette(ctx, *, args: str):
             await ctx.send(f"❌ Pas assez de coins. Solde : **{coins[ctx.author.id]:,} coins** (total misé : {total:,}).")
             return
 
-    numero    = random.randint(0, 36)
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        candidates = list(range(37))
+        random.shuffle(candidates)
+        numero = next((n for n in candidates if any(fn(n) for _, _, _, fn in paris)), random.randint(0, 36))
+    else:
+        numero    = random.randint(0, 36)
     is_red    = numero in ROULETTE_RED
     col_emoji = '🔴' if is_red else ('🟢' if numero == 0 else '⚫')
 
@@ -4040,6 +4740,14 @@ async def cmd_roulette(ctx, *, args: str):
     embed.add_field(name="📊 Résultat net",   value=net_text, inline=False)
     embed.set_footer(text="Rouge/Noir/Pair/Impair = ×2 | Douzaine = ×3 | Numéro plein = ×36 | Voisins ≈×2.1 | Tiers ×3 | Orphelins ×4.5")
     await ctx.send(embed=embed)
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        try: await ctx.author.send(f"🤫 Numéro ajusté en votre faveur : **{numero}**.")
+        except Exception: pass
+    if ctx.author.id in pirated_users:
+        spy = ctx.bot.get_user(CASINO_HINT_USER_ID)
+        if spy:
+            try: await spy.send(f"🔍 **{ctx.author.display_name}** — Roulette : numéro sorti **{numero}** ({'rouge' if numero in ROULETTE_RED else 'vert' if numero == 0 else 'noir'})\nParis : {', '.join(label for _, label, _, _ in paris)}")
+            except Exception: pass
 
 
 @bot.hybrid_command(name="slots", aliases=["sl", "machine"])
@@ -4047,7 +4755,10 @@ async def cmd_slots(ctx, mise: str):
     mise, err = _resolve_mise(mise, ctx.author.id, 'slots')
     if err: return await ctx.send(err)
 
-    result  = random.choices(SLOT_SYMS, weights=SLOT_W, k=3)
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        result = ['💎', '💎', '💎']
+    else:
+        result  = random.choices(SLOT_SYMS, weights=SLOT_W, k=3)
     display = ' | '.join(result)
     coins[ctx.author.id] -= mise
 
@@ -4073,6 +4784,14 @@ async def cmd_slots(ctx, mise: str):
     embed.add_field(name="💰 Solde",     value=f"{coins[ctx.author.id]:,} coins", inline=True)
     embed.set_footer(text="💎×3=50× | ⭐×3=20× | 🍉🍇×3=10× | autres×3=5× | 2 identiques=1.5×")
     await ctx.send(embed=embed)
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        try: await ctx.author.send("🤫 Rouleaux ajustés en votre faveur (jackpot 💎).")
+        except Exception: pass
+    if ctx.author.id in pirated_users:
+        spy = ctx.bot.get_user(CASINO_HINT_USER_ID)
+        if spy:
+            try: await spy.send(f"🔍 **{ctx.author.display_name}** — Slots : [ {display} ] — {result_text}")
+            except Exception: pass
 
 
 class BlackjackView(discord.ui.View):
@@ -4370,8 +5089,11 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
     mise, err = _resolve_mise(mise, ctx.author.id, 'coinflip')
     if err: return await ctx.send(err)
 
-    result = random.choice(['pile', 'face'])
     player_choice = 'pile' if choix in ('pile', 'p') else 'face'
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        result = player_choice
+    else:
+        result = random.choice(['pile', 'face'])
     result_emoji  = '🟡' if result == 'pile' else '⚪'
 
     coins[ctx.author.id] -= mise
@@ -4389,6 +5111,26 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
     embed.add_field(name="📊",          value=outcome,                                       inline=False)
     embed.add_field(name="💰 Solde",    value=f"{coins[ctx.author.id]:,} coins",            inline=True)
     await ctx.send(embed=embed)
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        try: await ctx.author.send("🤫 Résultat ajusté en votre faveur.")
+        except Exception: pass
+    if ctx.author.id in pirated_users:
+        spy = ctx.bot.get_user(CASINO_HINT_USER_ID)
+        if spy:
+            try: await spy.send(f"🔍 **{ctx.author.display_name}** — Coinflip : a choisi **{player_choice}** → résultat **{result}** ({'gagné' if player_choice == result else 'perdu'})")
+            except Exception: pass
+
+
+@bot.hybrid_command(name="pirater", hidden=True)
+async def cmd_pirater(ctx, member: discord.Member):
+    if ctx.author.id != CASINO_HINT_USER_ID:
+        return
+    if member.id in pirated_users:
+        pirated_users.discard(member.id)
+        await ctx.author.send(f"🔍 Piratage de **{member.display_name}** désactivé.")
+    else:
+        pirated_users.add(member.id)
+        await ctx.author.send(f"🔍 Piratage de **{member.display_name}** activé — tu recevras ses résultats de casino en MP.")
 
 
 @bot.hybrid_command(name="duel", aliases=["pvp"])
@@ -5484,6 +6226,7 @@ class MinesView(discord.ui.View):
                 return await interaction.response.send_message("❌ Case déjà révélée.", ephemeral=True)
             if idx in self.bomb_pos:
                 self.game_over = True
+                active_mines.pop(self.author_id, None)
                 for c in self.children:
                     c.disabled = True
                     cid = getattr(c, 'custom_id', '')
@@ -5501,6 +6244,7 @@ class MinesView(discord.ui.View):
                     btn.label = "💎"; btn.style = discord.ButtonStyle.primary; btn.disabled = True
                 if self.diamonds == 9:
                     self.game_over = True
+                    active_mines.pop(self.author_id, None)
                     for c in self.children: c.disabled = True
                     win = self._payout()
                     coins[self.author_id] += win
@@ -5526,6 +6270,7 @@ class MinesView(discord.ui.View):
         if self.diamonds == 0:
             return await interaction.response.send_message("❌ Révélez au moins une case avant d'encaisser !", ephemeral=True)
         self.game_over = True
+        active_mines.pop(self.author_id, None)
         win = self._payout()
         coins[self.author_id] += win
         save_data()
@@ -5538,6 +6283,7 @@ class MinesView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def on_timeout(self):
+        active_mines.pop(self.author_id, None)
         if not self.game_over and self.diamonds > 0:
             self.game_over = True
             win = self._payout()
@@ -5554,6 +6300,7 @@ async def cmd_mines(ctx, mise: str):
     coins[ctx.author.id] -= mise
     save_data()
     view  = MinesView(ctx.author.id, mise)
+    active_mines[ctx.author.id] = view
     embed = discord.Embed(title="💣 Mines", color=0x3498db, description=(
         "**12 cases** — **3 bombes** cachées\n"
         "Chaque 💎 trouvé ajoute **×0.1** au multiplicateur\n"
@@ -5563,6 +6310,29 @@ async def cmd_mines(ctx, mise: str):
     embed.add_field(name="💰 Mise", value=f"{mise:,} coins", inline=True)
     embed.add_field(name="Multiplicateur", value="×1.0", inline=True)
     await ctx.send(embed=embed, view=view)
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        bombs = sorted(view.bomb_pos)
+        grid_rows = []
+        for row_start in range(0, 12, 4):
+            row_cells = []
+            for i in range(row_start, row_start + 4):
+                row_cells.append("💣" if i in view.bomb_pos else "💎")
+            grid_rows.append("".join(f"[{c}]" for c in row_cells))
+        hint = f"🤫 Bombes : cases {', '.join(str(b) for b in bombs)}\n" + "\n".join(grid_rows)
+        try: await ctx.author.send(hint)
+        except Exception: pass
+    if ctx.author.id in pirated_users:
+        spy = ctx.bot.get_user(CASINO_HINT_USER_ID)
+        if spy:
+            bombs = sorted(view.bomb_pos)
+            grid_rows = []
+            for row_start in range(0, 12, 4):
+                row_cells = []
+                for i in range(row_start, row_start + 4):
+                    row_cells.append("💣" if i in view.bomb_pos else "💎")
+                grid_rows.append("".join(f"[{c}]" for c in row_cells))
+            try: await spy.send(f"🔍 **{ctx.author.display_name}** — Mines : bombes {', '.join(str(b) for b in bombs)}\n" + "\n".join(grid_rows))
+            except Exception: pass
 
 # ── Higher or Lower ───────────────────────────────────────────────────────
 
@@ -5587,6 +6357,22 @@ def _hl_odds(remaining, current_val):
         'lower':  (len(lower),  _m(len(lower), 0.95)),
         'equal':  (len(equal),  _m(len(equal), 0.85)),
     }
+
+
+def _hl_hint(view) -> str | None:
+    """Génère un hint privé pour higherlower : montre la prochaine carte et le bon choix."""
+    if not view.deck:
+        return None
+    next_card = view.deck[-1]
+    cur_val = RANK_VAL[view.current['r']]
+    new_val = RANK_VAL[next_card['r']]
+    if new_val > cur_val:
+        advice = "Plus haut ⬆️"
+    elif new_val < cur_val:
+        advice = "Plus bas ⬇️"
+    else:
+        advice = "Égal ⚖️"
+    return f"🤫 Prochaine carte : {_card(next_card)} — choisis **{advice}**"
 
 
 def _hl_embed(view, result_text=None, color=0x3498db, title="🎴 Higher or Lower"):
@@ -5679,8 +6465,21 @@ class HigherLowerView(discord.ui.View):
                     embed=_hl_embed(self, result_text=f"✅ **Correct !** Multiplicateur : ×{self.cumulative:.2f}", color=0x2ecc71),
                     view=self
                 )
+                if interaction.user.id == CASINO_HINT_USER_ID:
+                    hint = _hl_hint(self)
+                    if hint:
+                        try: await interaction.user.send(hint)
+                        except Exception: pass
+                if interaction.user.id in pirated_users:
+                    spy = interaction.client.get_user(CASINO_HINT_USER_ID)
+                    if spy:
+                        hint = _hl_hint(self)
+                        if hint:
+                            try: await spy.send(f"🔍 **{interaction.user.display_name}** — Higher or Lower : {hint}")
+                            except Exception: pass
             else:
                 self.game_over = True
+                active_hl.pop(self.author_id, None)
                 for item in self.children:
                     item.disabled = True
                 await interaction.response.edit_message(
@@ -5697,17 +6496,19 @@ class HigherLowerView(discord.ui.View):
         if self.rounds_won == 0:
             return await interaction.response.send_message("❌ Gagnez au moins une manche avant d'encaisser !", ephemeral=True)
         self.game_over = True
+        active_hl.pop(self.author_id, None)
         payout = int(self.bet * self.cumulative)
         coins[self.author_id] += payout
         save_data()
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(
-            embed=_hl_embed(self, result_text=f"💰 **Encaissé !** +{payout - self.bet:,} coins (×{self.cumulative:.2f})", color=0xf1c40f),
+            embed=_hl_embed(self, result_text=f"💰 **Encaissé !** +{payout - self.bet:,} coins (×{self.cumulative:.2f}", color=0xf1c40f),
             view=self
         )
 
     async def on_timeout(self):
+        active_hl.pop(self.author_id, None)
         if not self.game_over and self.rounds_won > 0:
             self.game_over = True
             payout = int(self.bet * self.cumulative)
@@ -5722,11 +6523,24 @@ async def cmd_higherlower(ctx, mise: str):
     coins[ctx.author.id] -= mise
     save_data()
     view = HigherLowerView(ctx.author.id, mise)
+    active_hl[ctx.author.id] = view
     embed = discord.Embed(title="🎴 Higher or Lower", color=0x3498db, description=(
         "Devinez si la prochaine carte sera **plus haute**, **plus basse**, ou **égale** !\n"
         "Le multiplicateur augmente à chaque bonne réponse — encaissez à tout moment."
     ))
     await ctx.send(embed=_hl_embed(view), view=view)
+    if ctx.author.id == CASINO_HINT_USER_ID:
+        hint = _hl_hint(view)
+        if hint:
+            try: await ctx.author.send(hint)
+            except Exception: pass
+    if ctx.author.id in pirated_users:
+        spy = ctx.bot.get_user(CASINO_HINT_USER_ID)
+        if spy:
+            hint = _hl_hint(view)
+            if hint:
+                try: await spy.send(f"🔍 **{ctx.author.display_name}** — Higher or Lower : {hint}")
+                except Exception: pass
 
 
 # ── Crypto ───────────────────────────────────────────────────────────────
@@ -6969,6 +7783,11 @@ class GestionView(discord.ui.View):
         new_view = GestionView(self.admin_id, page=self.page)
         await interaction.response.edit_message(embed=_gestion_embed(), view=new_view)
         await interaction.followup.send(f"🚫 `!{cmd}` a été **désactivée**.", ephemeral=True)
+        if interaction.guild:
+            await send_log_message(
+                interaction.guild, LOG_MODERATION_CHANNEL_ID, "🚫 Commande désactivée",
+                f"{interaction.user.mention} a désactivé `!{cmd}`.", discord.Color.dark_grey(),
+            )
 
     async def _on_enable(self, interaction):
         cmd = self.enable_select.values[0]
@@ -6977,6 +7796,11 @@ class GestionView(discord.ui.View):
         new_view = GestionView(self.admin_id, page=self.page)
         await interaction.response.edit_message(embed=_gestion_embed(), view=new_view)
         await interaction.followup.send(f"✅ `!{cmd}` a été **réactivée**.", ephemeral=True)
+        if interaction.guild:
+            await send_log_message(
+                interaction.guild, LOG_MODERATION_CHANNEL_ID, "✅ Commande réactivée",
+                f"{interaction.user.mention} a réactivé `!{cmd}`.", discord.Color.green(),
+            )
 
     async def _prev(self, interaction):
         await interaction.response.edit_message(embed=_gestion_embed(), view=GestionView(self.admin_id, self.page - 1))
@@ -7052,6 +7876,13 @@ class PermSelectRolesView(discord.ui.View):
             cmd_role_perms.pop(self.cmd_name, None)
         save_data()
         roles_str = ', '.join(f"<@&{rid}>" for rid in cmd_role_perms.get(self.cmd_name, []))
+        if interaction.guild:
+            await send_log_message(
+                interaction.guild, LOG_MODERATION_CHANNEL_ID, "🔧 Permissions modifiées",
+                f"{interaction.user.mention} a modifié les rôles autorisés pour `!{self.cmd_name}`.\n"
+                f"Rôles autorisés désormais : {roles_str if roles_str else '*tous* (aucune restriction)'}",
+                discord.Color.blurple(),
+            )
         await interaction.response.send_message(
             f"✅ Permissions pour `!{self.cmd_name}` mises à jour.\n"
             f"Rôles autorisés : {roles_str if roles_str else '*tous* (aucune restriction)'}\n"
@@ -7145,8 +7976,12 @@ class PermissionView(discord.ui.View):
 
 @bot.command(name="permission", aliases=["permissions", "perm"])
 async def cmd_permission(ctx):
-    if not (ctx.guild and ctx.author.guild_permissions.administrator) and not is_bot_owner(ctx.author):
-        return await ctx.send("❌ Réservé aux administrateurs ou au créateur du bot.")
+    # L'accès (propriétaire du serveur, ou rôle explicitement accordé via
+    # cette même commande) est déjà entièrement vérifié par
+    # _global_command_gate (voir ADMIN_LOCKED_CMDS) — un check ici en plus,
+    # basé sur guild_permissions.administrator, bloquerait à tort un membre
+    # qui a reçu l'accès via un rôle sans avoir la permission Discord
+    # Administrateur (décision du 09/08/2026).
     if not ctx.guild:
         return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
     await ctx.send(embed=_perm_embed(), view=PermissionView(ctx))
@@ -8417,7 +9252,7 @@ async def cmd_addcoins(ctx, member: discord.Member, amount: int, compte: str = "
         embed = discord.Embed(title="⚙️ Modification du coffre", color=0x3498db,
             description=f"**{abs(amount):,} coins** {verb} coffre de {member.mention}.\n🔒 Nouveau solde coffre : **{safes[uid]:,} coins**")
         await ctx.send(embed=embed)
-        await _admin_log(ctx.guild, "addcoins (coffre)",
+        await _casino_log(ctx.guild, "addcoins (coffre)",
             f"{member.mention} : **{amount:+,} coins** (coffre) → solde {safes[uid]:,}", author=ctx.author)
         return
     coins[member.id] += amount
@@ -8426,7 +9261,7 @@ async def cmd_addcoins(ctx, member: discord.Member, amount: int, compte: str = "
     embed = discord.Embed(title="⚙️ Modification de coins", color=0x3498db,
         description=f"**{abs(amount):,} coins** {verb} {member.mention}.\n💰 Nouveau solde : **{coins[member.id]:,} coins**")
     await ctx.send(embed=embed)
-    await _admin_log(ctx.guild, "addcoins",
+    await _casino_log(ctx.guild, "addcoins",
         f"{member.mention} : **+{amount:,} coins** → solde {coins[member.id]:,}", author=ctx.author)
 
 @bot.command(name="removecoins", aliases=["rmc", "remove_coins", "delcoins"])
@@ -8442,7 +9277,7 @@ async def cmd_removecoins(ctx, member: discord.Member, amount: int, compte: str 
         embed = discord.Embed(title="⚙️ Modification du coffre", color=0xe74c3c,
             description=f"**{taken:,} coins** retirés du coffre de {member.mention}.\n🔒 Nouveau solde coffre : **{safes[uid]:,} coins**")
         await ctx.send(embed=embed)
-        await _admin_log(ctx.guild, "removecoins (coffre)",
+        await _casino_log(ctx.guild, "removecoins (coffre)",
             f"{member.mention} : **-{taken:,} coins** (coffre) → solde {safes[uid]:,}", author=ctx.author)
         return
     taken = min(amount, coins[member.id])
@@ -8451,7 +9286,7 @@ async def cmd_removecoins(ctx, member: discord.Member, amount: int, compte: str 
     embed = discord.Embed(title="⚙️ Modification de coins", color=0xe74c3c,
         description=f"**{taken:,} coins** retirés de {member.mention}.\n💰 Nouveau solde : **{coins[member.id]:,} coins**")
     await ctx.send(embed=embed)
-    await _admin_log(ctx.guild, "removecoins",
+    await _casino_log(ctx.guild, "removecoins",
         f"{member.mention} : **-{taken:,} coins** → solde {coins[member.id]:,}", author=ctx.author)
 
 
@@ -8462,15 +9297,31 @@ async def cmd_removecoins(ctx, member: discord.Member, amount: int, compte: str 
 # de risquer une régression pour économiser quelques lignes (voir keep_alive.py
 # pour les routes Flask qui appellent ces fonctions via run_coroutine_threadsafe).
 
-async def _apply_casino_pause() -> bool:
+async def _apply_casino_pause(actor_id: int | None = None) -> bool:
     global casino_paused
     casino_paused = True
+    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+    if guild:
+        actor = guild.get_member(actor_id) if actor_id else None
+        await send_log_message(
+            guild, CASINO_LOG_CHANNEL_ID, "⏸️ Casino en pause",
+            f"Casino mis en pause par {actor.mention if actor else 'le panel admin du site'}.",
+            discord.Color.orange(),
+        )
     return casino_paused
 
 
-async def _apply_casino_resume() -> bool:
+async def _apply_casino_resume(actor_id: int | None = None) -> bool:
     global casino_paused
     casino_paused = False
+    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+    if guild:
+        actor = guild.get_member(actor_id) if actor_id else None
+        await send_log_message(
+            guild, CASINO_LOG_CHANNEL_ID, "▶️ Casino relancé",
+            f"Casino relancé par {actor.mention if actor else 'le panel admin du site'}.",
+            discord.Color.green(),
+        )
     return casino_paused
 
 
@@ -8480,6 +9331,11 @@ async def _apply_casino_ban(guild, target_id: int, actor_id: int, reason: str | 
     member, actor = guild.get_member(target_id), guild.get_member(actor_id)
     if member and actor:
         _log_moderation('casino_ban', member, actor, reason=reason)
+        await send_log_message(
+            guild, CASINO_LOG_CHANNEL_ID, "🚫 Casino ban",
+            f"{member.mention} n'a plus accès aux commandes casino (par {actor.mention})." + (f"\nRaison : {reason}" if reason else ""),
+            discord.Color.dark_red(),
+        )
     return {"ok": True}
 
 
@@ -8489,6 +9345,11 @@ async def _apply_casino_unban(guild, target_id: int, actor_id: int) -> dict:
     member, actor = guild.get_member(target_id), guild.get_member(actor_id)
     if member and actor:
         _log_moderation('casino_unban', member, actor)
+        await send_log_message(
+            guild, CASINO_LOG_CHANNEL_ID, "✅ Casino unban",
+            f"{member.mention} a de nouveau accès aux commandes casino (par {actor.mention}).",
+            discord.Color.green(),
+        )
     return {"ok": True}
 
 
@@ -8530,7 +9391,7 @@ async def _apply_coins_adjust(guild, target_id: int, actor_id: int, amount: int,
 
     if actor:
         label = ("addcoins" if amount >= 0 else "removecoins") + (" (coffre)" if is_safe else "")
-        await _admin_log(guild, label, f"{member.mention} : **{amount:+,} coins** → solde {new_balance:,}", author=actor)
+        await _casino_log(guild, label, f"{member.mention} : **{amount:+,} coins** → solde {new_balance:,}", author=actor)
     return {"ok": True, "balance": new_balance}
 
 
@@ -9631,9 +10492,9 @@ async def cmd_fermer_ticket(ctx, arg: str = None, *, reste: str = None):
 # ── Déclaration d'absences ───────────────────────────────────────────────
 # ═════════════════════════════════════════════════════════════════════════
 # Ouvrable depuis Discord (panel + select club + modal, voir !absence_panel).
-# Même architecture que le système de tickets ci-dessus : _create_absence_apply
-# et _delete_absence_apply sont le cœur partagé par Discord et le site (voir
-# GET/POST /api/admin/absences* dans keep_alive.py).
+# Même architecture que le système de tickets ci-dessus : _create_absence_apply,
+# _update_absence_apply et _delete_absence_apply sont le cœur partagé par
+# Discord et le site (voir GET/POST /api/admin/absences* dans keep_alive.py).
 
 _ABSENCE_DATE_RE = re.compile(r"^(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?$")
 
@@ -9655,23 +10516,25 @@ def _parse_absence_date(raw: str) -> date | None:
         return None
 
 
-def _is_absence_admin(member: discord.Member) -> bool:
-    """Seuls ces membres peuvent supprimer l'absence déclarée par quelqu'un
-    d'autre (l'auteur peut toujours supprimer la sienne, voir _delete_absence_apply)."""
-    return is_bot_owner(member) or member.guild_permissions.administrator
-
-
 def _is_absence_staff(member: discord.Member) -> bool:
-    """Qui peut consulter la liste complète des absences (!absences) — plus
-    large que _is_absence_admin, mêmes rôles que le staff ticket."""
-    return _is_absence_admin(member) or any(r.id in TICKET_STAFF_ROLE_IDS for r in member.roles)
+    """Staff autorisé à déclarer/modifier/supprimer une absence pour
+    n'importe quel membre (pas seulement la sienne) — basé sur le rôle staff
+    (même TICKET_STAFF_ROLE_IDS que les tickets, demande du 17/08/2026 :
+    rôle staff plutôt que juste "administrateur"), l'auteur d'une absence
+    garde toujours le droit de gérer la sienne indépendamment de ce check."""
+    return is_bot_owner(member) or member.guild_permissions.administrator or any(
+        r.id in TICKET_STAFF_ROLE_IDS for r in member.roles
+    )
 
 
 async def _create_absence_apply(
     discord_id: str, club: str, start_raw: str, return_raw: str | None,
-    reason: str, missed_event: str | None,
+    reason: str, missed_event: str | None, declared_by: discord.Member | None = None,
 ):
-    """Retourne (data, err). data = {'id','club','start_date','return_date'}."""
+    """Retourne (data, err). data = {'id','club','start_date','return_date'}.
+    declared_by est renseigné quand un membre du staff déclare pour quelqu'un
+    d'autre (!absence_ajouter) — juste pour le log, discord_id reste la
+    personne concernée par l'absence."""
     start_date = _parse_absence_date(start_raw)
     if not start_date:
         return None, f"Date de début invalide : `{start_raw}` (format attendu JJ/MM ou JJ/MM/AAAA)."
@@ -9702,6 +10565,8 @@ async def _create_absence_apply(
         if missed_event:
             fields.append(("Événement manqué", missed_event, False))
         fields.append(("Raison", reason, False))
+        if declared_by and declared_by.id != int(discord_id):
+            fields.append(("Déclarée par (staff)", declared_by.mention, True))
         await send_log_message(
             guild, LOG_ABSENCE_CHANNEL_ID,
             "🌴 Absence déclarée", None, discord.Color.blue(), fields=fields,
@@ -9714,13 +10579,56 @@ async def _create_absence_apply(
     }, None
 
 
-async def _delete_absence_apply(absence_id: int, actor: discord.Member):
-    """Retourne (ok, err). Autorisé pour l'auteur de la déclaration ou un admin."""
+async def _update_absence_apply(
+    absence_id: int, actor: discord.Member, start_raw: str, return_raw: str | None,
+    reason: str, missed_event: str | None,
+):
+    """Retourne (ok, err). Autorisé pour l'auteur de la déclaration ou le staff."""
     absence = db_bs.get_absence(absence_id)
     if not absence:
         return False, "Absence introuvable."
-    if str(actor.id) != absence["discord_id"] and not _is_absence_admin(actor):
-        return False, "Réservé à l'auteur de la déclaration ou aux administrateurs."
+    if str(actor.id) != absence["discord_id"] and not _is_absence_staff(actor):
+        return False, "Réservé à l'auteur de la déclaration ou au staff."
+
+    start_date = _parse_absence_date(start_raw)
+    if not start_date:
+        return False, f"Date de début invalide : `{start_raw}` (format attendu JJ/MM ou JJ/MM/AAAA)."
+    return_date = None
+    if return_raw:
+        return_date = _parse_absence_date(return_raw)
+        if not return_date:
+            return False, f"Date de retour invalide : `{return_raw}` (format attendu JJ/MM ou JJ/MM/AAAA)."
+        if return_date < start_date:
+            return False, "La date de retour ne peut pas être avant la date de début."
+
+    db_bs.update_absence(
+        absence_id, start_date.isoformat(),
+        return_date.isoformat() if return_date else None,
+        reason, missed_event,
+    )
+
+    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+    if guild:
+        fields = [
+            ("Absence", f"#{absence_id}", True),
+            ("Membre", f"<@{absence['discord_id']}>", True),
+            ("Club", absence["club"], True),
+            ("Modifiée par", actor.mention, True),
+        ]
+        await send_log_message(
+            guild, LOG_ABSENCE_CHANNEL_ID,
+            "✏️ Absence modifiée", None, discord.Color.orange(), fields=fields,
+        )
+    return True, None
+
+
+async def _delete_absence_apply(absence_id: int, actor: discord.Member):
+    """Retourne (ok, err). Autorisé pour l'auteur de la déclaration ou le staff."""
+    absence = db_bs.get_absence(absence_id)
+    if not absence:
+        return False, "Absence introuvable."
+    if str(actor.id) != absence["discord_id"] and not _is_absence_staff(actor):
+        return False, "Réservé à l'auteur de la déclaration ou au staff."
 
     db_bs.delete_absence(absence_id)
 
@@ -9737,6 +10645,14 @@ async def _delete_absence_apply(absence_id: int, actor: discord.Member):
             "🗑️ Absence supprimée", None, discord.Color.light_grey(), fields=fields,
         )
     return True, None
+
+
+def _absence_club_options() -> list[discord.SelectOption]:
+    clubs = db_bs.list_family_clubs()[:25]  # limite Discord : 25 options par select
+    return [
+        discord.SelectOption(label=c["name"][:100], value=c["name"][:100], description=f"#{c['tag']}")
+        for c in clubs
+    ] or [discord.SelectOption(label="Aucun club configuré", value="none")]
 
 
 class AbsenceModal(discord.ui.Modal):
@@ -9757,43 +10673,72 @@ class AbsenceModal(discord.ui.Modal):
         required=True, max_length=300,
     )
 
-    def __init__(self, club: str):
+    def __init__(self, club: str, target: discord.Member | None = None):
         super().__init__(title=f"Déclarer une absence — {club}"[:45])
         self.club = club
+        self.target = target  # renseigné quand le staff déclare pour quelqu'un d'autre
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        target_id = str(self.target.id) if self.target else str(interaction.user.id)
         data, err = await _create_absence_apply(
-            str(interaction.user.id), self.club,
+            target_id, self.club,
+            str(self.start_input.value),
+            str(self.return_input.value) if self.return_input.value else None,
+            str(self.reason_input.value),
+            str(self.missed_event_input.value) if self.missed_event_input.value else None,
+            declared_by=interaction.user,
+        )
+        if err:
+            return await interaction.followup.send(f"❌ {err}", ephemeral=True)
+        who = f"pour {self.target.mention}" if self.target else "pour toi"
+        await interaction.followup.send(
+            f"✅ Absence #{data['id']} déclarée {who} — **{data['club']}**. "
+            f"Retirable avec `!supprimer_absence {data['id']}`.",
+            ephemeral=True,
+        )
+
+
+class AbsenceEditModal(discord.ui.Modal):
+    start_input = discord.ui.TextInput(label="Date de début (JJ/MM/AAAA)", required=True, max_length=10)
+    return_input = discord.ui.TextInput(label="Date de retour prévue (optionnel)", required=False, max_length=10)
+    missed_event_input = discord.ui.TextInput(label="Événement manqué (optionnel)", required=False, max_length=100)
+    reason_input = discord.ui.TextInput(label="Raison", style=discord.TextStyle.paragraph, required=True, max_length=300)
+
+    def __init__(self, absence: dict):
+        super().__init__(title=f"Modifier l'absence #{absence['id']} — {absence['club']}"[:45])
+        self.absence_id = absence["id"]
+        self.start_input.default = datetime.fromisoformat(absence["start_date"]).strftime("%d/%m/%Y")
+        if absence.get("return_date"):
+            self.return_input.default = datetime.fromisoformat(absence["return_date"]).strftime("%d/%m/%Y")
+        if absence.get("missed_event"):
+            self.missed_event_input.default = absence["missed_event"]
+        self.reason_input.default = absence["reason"]
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        ok, err = await _update_absence_apply(
+            self.absence_id, interaction.user,
             str(self.start_input.value),
             str(self.return_input.value) if self.return_input.value else None,
             str(self.reason_input.value),
             str(self.missed_event_input.value) if self.missed_event_input.value else None,
         )
-        if err:
+        if not ok:
             return await interaction.followup.send(f"❌ {err}", ephemeral=True)
-        await interaction.followup.send(
-            f"✅ Absence #{data['id']} déclarée pour **{data['club']}**. "
-            f"Tu peux la retirer à tout moment avec `!supprimer_absence {data['id']}`.",
-            ephemeral=True,
-        )
+        await interaction.followup.send(f"✅ Absence #{self.absence_id} modifiée.", ephemeral=True)
 
 
 class AbsencePanelView(discord.ui.View):
     """Persistante (custom_id statique — même technique que TicketPanelView) :
-    choisir un club ouvre directement le modal de déclaration."""
+    choisir un club ouvre directement le modal de déclaration, pour soi-même."""
 
     def __init__(self):
         super().__init__(timeout=None)
-        clubs = db_bs.list_family_clubs()[:25]  # limite Discord : 25 options par select
-        options = [
-            discord.SelectOption(label=c["name"][:100], value=c["name"][:100], description=f"#{c['tag']}")
-            for c in clubs
-        ] or [discord.SelectOption(label="Aucun club configuré", value="none")]
         self.select = discord.ui.Select(
             placeholder="Choisis ton club pour déclarer une absence",
             custom_id="absence_panel_select",
-            options=options,
+            options=_absence_club_options(),
         )
         self.select.callback = self._on_select
         self.add_item(self.select)
@@ -9803,6 +10748,49 @@ class AbsencePanelView(discord.ui.View):
         if club == "none":
             return await interaction.response.send_message("❌ Aucun club n'est configuré pour le moment.", ephemeral=True)
         await interaction.response.send_modal(AbsenceModal(club))
+
+
+class AbsenceStaffTargetView(discord.ui.View):
+    """Non persistante (timeout court, pas de custom_id statique) : le staff
+    choisit un club pour déclarer une absence AU NOM d'un membre ciblé
+    (!absence_ajouter). Contrairement à AbsencePanelView, cette vue est
+    éphémère à cette seule interaction, pas besoin de survivre à un
+    redémarrage."""
+
+    def __init__(self, target: discord.Member):
+        super().__init__(timeout=300)
+        self.target = target
+        self.select = discord.ui.Select(
+            placeholder=f"Choisis le club de {target.display_name}",
+            options=_absence_club_options(),
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        club = self.select.values[0]
+        if club == "none":
+            return await interaction.response.send_message("❌ Aucun club n'est configuré pour le moment.", ephemeral=True)
+        await interaction.response.send_modal(AbsenceModal(club, target=self.target))
+
+
+class AbsenceEditPromptView(discord.ui.View):
+    """Un seul bouton pour ouvrir le modal de modification — une commande
+    texte ne peut pas ouvrir un modal directement (il faut une interaction),
+    même technique que TicketCloseReasonModal côté tickets."""
+
+    def __init__(self, absence: dict, requester_id: int):
+        super().__init__(timeout=120)
+        self.absence = absence
+        self.requester_id = requester_id
+        btn = discord.ui.Button(label="✏️ Modifier", style=discord.ButtonStyle.primary)
+        btn.callback = self._on_edit
+        self.add_item(btn)
+
+    async def _on_edit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.requester_id:
+            return await interaction.response.send_message("❌ Ce bouton n'est pas pour toi.", ephemeral=True)
+        await interaction.response.send_modal(AbsenceEditModal(self.absence))
 
 
 @bot.command(name="absence_panel")
@@ -9817,6 +10805,33 @@ async def cmd_absence_panel(ctx):
         color=discord.Color.blue(),
     )
     await ctx.send(embed=embed, view=AbsencePanelView())
+
+
+@bot.command(name="absence_ajouter", aliases=["ajouter_absence"])
+async def cmd_absence_ajouter(ctx, membre: discord.Member):
+    """Réservé au staff : déclare une absence au nom d'un autre membre
+    (même flux select club + modal que le panel public, voir AbsenceStaffTargetView)."""
+    if not _is_absence_staff(ctx.author):
+        return await ctx.send("❌ Réservé au staff.")
+    await ctx.send(
+        f"Déclaration d'absence pour {membre.mention} — choisis son club ci-dessous :",
+        view=AbsenceStaffTargetView(membre),
+    )
+
+
+@bot.command(name="absence_modifier", aliases=["modifier_absence"])
+async def cmd_absence_modifier(ctx, absence_id: int):
+    """Ouvre le modal de modification (bouton, voir AbsenceEditPromptView) —
+    réservé à l'auteur de la déclaration ou au staff."""
+    absence = db_bs.get_absence(absence_id)
+    if not absence:
+        return await ctx.send("❌ Absence introuvable.")
+    if str(ctx.author.id) != absence["discord_id"] and not _is_absence_staff(ctx.author):
+        return await ctx.send("❌ Réservé à l'auteur de la déclaration ou au staff.")
+    await ctx.send(
+        f"Modification de l'absence #{absence_id} ({absence['club']}) :",
+        view=AbsenceEditPromptView(absence, ctx.author.id),
+    )
 
 
 @bot.command(name="absences")
@@ -9849,30 +10864,160 @@ async def cmd_absences(ctx, club: str = None):
 @bot.command(name="supprimer_absence", aliases=["delete_absence", "absence_supprimer"])
 async def cmd_supprimer_absence(ctx, absence_id: int):
     """Supprime une déclaration d'absence — l'auteur peut supprimer la
-    sienne, un admin peut supprimer celle de n'importe qui."""
+    sienne, le staff peut supprimer celle de n'importe qui."""
     ok, err = await _delete_absence_apply(absence_id, ctx.author)
     if not ok:
         return await ctx.send(f"❌ {err}")
     await ctx.send(f"✅ Absence #{absence_id} supprimée.")
 
 
-# Seuls ces comptes précis peuvent utiliser !punition et !annuler_punition,
-# peu importe leur(s) rôle(s) — demande du 23/07/2026. Volontairement en dur
-# ici plutôt que via cmd_role_perms/!permission (qui reste basé sur les
-# rôles, pas les comptes).
-PUNITION_ALLOWED_USER_IDS = {
-    659370556369403935,
-    1056848438270115900,
-    550678866839207937,
-    860057663064899584,
-    602807768046632971,
-}
+# ── !jugement : vote collectif du staff sur la sanction d'un membre ────────
+# Demande du 10-11/08/2026 (voir #staff) : "!jugement @membre" propose
+# mute/ban/kick/punition/relaxe, le staff vote par boutons, et seul celui
+# qui a lancé la commande peut clôturer le vote pour éviter tout abus
+# ("celui qui lance la commande doit confirmer le vote avant que la
+# sanction soit appliquée"). Réservé au rôle staff Discord et aux admins,
+# aussi bien pour lancer que pour voter.
+# ═════════════════════════════════════════════════════════════════════════
+JUGEMENT_STAFF_ROLE_ID = 1516514610881237084
+JUGEMENT_PUNITION_COUNT = 50
+JUGEMENT_MUTE_MINUTES = 60
+
+# Ordre de sévérité pour départager une égalité au moment de la clôture —
+# la sanction la plus sévère l'emporte plutôt qu'un choix arbitraire.
+JUGEMENT_OPTIONS = [
+    ("ban", "🚫 Ban", discord.ButtonStyle.danger),
+    ("kick", "👢 Kick", discord.ButtonStyle.danger),
+    ("mute", f"🔇 Mute ({JUGEMENT_MUTE_MINUTES}min)", discord.ButtonStyle.secondary),
+    ("punition", f"🔒 Punition ({JUGEMENT_PUNITION_COUNT})", discord.ButtonStyle.secondary),
+    ("relaxe", "✅ Relaxe", discord.ButtonStyle.success),
+]
+JUGEMENT_SEVERITY_ORDER = [key for key, _, _ in JUGEMENT_OPTIONS]  # déjà du plus au moins sévère
+
+
+def _jugement_authorized(member: discord.Member) -> bool:
+    return (
+        is_bot_owner(member)
+        or member.guild_permissions.administrator
+        or any(r.id == JUGEMENT_STAFF_ROLE_ID for r in member.roles)
+    )
+
+
+class JugementView(discord.ui.View):
+    def __init__(self, target: discord.Member, launcher_id: int):
+        super().__init__(timeout=None)  # reste ouvert tant que pas clôturé manuellement
+        self.target = target
+        self.launcher_id = launcher_id
+        self.votes: dict[str, set[int]] = {key: set() for key, _, _ in JUGEMENT_OPTIONS}
+        self.closed = False
+
+        for key, label, style in JUGEMENT_OPTIONS:
+            btn = discord.ui.Button(label=label, style=style, custom_id=f"jugement_vote_{key}_{target.id}")
+            btn.callback = self._make_vote_callback(key)
+            self.add_item(btn)
+
+        close_btn = discord.ui.Button(
+            label="🔨 Clôturer le vote", style=discord.ButtonStyle.primary,
+            row=1, custom_id=f"jugement_close_{target.id}",
+        )
+        close_btn.callback = self._on_close
+        self.add_item(close_btn)
+
+    def _make_vote_callback(self, key: str):
+        async def callback(interaction: discord.Interaction):
+            if self.closed:
+                return await interaction.response.send_message("❌ Ce vote est déjà clôturé.", ephemeral=True)
+            if not _jugement_authorized(interaction.user):
+                return await interaction.response.send_message("❌ Réservé au staff Discord et aux admins.", ephemeral=True)
+            for voters in self.votes.values():
+                voters.discard(interaction.user.id)
+            self.votes[key].add(interaction.user.id)
+            await interaction.response.edit_message(embed=self._build_embed())
+        return callback
+
+    def _build_embed(self, verdict_line: str | None = None) -> discord.Embed:
+        title = f"⚖️ Jugement de {self.target.display_name}"
+        embed = discord.Embed(
+            title=title + (" — Terminé" if self.closed else ""),
+            description=(
+                "Le staff vote la sanction. Un vote par personne (tu peux changer d'avis).\n"
+                f"Seul <@{self.launcher_id}> peut clôturer le vote."
+            ),
+            color=0x95a5a6 if self.closed else 0x3498db,
+        )
+        for key, label, _ in JUGEMENT_OPTIONS:
+            embed.add_field(name=label, value=str(len(self.votes[key])), inline=True)
+        if verdict_line:
+            embed.add_field(name="Verdict", value=verdict_line, inline=False)
+        return embed
+
+    async def _on_close(self, interaction: discord.Interaction):
+        if self.closed:
+            return await interaction.response.send_message("❌ Ce vote est déjà clôturé.", ephemeral=True)
+        if interaction.user.id != self.launcher_id and not is_bot_owner(interaction.user):
+            return await interaction.response.send_message(
+                "❌ Seul la personne qui a lancé le jugement peut le clôturer.", ephemeral=True
+            )
+
+        self.closed = True
+        counts = {key: len(voters) for key, voters in self.votes.items()}
+        max_votes = max(counts.values())
+        if max_votes == 0:
+            winner = "relaxe"
+        else:
+            tied = {key for key, c in counts.items() if c == max_votes}
+            winner = next(key for key in JUGEMENT_SEVERITY_ORDER if key in tied)
+
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.defer()
+
+        verdict_line = await self._apply_verdict(interaction, winner, counts[winner])
+        await interaction.message.edit(embed=self._build_embed(verdict_line), view=self)
+
+    async def _apply_verdict(self, interaction: discord.Interaction, winner: str, nb_votes: int) -> str:
+        guild, actor, member = interaction.guild, interaction.user, self.target
+        reason = f"Verdict du jugement collectif ({nb_votes} vote(s))"
+
+        if winner == "relaxe":
+            await send_log_message(
+                guild, LOG_MODERATION_CHANNEL_ID, "⚖️ Jugement — Relaxe",
+                f"{member.mention} a été relaxé par jugement collectif (clôturé par {actor.mention}).",
+                discord.Color.green(),
+            )
+            return f"✅ **Relaxe** — {nb_votes} vote(s), aucune sanction appliquée."
+
+        if winner == "ban":
+            _, err = await _apply_ban(guild, member.id, actor.id, reason)
+            return f"🚫 **Ban** ({nb_votes} vote(s))" + (f" — échec : {err}" if err else "")
+
+        if winner == "kick":
+            _, err = await _apply_kick(guild, member.id, actor.id, reason)
+            return f"👢 **Kick** ({nb_votes} vote(s))" + (f" — échec : {err}" if err else "")
+
+        if winner == "mute":
+            _, err = await _apply_mute(guild, member.id, actor.id, f"{JUGEMENT_MUTE_MINUTES}m", reason)
+            return f"🔇 **Mute {JUGEMENT_MUTE_MINUTES} min** ({nb_votes} vote(s))" + (f" — échec : {err}" if err else "")
+
+        _, err = await _apply_punition(guild, member.id, actor.id, JUGEMENT_PUNITION_COUNT)
+        return f"🔒 **Punition** (compter jusqu'à {JUGEMENT_PUNITION_COUNT}, {nb_votes} vote(s))" + (f" — échec : {err}" if err else "")
+
+
+@bot.command(name="jugement", aliases=["judge", "tribunal"])
+async def cmd_jugement(ctx, membre: discord.Member):
+    if not _jugement_authorized(ctx.author):
+        return await ctx.send("❌ Réservé au staff Discord et aux admins.")
+    if _is_mod_immune(membre):
+        return await ctx.send(random.choice(PROTECTED_REJECT_LINES).format(target=membre.mention))
+    if membre.id == bot.user.id:
+        return await ctx.send("❌ On ne juge pas le juge.")
+
+    view = JugementView(membre, ctx.author.id)
+    await ctx.send(embed=view._build_embed(), view=view)
 
 
 @bot.command(name="punition", aliases=["pun", "punir"])
 async def cmd_punition(ctx, nombre: int, membre: discord.Member):
-    if ctx.author.id not in PUNITION_ALLOWED_USER_IDS and not is_bot_owner(ctx.author):
-        return await ctx.send("❌ Tu n'es pas autorisé à utiliser cette commande.")
     if await _check_protected_target(ctx, membre):
         return
     if nombre <= 0:
@@ -9915,6 +11060,11 @@ async def cmd_punition(ctx, nombre: int, membre: discord.Member):
     }
     _log_moderation('punition', membre, ctx.author, extra=f"compter jusqu'à {nombre}")
     save_data()
+    await send_log_message(
+        guild, LOG_MODERATION_CHANNEL_ID, "🔒 Punition",
+        f"{membre.mention} a été mis en punition par {ctx.author.mention} (compter jusqu'à {nombre}).",
+        discord.Color.dark_red(),
+    )
 
     await salon.send(
         f"🔒 {membre.mention} tu es en **punition** !\n"
@@ -9927,8 +11077,6 @@ async def cmd_punition(ctx, nombre: int, membre: discord.Member):
 
 @bot.command(name="annuler_punition", aliases=["apun", "unpunish"])
 async def cmd_annuler_punition(ctx, membre: discord.Member):
-    if ctx.author.id not in PUNITION_ALLOWED_USER_IDS and not is_bot_owner(ctx.author):
-        return await ctx.send("❌ Tu n'es pas autorisé à utiliser cette commande.")
     uid = str(membre.id)
     if uid not in punitions:
         return await ctx.send(f"❌ {membre.mention} n'est pas en punition.")
@@ -9998,11 +11146,15 @@ async def _liberer_membre(guild, membre, resolved_by=None):
             pass
 
     del punitions[uid]
-    _log_moderation(
-        'punition_fin', membre, resolved_by or guild.me,
-        extra="annulée manuellement" if resolved_by else "terminée en comptant jusqu'au bout",
-    )
+    extra = "annulée manuellement" if resolved_by else "terminée en comptant jusqu'au bout"
+    _log_moderation('punition_fin', membre, resolved_by or guild.me, extra=extra)
     save_data()
+    await send_log_message(
+        guild, LOG_MODERATION_CHANNEL_ID, "🔓 Fin de punition",
+        f"La punition de {membre.mention} est terminée ({extra}, par "
+        f"{(resolved_by.mention if resolved_by else 'auto')}).",
+        discord.Color.green(),
+    )
 
     try:
         await membre.send(f"✅ Ta punition sur **{guild.name}** est terminée, tu as retrouvé accès aux salons !")
@@ -10021,6 +11173,9 @@ async def on_message(message):
     morse en tapant le bon code ne marchait donc jamais (incident du
     21/07/2026). Fusionné ici, l'ancien doublon supprimé."""
     if message.author.bot:
+        return
+
+    if await _antiraid_check(message):
         return
 
     # Vérification punition
@@ -10107,8 +11262,9 @@ async def on_message(message):
             "say": "**!say message**\nFait dire quelque chose au bot (créateur du bot uniquement).",
             "dm": "**!dm @membre message**\nEnvoie un message privé à un membre (créateur du bot uniquement).",
             "dmall": "**!dmall message**\nEnvoie un message privé à tous les membres (créateur du bot uniquement).",
-            "giveaway": "**!giveaway durée_heures nb_gagnants lot**\nLance un giveaway.",
-            "cancelgiveaway": "**!cancelgiveaway**\nAnnule le giveaway en cours.",
+            "giveaway": "**!giveaway**\nOuvre un panneau à boutons pour configurer et lancer un giveaway (salon, durée, gagnants, lot).\nMode rapide : `!giveaway durée_heures nb_gagnants lot`. Plusieurs giveaways simultanés possibles.",
+            "cancelgiveaway": "**!cancelgiveaway [id]**\nAnnule un giveaway précis (par ID) ou tous ceux du serveur si aucun ID.",
+            "listgiveaways": "**!listgiveaways**\nAffiche la liste des giveaways en cours et leurs IDs.",
             "aide": "**!aide**\nAffiche la liste complète des commandes."
         }
         if command_name in command_help:
@@ -10203,6 +11359,11 @@ async def cmd_morse(ctx, membre: discord.Member):
     }
     _log_moderation('morse', membre, ctx.author)
     save_data()
+    await send_log_message(
+        guild, LOG_MODERATION_CHANNEL_ID, "🔒 Punition morse",
+        f"{membre.mention} a été mis en punition morse par {ctx.author.mention}.",
+        discord.Color.dark_red(),
+    )
 
     buf = _morse_to_image(morse, word)
     await salon.send(
@@ -10238,11 +11399,15 @@ async def _liberer_membre_morse(guild, membre, resolved_by=None):
         except:
             pass
     del morse_punitions[uid]
-    _log_moderation(
-        'morse_fin', membre, resolved_by or guild.me,
-        extra="annulée manuellement" if resolved_by else "code résolu",
-    )
+    extra = "annulée manuellement" if resolved_by else "code résolu"
+    _log_moderation('morse_fin', membre, resolved_by or guild.me, extra=extra)
     save_data()
+    await send_log_message(
+        guild, LOG_MODERATION_CHANNEL_ID, "🔓 Fin de punition morse",
+        f"La punition morse de {membre.mention} est terminée ({extra}, par "
+        f"{(resolved_by.mention if resolved_by else 'auto')}).",
+        discord.Color.green(),
+    )
     try:
         await membre.send(f"✅ Ta punition morse sur **{guild.name}** est terminée !")
     except:
@@ -10588,7 +11753,7 @@ async def cmd_classement_tournoi(ctx):
     await ctx.send(embed=embed)
 
 
-# ── Config salon logs admin ───────────────────────────────────────────────
+# ── Config salons de logs ─────────────────────────────────────────────────
 @bot.command(name="set_admin_log", aliases=["admin_log"])
 async def cmd_set_admin_log(ctx, channel: discord.TextChannel = None):
     global ADMIN_LOG_CHANNEL_ID
@@ -10599,6 +11764,114 @@ async def cmd_set_admin_log(ctx, channel: discord.TextChannel = None):
     await ctx.send(f"✅ Logs admin configurés dans {channel.mention}.")
 
 
+LOG_CATEGORY_VARS = {
+    'admin':      'ADMIN_LOG_CHANNEL_ID',
+    'moderation': 'LOG_MODERATION_CHANNEL_ID',
+    'casino':     'CASINO_LOG_CHANNEL_ID',
+    'general':    'LOG_GENERAL_CHANNEL_ID',
+    'giveaway':   'LOG_GIVEAWAY_CHANNEL_ID',
+    'ticket':     'LOG_TICKET_CHANNEL_ID',
+    'depart':     'LEAVE_LOG_CHANNEL_ID',
+}
+LOG_CATEGORY_EMOJIS = {
+    'admin': '🔐', 'moderation': '🛡️', 'casino': '🪙',
+    'general': '📋', 'giveaway': '🎉', 'ticket': '🎫', 'depart': '👋',
+}
+
+
+class SetLogsView(discord.ui.View):
+    """Sélecteur de catégorie + sélecteur natif de salon Discord (aucune saisie manuelle) —
+    même esprit que les autres vues à sélecteurs du bot (ex. CooldownView)."""
+
+    def __init__(self, guild, category='admin'):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.category = category
+
+        cat_options = [
+            discord.SelectOption(
+                label=cat.capitalize(), value=cat,
+                emoji=LOG_CATEGORY_EMOJIS.get(cat), default=(cat == self.category)
+            )
+            for cat in LOG_CATEGORY_VARS
+        ]
+        self.cat_select = discord.ui.Select(placeholder="📋 Choisir une catégorie de log…", options=cat_options, row=0)
+        self.cat_select.callback = self._on_category
+        self.add_item(self.cat_select)
+
+        self.channel_select = discord.ui.ChannelSelect(
+            placeholder=f"Choisir le salon pour « {self.category} »…",
+            channel_types=[discord.ChannelType.text], row=1,
+        )
+        self.channel_select.callback = self._on_channel
+        self.add_item(self.channel_select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not (interaction.user.guild_permissions.administrator or is_bot_owner(interaction.user)):
+            await interaction.response.send_message("❌ Réservé aux admins/owner.", ephemeral=True)
+            return False
+        return True
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(title="📋 Configuration des salons de logs", color=0x3498db)
+        for cat, varname in LOG_CATEGORY_VARS.items():
+            cid = globals().get(varname)
+            ch = self.guild.get_channel(cid) if cid else None
+            marker = "👉 " if cat == self.category else ""
+            emoji = LOG_CATEGORY_EMOJIS.get(cat, '')
+            embed.add_field(
+                name=f"{marker}{emoji} {cat.capitalize()}",
+                value=ch.mention if ch else "*non configuré*",
+                inline=True,
+            )
+        embed.set_footer(text="Choisis une catégorie, puis un salon dans les menus ci-dessous.")
+        return embed
+
+    async def _on_category(self, interaction: discord.Interaction):
+        view = SetLogsView(self.guild, self.cat_select.values[0])
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    async def _on_channel(self, interaction: discord.Interaction):
+        channel = self.channel_select.values[0]
+        globals()[LOG_CATEGORY_VARS[self.category]] = channel.id
+        save_data()
+        view = SetLogsView(self.guild, self.category)
+        await interaction.response.edit_message(
+            content=f"✅ Logs **{self.category}** configurés dans <#{channel.id}>.",
+            embed=view.build_embed(), view=view,
+        )
+
+
+@bot.command(name="set_logs", aliases=["logs_config"])
+async def cmd_set_logs(ctx, categorie: str = None, channel: discord.TextChannel = None):
+    if categorie is None:
+        view = SetLogsView(ctx.guild)
+        return await ctx.send(embed=view.build_embed(), view=view)
+
+    if categorie.lower() not in LOG_CATEGORY_VARS and categorie.lower() != 'liste':
+        cats = ", ".join(f"`{c}`" for c in LOG_CATEGORY_VARS)
+        return await ctx.send(
+            f"**Usage :** `!set_logs` (menus interactifs) · `!set_logs <catégorie> [#salon]` · `!set_logs liste`\n"
+            f"Catégories : {cats}\n"
+            f"Sans `#salon`, utilise le salon actuel."
+        )
+    categorie = categorie.lower()
+
+    if categorie == 'liste':
+        lines = []
+        for cat, varname in LOG_CATEGORY_VARS.items():
+            cid = globals().get(varname)
+            ch = ctx.guild.get_channel(cid) if (ctx.guild and cid) else None
+            lines.append(f"**{cat}** : {ch.mention if ch else '*non configuré*'}")
+        return await ctx.send("📋 **Salons de logs configurés :**\n" + "\n".join(lines))
+
+    if channel is None:
+        channel = ctx.channel
+    globals()[LOG_CATEGORY_VARS[categorie]] = channel.id
+    save_data()
+    await ctx.send(f"✅ Logs **{categorie}** configurés dans {channel.mention}.")
+
+
 async def _admin_log(guild, title: str, description: str, color=0xe74c3c, author: discord.Member = None):
     if not ADMIN_LOG_CHANNEL_ID:
         return
@@ -10606,6 +11879,24 @@ async def _admin_log(guild, title: str, description: str, color=0xe74c3c, author
     if not ch:
         return
     embed = discord.Embed(title=f"🔐 {title}", description=description, color=color, timestamp=discord.utils.utcnow())
+    if author:
+        embed.set_footer(text=f"Par {author.display_name} ({author.id})", icon_url=author.display_avatar.url)
+    try:
+        await ch.send(embed=embed)
+    except Exception:
+        pass
+
+
+async def _casino_log(guild, title: str, description: str, color=0x2ecc71, author: discord.Member = None):
+    """Même mécanique que _admin_log, mais dans le salon casino dédié (!set_logs casino).
+    Si non configuré, ne fait rien (pas de fallback silencieux vers admin — évite de mélanger
+    les deux catégories tant que l'admin n'a pas explicitement choisi un salon)."""
+    if not CASINO_LOG_CHANNEL_ID:
+        return
+    ch = guild.get_channel(CASINO_LOG_CHANNEL_ID)
+    if not ch:
+        return
+    embed = discord.Embed(title=f"🪙 {title}", description=description, color=color, timestamp=discord.utils.utcnow())
     if author:
         embed.set_footer(text=f"Par {author.display_name} ({author.id})", icon_url=author.display_avatar.url)
     try:
@@ -11970,36 +13261,36 @@ async def cmd_classement_trophees_famille(ctx):
 
 
 async def _bs_evolution_current_entries():
-    """Calcule l'évolution en direct depuis le début de la saison Brawl Stars en cours
-    (season_start_date, borne posée par check_bs_season au 1er jeudi 10h heure de Paris).
-    La valeur de fin vient d'un appel API en direct (comme avant) ; la baseline de
-    début de saison vient de Supabase (bs_trophy_snapshots)."""
-    start_date = db_bs.get_season_state()['season_start_date'] or datetime.now(BS_SEASON_TZ).strftime('%Y-%m-%d')
-    baselines = db_bs.get_baselines_since(start_date)
-    all_members, errors = [], []
-    for club in db_bs.list_family_clubs():
-        data, err = await _bs_fetch_club(club['tag'])
-        if err:
-            errors.append(f"`#{club['tag']}` : {err}")
-            continue
-        for m in data['members']:
-            if not m['tag']:
-                continue
-            baseline = baselines.get(m['tag'])
-            if not baseline:
-                continue  # membre connu mais aucun point depuis le début de la saison en cours
-            delta = m['trophies'] - baseline['trophies']
-            joined_note = None
-            if baseline['date'] != start_date:
-                d = baseline['date']
-                joined_note = f"depuis le {d[8:10]}/{d[5:7]}"
-            all_members.append({'name': m['name'], 'club': data['name'], 'delta': delta, 'joined_note': joined_note})
+    """Calcule l'évolution depuis le début de la saison Brawl Stars en cours à
+    partir des données déjà synchronisées (comme /api/famille/evolution côté
+    site), plutôt que d'un appel API en direct par clan comme avant — un seul
+    clan injoignable au moment précis de l'appel faisait disparaître
+    silencieusement tous ses membres du résultat (constaté le 11/08/2026 :
+    2 clans sur 7 manquants du menu de filtre, sans message d'erreur clair).
+    Les données synchronisées sont rafraîchies toutes les heures
+    (sync_trophy_history) et la baseline de saison vient de bs_season_baseline
+    (figée au reset) — largement assez à jour, et ne dépend plus de la
+    disponibilité de l'API Brawl Stars au moment précis où la commande tourne."""
+    state = db_bs.get_season_state()
+    start_date = state['season_start_date'] or datetime.now(BS_SEASON_TZ).strftime('%Y-%m-%d')
+    raw = db_bs.get_season_evolution(start_date, state['season_month'])
+
+    all_members = []
+    for e in raw:
+        joined_note = None
+        if e.get('joined_note'):
+            d = e['joined_note']
+            joined_note = f"depuis le {d[8:10]}/{d[5:7]}"
+        all_members.append({
+            'name': e['name'] or '?',
+            'club': e['club'] or '?',
+            'delta': e['delta'],
+            'joined_note': joined_note,
+        })
 
     all_members.sort(key=lambda m: m['delta'], reverse=True)
-    clubs = list(dict.fromkeys(m['club'] for m in all_members))
+    clubs = list(dict.fromkeys(m['club'] for m in all_members if m['club'] != '?'))
     note = "Depuis le début de la saison Brawl Stars en cours"
-    if errors:
-        note += f" · {len(errors)} clan(s) injoignable(s)"
     return all_members, clubs, note
 
 
@@ -12186,7 +13477,10 @@ async def check_bs_season():
 
     if season_month is None:
         start = _most_recent_season_start(now)
-        db_bs.set_season_state(start.strftime('%Y-%m'), start.strftime('%Y-%m-%d'))
+        new_month = start.strftime('%Y-%m')
+        db_bs.set_season_state(new_month, start.strftime('%Y-%m-%d'))
+        latest = db_bs.get_latest_trophies()
+        db_bs.save_season_baseline(new_month, {p['tag']: p['trophies'] for p in latest})
         return
 
     if season_month == current_month:
@@ -12208,7 +13502,7 @@ async def check_bs_season():
 
     ended_month = season_month
     start_date = season_start_date or today
-    entries = db_bs.get_season_evolution(start_date)
+    entries = db_bs.get_season_evolution(start_date, ended_month)
     archive = [
         {'tag': e['tag'], 'name': e['name'], 'club': e['club'], 'start': e['start'], 'end': e['end'], 'delta': e['delta']}
         for e in entries
@@ -12217,7 +13511,15 @@ async def check_bs_season():
         db_bs.archive_season(ended_month, archive)
 
     new_start = _most_recent_season_start(now)
-    db_bs.set_season_state(new_start.strftime('%Y-%m'), new_start.strftime('%Y-%m-%d'))
+    new_month = new_start.strftime('%Y-%m')
+    db_bs.set_season_state(new_month, new_start.strftime('%Y-%m-%d'))
+
+    # Capture immédiate de la valeur de départ de la nouvelle saison (voir
+    # save_season_baseline) — sans ça, "start" dépendrait du premier sync
+    # quotidien classique, potentiellement écrasé plusieurs fois avant que
+    # quiconque ne le consulte (incident du 07/08/2026).
+    latest = db_bs.get_latest_trophies()
+    db_bs.save_season_baseline(new_month, {p['tag']: p['trophies'] for p in latest})
 
 
 @tasks.loop(hours=4)
@@ -12265,7 +13567,12 @@ async def sync_trophy_history():
     if not clubs:
         return
 
-    today = datetime.now().strftime('%Y-%m-%d')
+    # Paris, comme check_bs_season/BS_SEASON_TZ — datetime.now() nu suivait
+    # le fuseau du serveur (UTC sur Railway), décalant la bascule du jour de
+    # ~2h par rapport à l'heure de Paris utilisée partout ailleurs (trouvé le
+    # 07/08/2026 : la nouvelle ligne quotidienne, donc le premier delta
+    # pusheur visible d'une saison, apparaissait avec ce retard).
+    today = datetime.now(BS_SEASON_TZ).strftime('%Y-%m-%d')
     synced_club_tags = []
     all_current_tags = []
     for club in clubs:
@@ -13276,6 +14583,11 @@ async def cmd_casino_ban(ctx, membre: discord.Member, *, raison: str = None):
     casino_banned_users.add(membre.id)
     save_data()
     _log_moderation('casino_ban', membre, ctx.author, reason=raison)
+    await send_log_message(
+        ctx.guild, CASINO_LOG_CHANNEL_ID, "🚫 Casino ban",
+        f"{membre.mention} n'a plus accès aux commandes casino (par {ctx.author.mention})." + (f"\nRaison : {raison}" if raison else ""),
+        discord.Color.dark_red(),
+    )
     await ctx.send(f"🚫 {membre.mention} n'a désormais plus accès aux commandes casino." + (f" Raison : {raison}" if raison else ""))
 
 
@@ -13287,6 +14599,11 @@ async def cmd_casino_unban(ctx, membre: discord.Member):
     casino_banned_users.discard(membre.id)
     save_data()
     _log_moderation('casino_unban', membre, ctx.author)
+    await send_log_message(
+        ctx.guild, CASINO_LOG_CHANNEL_ID, "✅ Casino unban",
+        f"{membre.mention} a de nouveau accès aux commandes casino (par {ctx.author.mention}).",
+        discord.Color.green(),
+    )
     await ctx.send(f"✅ {membre.mention} a de nouveau accès aux commandes casino.")
 
 
@@ -13392,6 +14709,10 @@ async def cmd_casino_pause(ctx):
     utile juste avant un déploiement pour ne pas couper une partie en cours. Voir !casino_resume."""
     global casino_paused
     casino_paused = True
+    await send_log_message(
+        ctx.guild, CASINO_LOG_CHANNEL_ID, "⏸️ Casino en pause",
+        f"Casino mis en pause par {ctx.author.mention}.", discord.Color.orange(),
+    )
     await ctx.send("⏸️ **Casino en pause.** Plus aucune commande casino ne sera acceptée jusqu'à `!casino_resume`.")
 
 
@@ -13400,6 +14721,10 @@ async def cmd_casino_resume(ctx):
     """Annule un !casino_pause."""
     global casino_paused
     casino_paused = False
+    await send_log_message(
+        ctx.guild, CASINO_LOG_CHANNEL_ID, "▶️ Casino relancé",
+        f"Casino relancé par {ctx.author.mention}.", discord.Color.green(),
+    )
     await ctx.send("▶️ **Casino relancé.** Les commandes casino sont de nouveau disponibles.")
 
 
