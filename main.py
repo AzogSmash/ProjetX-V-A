@@ -2349,6 +2349,20 @@ def _bs_tag_prompt_file() -> list[discord.File]:
 
 
 async def _prompt_bs_tag_onboarding(member: discord.Member):
+    """Garde-fou par date persistée (bs_tag_onboarding_prompts) : le
+    déclencheur (before.pending -> after.pending dans on_member_update) peut
+    se redéclencher à tort sur un simple changement de rôle juste après un
+    redémarrage du bot, si le cache membres n'est pas encore chaud au moment
+    de comparer before/after — incident du 17/08/2026 (plusieurs
+    redéploiements le même jour, MP répétés pour un même membre)."""
+    discord_id = str(member.id)
+    last_prompt = db_bs.get_bs_tag_onboarding_last_prompt(discord_id)
+    if last_prompt:
+        elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(last_prompt)
+        if elapsed < timedelta(hours=24):
+            return
+    db_bs.set_bs_tag_onboarding_last_prompt(discord_id)
+
     embed = _bs_tag_prompt_embed()
     view = BsTagOnboardingView()
 
@@ -10832,8 +10846,11 @@ def _is_absence_staff(member: discord.Member) -> bool:
     )
 
 
+ABSENCE_TYPE_LABELS = {"partielle": "🟡 Partielle (temps de jeu réduit)", "totale": "🔴 Totale (aucune connexion)"}
+
+
 async def _create_absence_apply(
-    discord_id: str, club: str, start_raw: str, return_raw: str | None,
+    discord_id: str, club: str, absence_type: str, start_raw: str, return_raw: str | None,
     reason: str, missed_event: str | None, declared_by: discord.Member | None = None,
 ):
     """Retourne (data, err). data = {'id','club','start_date','return_date'}.
@@ -10853,7 +10870,7 @@ async def _create_absence_apply(
             return None, "La date de retour ne peut pas être avant la date de début."
 
     row = db_bs.create_absence(
-        discord_id, club, start_date.isoformat(),
+        discord_id, club, absence_type, start_date.isoformat(),
         return_date.isoformat() if return_date else None,
         reason, missed_event,
     )
@@ -10864,6 +10881,7 @@ async def _create_absence_apply(
         fields = [
             ("Membre", f"<@{discord_id}>", True),
             ("Club", club, True),
+            ("Type", ABSENCE_TYPE_LABELS.get(absence_type, absence_type), True),
             ("Début", start_date.strftime("%d/%m/%Y"), True),
         ]
         if return_date:
@@ -10886,7 +10904,7 @@ async def _create_absence_apply(
 
 
 async def _update_absence_apply(
-    absence_id: int, actor: discord.Member, start_raw: str, return_raw: str | None,
+    absence_id: int, actor: discord.Member, absence_type: str, start_raw: str, return_raw: str | None,
     reason: str, missed_event: str | None,
 ):
     """Retourne (ok, err). Autorisé pour l'auteur de la déclaration ou le staff."""
@@ -10895,6 +10913,9 @@ async def _update_absence_apply(
         return False, "Absence introuvable."
     if str(actor.id) != absence["discord_id"] and not _is_absence_staff(actor):
         return False, "Réservé à l'auteur de la déclaration ou au staff."
+
+    if absence_type not in ABSENCE_TYPE_LABELS:
+        return False, "Type d'absence invalide (partielle ou totale)."
 
     start_date = _parse_absence_date(start_raw)
     if not start_date:
@@ -10908,7 +10929,7 @@ async def _update_absence_apply(
             return False, "La date de retour ne peut pas être avant la date de début."
 
     db_bs.update_absence(
-        absence_id, start_date.isoformat(),
+        absence_id, absence_type, start_date.isoformat(),
         return_date.isoformat() if return_date else None,
         reason, missed_event,
     )
@@ -10920,6 +10941,7 @@ async def _update_absence_apply(
             ("Absence", f"#{absence_id}", True),
             ("Membre", f"<@{absence['discord_id']}>", True),
             ("Club", absence["club"], True),
+            ("Type", ABSENCE_TYPE_LABELS.get(absence_type, absence_type), True),
             ("Modifiée par", actor.mention, True),
         ]
         await send_log_message(
@@ -10981,16 +11003,17 @@ class AbsenceModal(discord.ui.Modal):
         required=True, max_length=300,
     )
 
-    def __init__(self, club: str, target: discord.Member | None = None):
+    def __init__(self, club: str, absence_type: str, target: discord.Member | None = None):
         super().__init__(title=f"Déclarer une absence — {club}"[:45])
         self.club = club
+        self.absence_type = absence_type
         self.target = target  # renseigné quand le staff déclare pour quelqu'un d'autre
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         target_id = str(self.target.id) if self.target else str(interaction.user.id)
         data, err = await _create_absence_apply(
-            target_id, self.club,
+            target_id, self.club, self.absence_type,
             str(self.start_input.value),
             str(self.return_input.value) if self.return_input.value else None,
             str(self.reason_input.value),
@@ -11008,6 +11031,10 @@ class AbsenceModal(discord.ui.Modal):
 
 
 class AbsenceEditModal(discord.ui.Modal):
+    # Type en texte libre ici (pas de select dans un modal Discord) — validé
+    # côté _update_absence_apply contre ABSENCE_TYPE_LABELS, erreur claire si
+    # mal orthographié plutôt qu'une valeur silencieusement invalide.
+    absence_type_input = discord.ui.TextInput(label="Type (partielle ou totale)", required=True, max_length=10)
     start_input = discord.ui.TextInput(label="Date de début (JJ/MM/AAAA)", required=True, max_length=10)
     return_input = discord.ui.TextInput(label="Date de retour prévue (optionnel)", required=False, max_length=10)
     missed_event_input = discord.ui.TextInput(label="Événement manqué (optionnel)", required=False, max_length=100)
@@ -11016,6 +11043,7 @@ class AbsenceEditModal(discord.ui.Modal):
     def __init__(self, absence: dict):
         super().__init__(title=f"Modifier l'absence #{absence['id']} — {absence['club']}"[:45])
         self.absence_id = absence["id"]
+        self.absence_type_input.default = absence.get("absence_type", "totale")
         self.start_input.default = datetime.fromisoformat(absence["start_date"]).strftime("%d/%m/%Y")
         if absence.get("return_date"):
             self.return_input.default = datetime.fromisoformat(absence["return_date"]).strftime("%d/%m/%Y")
@@ -11027,6 +11055,7 @@ class AbsenceEditModal(discord.ui.Modal):
         await interaction.response.defer(ephemeral=True)
         ok, err = await _update_absence_apply(
             self.absence_id, interaction.user,
+            str(self.absence_type_input.value).strip().lower(),
             str(self.start_input.value),
             str(self.return_input.value) if self.return_input.value else None,
             str(self.reason_input.value),
@@ -11037,9 +11066,39 @@ class AbsenceEditModal(discord.ui.Modal):
         await interaction.followup.send(f"✅ Absence #{self.absence_id} modifiée.", ephemeral=True)
 
 
+_ABSENCE_TYPE_OPTIONS = [
+    discord.SelectOption(label="Absence partielle", value="partielle", emoji="🟡", description="Temps de jeu réduit"),
+    discord.SelectOption(label="Absence totale", value="totale", emoji="🔴", description="Aucune connexion possible"),
+]
+
+
+class AbsenceTypeSelectView(discord.ui.View):
+    """Non persistante, instanciée à chaque sélection de club — étape
+    intermédiaire avant le modal (club -> type -> formulaire). Volontairement
+    PAS fusionnée dans AbsencePanelView : cette dernière est persistante et
+    partagée par tous les membres qui cliquent dessus (un seul objet Python
+    enregistré via bot.add_view), donc y stocker un choix "en cours" par
+    utilisateur mélangerait les sélections de deux personnes qui déclarent
+    en même temps. Ici, chaque clic sur le select club envoie un message
+    éphémère avec une instance fraîche de cette vue, propre à cette seule
+    interaction."""
+
+    def __init__(self, club: str, target: discord.Member | None = None):
+        super().__init__(timeout=180)
+        self.club = club
+        self.target = target
+        self.select = discord.ui.Select(placeholder="Absence partielle ou totale ?", options=_ABSENCE_TYPE_OPTIONS)
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(AbsenceModal(self.club, self.select.values[0], target=self.target))
+
+
 class AbsencePanelView(discord.ui.View):
     """Persistante (custom_id statique — même technique que TicketPanelView) :
-    choisir un club ouvre directement le modal de déclaration, pour soi-même."""
+    choisir un club envoie un message éphémère pour choisir le type
+    d'absence (voir AbsenceTypeSelectView), qui ouvre ensuite le modal."""
 
     def __init__(self):
         super().__init__(timeout=None)
@@ -11055,15 +11114,15 @@ class AbsencePanelView(discord.ui.View):
         club = self.select.values[0]
         if club == "none":
             return await interaction.response.send_message("❌ Aucun club n'est configuré pour le moment.", ephemeral=True)
-        await interaction.response.send_modal(AbsenceModal(club))
+        await interaction.response.send_message(
+            f"Club : **{club}** — dernière étape :", view=AbsenceTypeSelectView(club), ephemeral=True,
+        )
 
 
 class AbsenceStaffTargetView(discord.ui.View):
     """Non persistante (timeout court, pas de custom_id statique) : le staff
     choisit un club pour déclarer une absence AU NOM d'un membre ciblé
-    (!absence_ajouter). Contrairement à AbsencePanelView, cette vue est
-    éphémère à cette seule interaction, pas besoin de survivre à un
-    redémarrage."""
+    (!absence_ajouter), puis le type d'absence (AbsenceTypeSelectView)."""
 
     def __init__(self, target: discord.Member):
         super().__init__(timeout=300)
@@ -11079,7 +11138,9 @@ class AbsenceStaffTargetView(discord.ui.View):
         club = self.select.values[0]
         if club == "none":
             return await interaction.response.send_message("❌ Aucun club n'est configuré pour le moment.", ephemeral=True)
-        await interaction.response.send_modal(AbsenceModal(club, target=self.target))
+        await interaction.response.send_message(
+            f"Club : **{club}** — dernière étape :", view=AbsenceTypeSelectView(club, target=self.target), ephemeral=True,
+        )
 
 
 class AbsenceEditPromptView(discord.ui.View):

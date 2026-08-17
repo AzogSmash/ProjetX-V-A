@@ -673,9 +673,11 @@ def close_ticket(ticket_id: int, closed_by: str, reason: str | None, transcript:
 # ── Absences ──
 
 def create_absence(
-    discord_id: str, club: str, start_date: str, return_date: str | None,
+    discord_id: str, club: str, absence_type: str, start_date: str, return_date: str | None,
     reason: str, missed_event: str | None,
 ) -> dict:
+    """absence_type : 'partielle' (temps de jeu réduit) ou 'totale' (aucune
+    connexion) — voir supabase/014_absences_type.sql."""
     res = (
         get_client()
         .table("absences")
@@ -683,6 +685,7 @@ def create_absence(
             {
                 "discord_id": discord_id,
                 "club": club,
+                "absence_type": absence_type,
                 "start_date": start_date,
                 "return_date": return_date,
                 "reason": reason,
@@ -718,11 +721,12 @@ def list_absences_for_member(discord_id: str) -> list[dict]:
 
 
 def update_absence(
-    absence_id: int, start_date: str, return_date: str | None,
+    absence_id: int, absence_type: str, start_date: str, return_date: str | None,
     reason: str, missed_event: str | None,
 ) -> None:
     get_client().table("absences").update(
         {
+            "absence_type": absence_type,
             "start_date": start_date,
             "return_date": return_date,
             "reason": reason,
@@ -733,3 +737,24 @@ def update_absence(
 
 def delete_absence(absence_id: int) -> None:
     get_client().table("absences").delete().eq("id", absence_id).execute()
+
+
+# ── Anti-spam de la relance/prompt tag Brawl Stars (onboarding) ──
+
+def get_bs_tag_onboarding_last_prompt(discord_id: str) -> str | None:
+    res = (
+        get_client()
+        .table("bs_tag_onboarding_prompts")
+        .select("last_prompted_at")
+        .eq("discord_id", discord_id)
+        .limit(1)
+        .execute()
+    )
+    return res.data[0]["last_prompted_at"] if res.data else None
+
+
+def set_bs_tag_onboarding_last_prompt(discord_id: str) -> None:
+    get_client().table("bs_tag_onboarding_prompts").upsert(
+        {"discord_id": discord_id, "last_prompted_at": datetime.now(timezone.utc).isoformat()},
+        on_conflict="discord_id",
+    ).execute()
