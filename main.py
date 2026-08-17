@@ -1561,6 +1561,7 @@ async def on_ready():
     for row in db_bs.list_open_tickets():
         bot.add_view(TicketControlView(row["id"]))
     bot.add_view(AbsencePanelView())
+    bot.add_view(BsTagOnboardingView())
 
     load_data()
 
@@ -2249,6 +2250,87 @@ async def on_member_join(member):
         await send_log_message(guild, LOG_GENERAL_CHANNEL_ID, "⚠️ Rôle Manquant", f"Le rôle '{AUTO_JOIN_ROLE_NAME}' n'a pas été trouvé pour l'attribution automatique.", discord.Color.dark_orange(), fields)
 
 
+# ── Demande du tag Brawl Stars après l'onboarding Discord (demande du
+# 17/08/2026) : dès qu'un membre franchit le portail d'accueil natif Discord
+# (rôles choisis dans l'onboarding, before.pending -> after.pending=False,
+# détecté dans on_member_update ci-dessous), on lui propose de lier son tag
+# BS pour que la base reste à jour sans dépendre de !bslink lancé
+# manuellement. _bslink_apply (plus bas dans le fichier) fait tout le
+# travail — même fonction que !bslink et POST /api/bslink.
+BS_TAG_HELP_IMAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "bs_tag_help.png")
+
+
+class BsTagOnboardingModal(discord.ui.Modal, title="Lier ton compte Brawl Stars"):
+    tag_input = discord.ui.TextInput(
+        label="Ton tag Brawl Stars (avec ou sans #)",
+        placeholder="#ABC123XYZ",
+        required=True, max_length=20,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        data, err = await _bslink_apply(
+            str(interaction.user.id), str(self.tag_input.value),
+            member=interaction.user if interaction.guild else None,
+        )
+        if err:
+            return await interaction.followup.send(
+                f"❌ {err} Réessaie avec le bouton, ou plus tard avec `!bslink <tag>`.", ephemeral=True,
+            )
+        await interaction.followup.send(
+            f"✅ Compte lié : **{data['name']}** ({data['trophies']} 🏆). Merci !", ephemeral=True,
+        )
+
+
+class BsTagOnboardingView(discord.ui.View):
+    """Persistante (custom_id statique) : le bouton doit rester utilisable
+    même si le membre ne réagit que des jours plus tard, ou après un
+    redémarrage du bot (voir bot.add_view dans on_ready)."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        btn = discord.ui.Button(
+            label="🏷️ Renseigner mon tag Brawl Stars",
+            style=discord.ButtonStyle.primary,
+            custom_id="bs_tag_onboarding_button",
+        )
+        btn.callback = self._on_click
+        self.add_item(btn)
+
+    async def _on_click(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(BsTagOnboardingModal())
+
+
+async def _prompt_bs_tag_onboarding(member: discord.Member):
+    embed = discord.Embed(
+        title="🏷️ Dernière étape : ton tag Brawl Stars",
+        description=(
+            "Pour apparaître dans les classements et le suivi de trophées, "
+            "renseigne ton tag Brawl Stars (visible dans ton profil en jeu, "
+            "voir l'image ci-dessous) en cliquant sur le bouton."
+        ),
+        color=0x8B5CF6,
+    )
+    files = []
+    if os.path.exists(BS_TAG_HELP_IMAGE_PATH):
+        files.append(discord.File(BS_TAG_HELP_IMAGE_PATH, filename="bs_tag_help.png"))
+        embed.set_image(url="attachment://bs_tag_help.png")
+    view = BsTagOnboardingView()
+
+    try:
+        await member.send(embed=embed, files=files, view=view)
+        return
+    except discord.Forbidden:
+        pass  # DMs fermés pour les membres du serveur : on retente dans #arrivées
+
+    channel = member.guild.get_channel(ARRIVEE_CHANNEL_ID)
+    if channel:
+        try:
+            await channel.send(content=member.mention, embed=embed, files=files, view=view)
+        except discord.HTTPException as e:
+            print(f"Erreur en envoyant la demande de tag BS pour {member.name} : {e}")
+
+
 def _human_duration(delta: timedelta) -> str:
     days = delta.days
     if days >= 365:
@@ -2396,6 +2478,13 @@ async def on_message_delete(message):
 async def on_member_update(before, after):
     if before.guild is None or after.guild is None:
         return
+
+    # Passage du portail d'accueil Discord (onboarding/membership screening) :
+    # before.pending est vrai tant que le membre n'a pas terminé le flow
+    # natif Discord (règles + rôles), et repasse à faux une fois fait — c'est
+    # le seul signal fiable exposé par l'API pour "onboarding terminé".
+    if before.pending and not after.pending and not after.bot and after.guild.id == BS_FAMILY_GUILD_ID:
+        await _prompt_bs_tag_onboarding(after)
 
     if before.nick != after.nick:
         description = f"Le pseudo de {after.mention} a changé."
