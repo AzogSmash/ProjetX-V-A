@@ -128,6 +128,13 @@ def api_famille_actualites():
     return jsonify(db_bs.list_news(limit))
 
 
+@app.route("/api/famille/best_builds")
+def api_famille_best_builds():
+    """Un build recommandé par brawler — public, même niveau d'accès que le
+    reste de l'API famille (déjà visible sur le site sans compte)."""
+    return jsonify(db_bs.list_best_builds())
+
+
 def _r1v1_tier_label(points, tiers):
     label = tiers[0][1]
     for min_pts, name in tiers:

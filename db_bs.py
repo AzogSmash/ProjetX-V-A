@@ -450,6 +450,45 @@ def create_news(icon: str, title: str, description: str, author: str | None) -> 
     ).execute()
 
 
+# ── Meilleurs builds (un par brawler, voir supabase/012_best_builds.sql) ──
+
+def list_best_builds() -> list[dict]:
+    """Un par brawler, triés par nom — pour la page /best-builds du site et
+    la future commande bot."""
+    res = get_client().table("best_builds").select("*").order("brawler_name").execute()
+    return res.data
+
+
+def get_best_build(brawler_slug: str) -> dict | None:
+    res = get_client().table("best_builds").select("*").eq("brawler_slug", brawler_slug).limit(1).execute()
+    return res.data[0] if res.data else None
+
+
+def upsert_best_build(brawler_slug: str, brawler_name: str, comment: str, updated_by: str | None) -> dict:
+    """Un seul build par brawler : un nouvel appel pour le même brawler_slug
+    remplace le précédent (upsert sur la clé primaire)."""
+    res = (
+        get_client()
+        .table("best_builds")
+        .upsert(
+            {
+                "brawler_slug": brawler_slug,
+                "brawler_name": brawler_name,
+                "comment": comment,
+                "updated_by": updated_by,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="brawler_slug",
+        )
+        .execute()
+    )
+    return res.data[0]
+
+
+def delete_best_build(brawler_slug: str) -> None:
+    get_client().table("best_builds").delete().eq("brawler_slug", brawler_slug).execute()
+
+
 # ── Profils personnalisés (bio) ──
 
 def get_player_profile(tag: str) -> dict | None:
