@@ -2359,7 +2359,7 @@ async def _prompt_bs_tag_onboarding(member: discord.Member):
     last_prompt = db_bs.get_bs_tag_onboarding_last_prompt(discord_id)
     if last_prompt:
         elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(last_prompt)
-        if elapsed < timedelta(hours=24):
+        if elapsed < timedelta(days=6):  # même délai que remind_bs_tag_missing
             return
     db_bs.set_bs_tag_onboarding_last_prompt(discord_id)
 
