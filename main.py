@@ -2166,14 +2166,21 @@ async def on_guild_join(guild):
         logging.warning("Erreur de synchronisation des slash commands sur %s : %s", guild.name, e)
 
 
+# Nom exact du rôle donné automatiquement à l'arrivée — doit correspondre au
+# rôle réellement présent sur le serveur (constaté "Membres", au pluriel ;
+# l'ancien "Membre" au singulier n'existe pas et faisait échouer
+# l'attribution à chaque arrivée, voir #logs-general du 17/08/2026).
+AUTO_JOIN_ROLE_NAME = "Membres"
+
+
 @bot.event
 async def on_member_join(member):
     guild = member.guild
-    role = discord.utils.get(guild.roles, name="Membre")
+    role = discord.utils.get(guild.roles, name=AUTO_JOIN_ROLE_NAME)
     if role:
         try:
             await member.add_roles(role)
-            print(f"Rôle 'Membre' ajouté à {member.name}")
+            print(f"Rôle '{AUTO_JOIN_ROLE_NAME}' ajouté à {member.name}")
             fields = [
                 ("Membre", member.mention, True),
                 ("ID Membre", member.id, True),
@@ -2187,7 +2194,7 @@ async def on_member_join(member):
                 ("Rôle Attribué", role.name, False),
                 ("Erreur", "Permissions insuffisantes pour le bot.", False)
             ]
-            await send_log_message(guild, LOG_GENERAL_CHANNEL_ID, "⚠️ Erreur Rôle Auto", f"Impossible d'ajouter le rôle 'Membre' à {member.mention}.", discord.Color.red(), fields)
+            await send_log_message(guild, LOG_GENERAL_CHANNEL_ID, "⚠️ Erreur Rôle Auto", f"Impossible d'ajouter le rôle '{AUTO_JOIN_ROLE_NAME}' à {member.mention}.", discord.Color.red(), fields)
         except Exception as e:
             print(f"Erreur en ajoutant le rôle à {member.name} : {e}")
             fields = [
@@ -2195,14 +2202,14 @@ async def on_member_join(member):
                 ("Rôle Attribué", role.name, False),
                 ("Erreur", str(e), False)
             ]
-            await send_log_message(guild, LOG_GENERAL_CHANNEL_ID, "⚠️ Erreur Rôle Auto", f"Une erreur est survenue lors de l'ajout du rôle 'Membre' à {member.mention}.", discord.Color.red(), fields)
+            await send_log_message(guild, LOG_GENERAL_CHANNEL_ID, "⚠️ Erreur Rôle Auto", f"Une erreur est survenue lors de l'ajout du rôle '{AUTO_JOIN_ROLE_NAME}' à {member.mention}.", discord.Color.red(), fields)
     else:
-        print("Le rôle 'Membre' n'existe pas dans ce serveur.")
+        print(f"Le rôle '{AUTO_JOIN_ROLE_NAME}' n'existe pas dans ce serveur.")
         fields = [
             ("Serveur", guild.name, True),
-            ("Erreur", "Le rôle 'Membre' n'existe pas.", False)
+            ("Erreur", f"Le rôle '{AUTO_JOIN_ROLE_NAME}' n'existe pas.", False)
         ]
-        await send_log_message(guild, LOG_GENERAL_CHANNEL_ID, "⚠️ Rôle Manquant", "Le rôle 'Membre' n'a pas été trouvé pour l'attribution automatique.", discord.Color.dark_orange(), fields)
+        await send_log_message(guild, LOG_GENERAL_CHANNEL_ID, "⚠️ Rôle Manquant", f"Le rôle '{AUTO_JOIN_ROLE_NAME}' n'a pas été trouvé pour l'attribution automatique.", discord.Color.dark_orange(), fields)
 
 
 def _human_duration(delta: timedelta) -> str:
