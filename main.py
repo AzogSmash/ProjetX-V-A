@@ -1629,6 +1629,8 @@ async def on_ready():
         sync_discord_members.start()
     if not sync_absence_roles.is_running():
         sync_absence_roles.start()
+    if not remind_bs_tag_missing.is_running():
+        remind_bs_tag_missing.start()
 
     global _slash_synced, slash_global_purged
     if not _slash_synced:
@@ -2301,7 +2303,7 @@ class BsTagOnboardingView(discord.ui.View):
         await interaction.response.send_modal(BsTagOnboardingModal())
 
 
-async def _prompt_bs_tag_onboarding(member: discord.Member):
+def _bs_tag_prompt_embed() -> discord.Embed:
     embed = discord.Embed(
         title="🏷️ Dernière étape : ton tag Brawl Stars",
         description=(
@@ -2311,14 +2313,27 @@ async def _prompt_bs_tag_onboarding(member: discord.Member):
         ),
         color=0x8B5CF6,
     )
-    files = []
     if os.path.exists(BS_TAG_HELP_IMAGE_PATH):
-        files.append(discord.File(BS_TAG_HELP_IMAGE_PATH, filename="bs_tag_help.png"))
         embed.set_image(url="attachment://bs_tag_help.png")
+    return embed
+
+
+def _bs_tag_prompt_file() -> list[discord.File]:
+    """Un discord.File ne peut servir qu'à UN seul envoi (le flux est
+    consommé) — reconstruit à chaque appel plutôt que partagé entre
+    plusieurs member.send()/channel.send() (DM + repli salon, ou boucle sur
+    plusieurs membres)."""
+    if os.path.exists(BS_TAG_HELP_IMAGE_PATH):
+        return [discord.File(BS_TAG_HELP_IMAGE_PATH, filename="bs_tag_help.png")]
+    return []
+
+
+async def _prompt_bs_tag_onboarding(member: discord.Member):
+    embed = _bs_tag_prompt_embed()
     view = BsTagOnboardingView()
 
     try:
-        await member.send(embed=embed, files=files, view=view)
+        await member.send(embed=embed, files=_bs_tag_prompt_file(), view=view)
         return
     except discord.Forbidden:
         pass  # DMs fermés pour les membres du serveur : on retente dans #arrivées
@@ -2326,9 +2341,64 @@ async def _prompt_bs_tag_onboarding(member: discord.Member):
     channel = member.guild.get_channel(ARRIVEE_CHANNEL_ID)
     if channel:
         try:
-            await channel.send(content=member.mention, embed=embed, files=files, view=view)
+            await channel.send(content=member.mention, embed=embed, files=_bs_tag_prompt_file(), view=view)
         except discord.HTTPException as e:
             print(f"Erreur en envoyant la demande de tag BS pour {member.name} : {e}")
+
+
+async def _send_bs_tag_reminder_dm(member: discord.Member) -> bool:
+    """Comme _prompt_bs_tag_onboarding, mais MP uniquement (pas de repli
+    salon) — utilisé par la relance hebdomadaire (remind_bs_tag_missing) :
+    republier dans #arrivées chaque semaine pour des membres présents
+    depuis longtemps serait intrusif pour ce salon d'accueil."""
+    try:
+        await member.send(embed=_bs_tag_prompt_embed(), files=_bs_tag_prompt_file(), view=BsTagOnboardingView())
+        return True
+    except discord.HTTPException:
+        return False
+
+
+@tasks.loop(hours=24 * 7)
+async def remind_bs_tag_missing():
+    """Relance hebdomadaire (demande du 17/08/2026) des membres présents sur
+    le serveur qui n'ont toujours pas lié leur tag Brawl Stars (bs_accounts).
+    Pause entre chaque MP pour rester loin des rate limits Discord ; le
+    résultat est résumé dans #logs-general plutôt que de notifier pour
+    chaque membre individuellement."""
+    await bot.wait_until_ready()
+    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+    if not guild:
+        return
+
+    missing = [m for m in guild.members if not m.bot and str(m.id) not in bs_accounts]
+    sent = 0
+    for member in missing:
+        if await _send_bs_tag_reminder_dm(member):
+            sent += 1
+        await asyncio.sleep(2)
+
+    if missing:
+        fields = [
+            ("MP envoyés", str(sent), True),
+            ("MP bloqués (DMs fermés)", str(len(missing) - sent), True),
+            ("Total sans tag lié", str(len(missing)), True),
+        ]
+        await send_log_message(
+            guild, LOG_GENERAL_CHANNEL_ID, "🏷️ Relance hebdomadaire — tag Brawl Stars",
+            "Rappel envoyé aux membres n'ayant pas encore lié leur tag.",
+            discord.Color.blue(), fields,
+        )
+
+
+@bot.command(name="relancer_tag_bs", aliases=["bs_tag_relance"])
+async def cmd_relancer_tag_bs(ctx):
+    """Déclenche immédiatement la relance hebdomadaire (voir
+    remind_bs_tag_missing) au lieu d'attendre le prochain cycle — réservé au
+    staff, ça peut prendre plusieurs minutes selon le nombre de membres."""
+    if not _is_ticket_staff(ctx.author):
+        return await ctx.send("❌ Réservé au staff.")
+    await ctx.send("🏷️ Relance en cours (MP envoyés progressivement, ça peut prendre plusieurs minutes)...")
+    remind_bs_tag_missing.restart()
 
 
 def _human_duration(delta: timedelta) -> str:
