@@ -1,0 +1,7 @@
+-- Cinquième lot de builds fournis par le staff (17/08/2026) — voir
+-- 012_best_builds.sql pour le contexte de la table.
+insert into best_builds (brawler_slug, brawler_name, comment) values
+  ('bo', 'Bo', 'Les mines et le totem de Bo sont meilleurs que le personnage lui-même. Pensez à bien protéger votre totem, loin du conflit s''il le faut, grâce à sa grande portée. Attendez que les mines explosent un ennemi pour l''immobiliser et le finir à distance. (Ne jouez pas l''autre gadget ou pouvoir star.)'),
+  ('emz', 'EMZ', 'EMZ, l''ultime contre les tanks. Le gear vitesse vous permettra de rattraper ceux qui vous fuiront, et le combo du gadget et du pouvoir star — sans oublier l''hypercharge — vous permettra de survivre même contre les assassins surprises. L''autre gadget est également excellent, vous permettant de ralentir votre cible, mur ou pas mur. Dans de rares cas, vous pouvez jouer l''autre pouvoir star, qui surprendra vos ennemis avec ses gros dégâts. (Équipement bouclier si peu de buissons, pour plus de contrôle.)'),
+  ('stu', 'Stu', 'Stu, excellent assassin possédant de nombreux matchups très intéressants. Le choix du gadget dépend de ce que vous affrontez, le cassage reste plus polyvalent. Ne jouez jamais le long dash — vous passerez pour un débutant — et enlevez le soin sur l''ultime du personnage, sinon vous n''aurez aucun impact dans la partie. Le gear vision lui rend la vie facile sur certaines maps, n''hésitez pas à vous en équiper au besoin.')
+on conflict (brawler_slug) do nothing;
