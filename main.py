@@ -53,6 +53,18 @@ LOG_TICKET_CHANNEL_ID = 1513117932228706374  # salon #logs-ticket
 # Mêmes IDs de rôle que STAFF_ROLE_IDS côté site (src/lib/access.ts) — pour
 # que "staff" veuille dire la même chose partout.
 TICKET_STAFF_ROLE_IDS = {1513110804595998788, 1516514610881237084}
+# Les incidents serveur ne concernent que le staff Discord (1516514610881237084)
+# — le staff des clans (vice-présidents etc., 1513110804595998788) gère les
+# candidatures/recrutements mais pas les incidents généraux (demande du
+# 17/08/2026). Utilisé pour les overwrites du salon ET les mentions de
+# bienvenue, voir _ticket_staff_role_ids_for.
+TICKET_INCIDENT_STAFF_ROLE_IDS = {1516514610881237084}
+
+
+def _ticket_staff_role_ids_for(category: str) -> set[int]:
+    return TICKET_INCIDENT_STAFF_ROLE_IDS if category == "incident" else TICKET_STAFF_ROLE_IDS
+
+
 TICKET_CATEGORIES = {
     "candidature": "💼 Candidature",
     "club_recruitment": "🎯 Recrutement Club",
@@ -2006,6 +2018,14 @@ def _build_help_categories(ctx):
                  "`!famille_stats` (`!fs`) — Vue d'ensemble : membres, trophées, répartition par clan/rang\n"
                  "*(Admin)* `!bs_famille ajouter/retirer <tag_clan>` — Gérer les clans de la famille\n"
                  "Chaque clan ajouté obtient aussi sa propre commande (ex : `!projetx`) — voir `!bs_famille liste`"))
+    cats.append(("absences", "🌴 Absences",
+                 "Déclarer, consulter et gérer les absences",
+                 "`!absence_panel` — Poste le panel de déclaration dans le salon courant\n"
+                 "`!absences` *(Staff)* — Panel interactif : filtrer par club, trier, "
+                 "modifier/supprimer une absence via les menus (pas de saisie manuelle de club)\n"
+                 "`!absence_ajouter @membre` *(Staff)* — Déclarer une absence pour quelqu'un d'autre\n"
+                 "`!absence_modifier <id>` — Modifier une absence par son numéro (l'auteur ou le staff)\n"
+                 "`!supprimer_absence <id>` — Supprimer une absence par son numéro (l'auteur ou le staff)"))
 
     if has_manage_messages or has_ban_members:
         lines = []
@@ -10426,7 +10446,7 @@ async def _create_ticket_apply(discord_id: str, category: str, description: str,
         member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
         guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
     }
-    for rid in TICKET_STAFF_ROLE_IDS:
+    for rid in _ticket_staff_role_ids_for(category):
         role = guild.get_role(rid)
         if role:
             overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
@@ -10450,7 +10470,7 @@ async def _create_ticket_apply(discord_id: str, category: str, description: str,
     embed.add_field(name="Ouvert par", value=member.mention, inline=True)
     embed.set_footer(text="Non pris en charge")
 
-    staff_mentions = [f"<@&{rid}>" for rid in TICKET_STAFF_ROLE_IDS if guild.get_role(rid)]
+    staff_mentions = [f"<@&{rid}>" for rid in _ticket_staff_role_ids_for(category) if guild.get_role(rid)]
     staff_part = " ou ".join(staff_mentions) if staff_mentions else "staff"
     welcome = (
         f"Bienvenue {member.mention} dans le salon de ton ticket ! "
@@ -11081,6 +11101,144 @@ class AbsenceEditPromptView(discord.ui.View):
         await interaction.response.send_modal(AbsenceEditModal(self.absence))
 
 
+class AbsenceActionView(discord.ui.View):
+    """Modifier/Supprimer pour UNE absence précise — affiché après
+    sélection dans AbsenceStaffPanelView. Modifier réutilise AbsenceEditModal,
+    Supprimer réutilise _delete_absence_apply (même logique que
+    !absence_modifier/!supprimer_absence en commande directe)."""
+
+    def __init__(self, absence: dict, requester_id: int):
+        super().__init__(timeout=120)
+        self.absence = absence
+        self.requester_id = requester_id
+        edit_btn = discord.ui.Button(label="✏️ Modifier", style=discord.ButtonStyle.primary)
+        edit_btn.callback = self._on_edit
+        self.add_item(edit_btn)
+        delete_btn = discord.ui.Button(label="🗑️ Supprimer", style=discord.ButtonStyle.danger)
+        delete_btn.callback = self._on_delete
+        self.add_item(delete_btn)
+
+    async def _on_edit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.requester_id:
+            return await interaction.response.send_message("❌ Ce bouton n'est pas pour toi.", ephemeral=True)
+        await interaction.response.send_modal(AbsenceEditModal(self.absence))
+
+    async def _on_delete(self, interaction: discord.Interaction):
+        if interaction.user.id != self.requester_id:
+            return await interaction.response.send_message("❌ Ce bouton n'est pas pour toi.", ephemeral=True)
+        ok, err = await _delete_absence_apply(self.absence["id"], interaction.user)
+        if not ok:
+            return await interaction.response.send_message(f"❌ {err}", ephemeral=True)
+        await interaction.response.edit_message(content=f"✅ Absence #{self.absence['id']} supprimée.", view=None)
+
+
+class AbsenceStaffPanelView(discord.ui.View):
+    """Panel interactif pour le staff (!absences) : filtre par club (select)
+    et tri (bouton) au lieu d'un argument texte libre — un club mal
+    orthographié ou un caractère Unicode qui se ressemble sans être identique
+    (ex: 'ProjetΣ' tapé 'projet∑') faisait échouer silencieusement l'ancien
+    `!absences <club>` (incident du 17/08/2026). Choisir une absence dans la
+    liste ouvre un second panel Modifier/Supprimer (AbsenceActionView)."""
+
+    def __init__(self, requester_id: int, club_filter: str | None = None, sort_by: str = "date"):
+        super().__init__(timeout=300)
+        self.requester_id = requester_id
+        self.club_filter = club_filter
+        self.sort_by = sort_by
+        self._rows: list[dict] = []
+        self._build()
+
+    def _load_rows(self) -> list[dict]:
+        rows = db_bs.list_absences(self.club_filter)
+        if self.sort_by == "club":
+            rows = sorted(rows, key=lambda r: (r["club"], r["start_date"]))
+        return rows
+
+    def _build(self):
+        self.clear_items()
+        self._rows = self._load_rows()
+
+        clubs = sorted({r["club"] for r in db_bs.list_absences()})
+        club_options = [discord.SelectOption(label="Tous les clubs", value="__all__", default=self.club_filter is None)]
+        club_options += [
+            discord.SelectOption(label=c[:100], value=c[:100], default=(c == self.club_filter))
+            for c in clubs[:24]
+        ]
+        self.club_select = discord.ui.Select(placeholder="Filtrer par club", options=club_options)
+        self.club_select.callback = self._on_club_select
+        self.add_item(self.club_select)
+
+        if self._rows:
+            self.abs_select = discord.ui.Select(
+                placeholder="Choisir une absence à modifier/supprimer",
+                options=[
+                    discord.SelectOption(label=f"#{r['id']} — {r['club']} — {r['start_date']}"[:100], value=str(r["id"]))
+                    for r in self._rows[:25]
+                ],
+            )
+            self.abs_select.callback = self._on_pick
+            self.add_item(self.abs_select)
+
+        sort_btn = discord.ui.Button(
+            label=f"Trier par {'date' if self.sort_by == 'club' else 'club'}",
+            style=discord.ButtonStyle.secondary,
+        )
+        sort_btn.callback = self._on_toggle_sort
+        self.add_item(sort_btn)
+
+    def _build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"🌴 Absences{f' — {self.club_filter}' if self.club_filter else ''}",
+            color=discord.Color.blue(),
+        )
+        if not self._rows:
+            embed.description = "Aucune absence enregistrée."
+        for row in self._rows[:25]:  # limite embed : 25 champs max
+            retour = row["return_date"] or "?"
+            value = f"<@{row['discord_id']}> — retour prévu : {retour}\n{row['reason']}"
+            if row.get("missed_event"):
+                value += f"\n🎯 Manqué : {row['missed_event']}"
+            embed.add_field(name=f"#{row['id']} — {row['club']} — {row['start_date']}", value=value, inline=False)
+        embed.set_footer(text=f"Tri : {'club' if self.sort_by == 'club' else 'date'} · {len(self._rows)} résultat(s)")
+        return embed
+
+    async def _refresh(self, interaction: discord.Interaction):
+        self._build()
+        await interaction.response.edit_message(embed=self._build_embed(), view=self)
+
+    async def _guard(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message("❌ Ce panel n'est pas pour toi — lance `!absences` toi-même.", ephemeral=True)
+            return False
+        return True
+
+    async def _on_club_select(self, interaction: discord.Interaction):
+        if not await self._guard(interaction):
+            return
+        value = self.club_select.values[0]
+        self.club_filter = None if value == "__all__" else value
+        await self._refresh(interaction)
+
+    async def _on_toggle_sort(self, interaction: discord.Interaction):
+        if not await self._guard(interaction):
+            return
+        self.sort_by = "club" if self.sort_by == "date" else "date"
+        await self._refresh(interaction)
+
+    async def _on_pick(self, interaction: discord.Interaction):
+        if not await self._guard(interaction):
+            return
+        absence_id = int(self.abs_select.values[0])
+        absence = db_bs.get_absence(absence_id)
+        if not absence:
+            return await interaction.response.send_message("❌ Absence introuvable (déjà supprimée ?).", ephemeral=True)
+        await interaction.response.send_message(
+            f"**Absence #{absence_id}** — {absence['club']} — <@{absence['discord_id']}>",
+            view=AbsenceActionView(absence, interaction.user.id),
+            ephemeral=True,
+        )
+
+
 @bot.command(name="absence_panel")
 async def cmd_absence_panel(ctx):
     """Poste le panel de déclaration d'absence dans le salon courant — à
@@ -11123,30 +11281,16 @@ async def cmd_absence_modifier(ctx, absence_id: int):
 
 
 @bot.command(name="absences")
-async def cmd_absences(ctx, club: str = None):
-    """Liste les absences (triées par date de début, plus récente en
-    premier), filtrables par club — réservé au staff. `!absences` pour tout
-    voir, `!absences NomDuClub` pour filtrer sur un club."""
+async def cmd_absences(ctx):
+    """Panel interactif pour le staff : liste des absences, filtrable par
+    club et triable via les menus/boutons, avec modifier/supprimer par
+    sélection (voir AbsenceStaffPanelView) — remplace l'ancien
+    `!absences <club>` en texte libre, source d'erreurs silencieuses
+    (casse, caractères Unicode qui se ressemblent sans être identiques)."""
     if not _is_absence_staff(ctx.author):
         return await ctx.send("❌ Réservé au staff.")
-
-    rows = db_bs.list_absences(club)
-    if not rows:
-        return await ctx.send("Aucune absence enregistrée." if not club else f"Aucune absence enregistrée pour **{club}**.")
-
-    embed = discord.Embed(
-        title=f"🌴 Absences{f' — {club}' if club else ''}",
-        color=discord.Color.blue(),
-    )
-    for row in rows[:25]:  # limite embed : 25 champs max
-        retour = row["return_date"] or "?"
-        value = f"<@{row['discord_id']}> — retour prévu : {retour}\n{row['reason']}"
-        if row.get("missed_event"):
-            value += f"\n🎯 Manqué : {row['missed_event']}"
-        embed.add_field(name=f"#{row['id']} — {row['club']} — {row['start_date']}", value=value, inline=False)
-    if len(rows) > 25:
-        embed.set_footer(text=f"+{len(rows) - 25} autres non affichées (filtre par club recommandé).")
-    await ctx.send(embed=embed)
+    view = AbsenceStaffPanelView(ctx.author.id)
+    await ctx.send(embed=view._build_embed(), view=view)
 
 
 @bot.command(name="supprimer_absence", aliases=["delete_absence", "absence_supprimer"])
