@@ -62,6 +62,7 @@ TICKET_CATEGORIES = {
 
 # ── Déclaration d'absences ──
 LOG_ABSENCE_CHANNEL_ID = 1538829307810676746
+ABSENCE_ROLE_ID = 1538836433609953391  # rôle "Absent", ajouté/retiré automatiquement (voir _sync_absence_role, sync_absence_roles)
 
 # Intents du bot
 intents = discord.Intents.default()
@@ -1625,6 +1626,8 @@ async def on_ready():
         check_bs_season.start()
     if not sync_discord_members.is_running():
         sync_discord_members.start()
+    if not sync_absence_roles.is_running():
+        sync_absence_roles.start()
 
     global _slash_synced, slash_global_purged
     if not _slash_synced:
@@ -10523,6 +10526,44 @@ def _parse_absence_date(raw: str) -> date | None:
         return None
 
 
+def _absence_is_active(absence: dict, today: date) -> bool:
+    """Vrai si `today` tombe dans la période déclarée. Une absence sans date
+    de retour est considérée active indéfiniment jusqu'à suppression/modif —
+    même logique que l'affichage "?" dans !absences."""
+    start = date.fromisoformat(absence["start_date"])
+    if start > today:
+        return False
+    if absence.get("return_date"):
+        return date.fromisoformat(absence["return_date"]) >= today
+    return True
+
+
+async def _sync_absence_role(guild: discord.Guild, discord_id: str) -> None:
+    """Ajoute/retire le rôle ABSENCE_ROLE_ID selon qu'une absence de ce
+    membre couvre la date du jour — appelé juste après chaque
+    création/modif/suppression pour un effet immédiat. La tâche périodique
+    sync_absence_roles rattrape les cas où personne n'agit sur la
+    déclaration (début différé, fin de période atteinte sans suppression)."""
+    role = guild.get_role(ABSENCE_ROLE_ID)
+    if not role:
+        return
+    member = guild.get_member(int(discord_id))
+    if not member:
+        return
+    today = datetime.now(BS_SEASON_TZ).date()
+    should_have = any(
+        _absence_is_active(row, today) for row in db_bs.list_absences_for_member(discord_id)
+    )
+    has = role in member.roles
+    try:
+        if should_have and not has:
+            await member.add_roles(role, reason="Absence en cours")
+        elif not should_have and has:
+            await member.remove_roles(role, reason="Absence terminée/supprimée")
+    except discord.HTTPException:
+        pass
+
+
 def _is_absence_staff(member: discord.Member) -> bool:
     """Staff autorisé à déclarer/modifier/supprimer une absence pour
     n'importe quel membre (pas seulement la sienne) — basé sur le rôle staff
@@ -10562,6 +10603,7 @@ async def _create_absence_apply(
 
     guild = bot.get_guild(BS_FAMILY_GUILD_ID)
     if guild:
+        await _sync_absence_role(guild, discord_id)
         fields = [
             ("Membre", f"<@{discord_id}>", True),
             ("Club", club, True),
@@ -10616,6 +10658,7 @@ async def _update_absence_apply(
 
     guild = bot.get_guild(BS_FAMILY_GUILD_ID)
     if guild:
+        await _sync_absence_role(guild, absence["discord_id"])
         fields = [
             ("Absence", f"#{absence_id}", True),
             ("Membre", f"<@{absence['discord_id']}>", True),
@@ -10641,6 +10684,7 @@ async def _delete_absence_apply(absence_id: int, actor: discord.Member):
 
     guild = bot.get_guild(BS_FAMILY_GUILD_ID)
     if guild:
+        await _sync_absence_role(guild, absence["discord_id"])
         fields = [
             ("Absence", f"#{absence_id}", True),
             ("Membre", f"<@{absence['discord_id']}>", True),
@@ -10876,6 +10920,42 @@ async def cmd_supprimer_absence(ctx, absence_id: int):
     if not ok:
         return await ctx.send(f"❌ {err}")
     await ctx.send(f"✅ Absence #{absence_id} supprimée.")
+
+
+@tasks.loop(hours=1)
+async def sync_absence_roles():
+    """Rattrape les cas que _sync_absence_role (appelé à la création/modif/
+    suppression) ne peut pas couvrir tout seul : une absence déclarée à
+    l'avance dont le début vient d'arriver (le rôle doit apparaître), ou une
+    absence dont le retour est passé sans que personne ne supprime la
+    déclaration (le rôle doit disparaître)."""
+    await bot.wait_until_ready()
+    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+    if not guild:
+        return
+    role = guild.get_role(ABSENCE_ROLE_ID)
+    if not role:
+        return
+
+    today = datetime.now(BS_SEASON_TZ).date()
+    active_ids = {
+        row["discord_id"] for row in db_bs.list_absences() if _absence_is_active(row, today)
+    }
+
+    for discord_id in active_ids:
+        member = guild.get_member(int(discord_id))
+        if member and role not in member.roles:
+            try:
+                await member.add_roles(role, reason="Absence en cours (sync automatique)")
+            except discord.HTTPException:
+                pass
+
+    for member in role.members:
+        if str(member.id) not in active_ids:
+            try:
+                await member.remove_roles(role, reason="Absence terminée (sync automatique)")
+            except discord.HTTPException:
+                pass
 
 
 # ── !jugement : vote collectif du staff sur la sanction d'un membre ────────

@@ -658,6 +658,13 @@ def list_absences(club: str | None = None) -> list[dict]:
     return res.data
 
 
+def list_absences_for_member(discord_id: str) -> list[dict]:
+    """Absences (passées et en cours) d'un seul membre — pour resynchroniser
+    le rôle Absent (_sync_absence_role) sans avoir à tout lister."""
+    res = get_client().table("absences").select("*").eq("discord_id", discord_id).execute()
+    return res.data
+
+
 def update_absence(
     absence_id: int, start_date: str, return_date: str | None,
     reason: str, missed_event: str | None,
