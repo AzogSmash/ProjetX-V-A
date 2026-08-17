@@ -1,0 +1,7 @@
+-- Deuxième lot de builds fournis par le staff (17/08/2026), reformatés —
+-- voir 012_best_builds.sql pour le premier lot et le contexte de la table.
+insert into best_builds (brawler_slug, brawler_name, comment) values
+  ('jessie', 'Jessie', 'Jessie revient de plus en plus dans la méta, mais avec ce build la tourelle est encore meilleure que Jessie elle-même. Il vous suffit de la placer derrière un mur pour détruire les ennemis au passage, avec en plus le ralentissement du gadget lorsqu''ils passent à proximité. Le gear vision permet de repérer les ennemis même dans les buissons, très efficace avec les rebonds du personnage. Il est possible de jouer l''autre gadget en Braquage pour détruire rapidement le coffre.'),
+  ('dynamike', 'Dynamike', 'Beaucoup préféreront l''autre gadget sur Dynamike, mais je vous garantis que celui-ci est bien meilleur. Couplé avec le gear vision, en plus de faire très mal aux ennemis vous allez pouvoir aider votre équipe (et vous-même) à les achever. De plus, bien utilisé, il permet d''infliger énormément de dégâts au coffre en Braquage. Ne jouez que ce pouvoir star sur Dyna — et autre conseil : ne jouez pas Dynamike.'),
+  ('tick', 'Tick', 'Tick est le lanceur possédant le plus de portée, il est excellent contre les snipers. Les deux gadgets sont tout à fait jouables, tout dépend de la présence d''assassins dans l''équipe adverse. Les deux pouvoirs star sont tout à fait jouables, à vous de voir lequel vous préférez.')
+on conflict (brawler_slug) do nothing;
