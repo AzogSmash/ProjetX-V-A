@@ -456,12 +456,22 @@ def api_tickets_create():
 @app.route("/api/tickets/<int:ticket_id>")
 @_require_internal_secret
 def api_ticket_get(ticket_id):
-    """Métadonnées + transcript d'un ticket fermé, pour la page staff
+    """Métadonnées + transcript d'un ticket, pour la page staff
     /staff/tickets/[id] du site (lien posté dans #logs-ticket à la
-    fermeture). Lecture Supabase directe, pas besoin de la boucle du bot."""
+    fermeture). discord_id requis pour vérifier l'accès — les tickets
+    incident sont réservés au staff Discord (_is_incident_staff), revérifié
+    ici plutôt que de ne compter que sur le check côté page du site
+    (getAccessContext), qui ne distinguait pas la catégorie avant le
+    17/08/2026. Lecture Supabase directe, pas besoin de la boucle du bot."""
+    discord_id = request.args.get("discord_id", "")
+    _actor, err = _require_ticket_staff({"discord_id": discord_id})
+    if err:
+        return err
     ticket = db_bs.get_ticket(ticket_id)
     if ticket is None:
         return {"error": "ticket introuvable"}, 404
+    if ticket["category"] == "incident" and not _is_incident_staff(discord_id):
+        return {"error": "Réservé au staff Discord (ticket incident)."}, 403
     return jsonify(ticket)
 
 
@@ -620,6 +630,20 @@ def _require_ticket_staff(body: dict):
     return discord_id, None
 
 
+def _is_incident_staff(discord_id: str) -> bool:
+    """Les tickets 'incident' ne concernent que le staff Discord
+    (TICKET_INCIDENT_STAFF_ROLE_IDS, sous-ensemble de TICKET_STAFF_ROLE_IDS)
+    — le staff des clans ne doit ni les lister ni les fermer ni en voir le
+    transcript, même règle que côté Discord (_ticket_staff_role_ids_for dans
+    main.py), revérifiée ici pour ne pas dépendre uniquement du filtrage
+    côté site (demande du 17/08/2026)."""
+    member = db_members.get_member(discord_id)
+    main = _bot()
+    return member is not None and (
+        member["is_admin"] or any(str(rid) in member["role_ids"] for rid in main.TICKET_INCIDENT_STAFF_ROLE_IDS)
+    )
+
+
 def _run_mod_action(main, coro):
     """Exécute une coroutine _apply_* sur la boucle du bot et normalise les
     erreurs réseau/timeout — toutes les routes de modération ci-dessous
@@ -762,7 +786,10 @@ def api_admin_tickets_list():
     _actor, err = _require_ticket_staff({"discord_id": discord_id})
     if err:
         return err
-    return jsonify(db_bs.list_open_tickets_full())
+    tickets = db_bs.list_open_tickets_full()
+    if not _is_incident_staff(discord_id):
+        tickets = [t for t in tickets if t["category"] != "incident"]
+    return jsonify(tickets)
 
 
 @app.route("/api/admin/tickets/fermer", methods=["POST"])
@@ -783,6 +810,8 @@ def api_admin_tickets_fermer():
         return {"error": "Ticket introuvable."}, 404
     if ticket["status"] != "open":
         return {"error": "Ce ticket est déjà fermé."}, 400
+    if ticket["category"] == "incident" and not _is_incident_staff(discord_id):
+        return {"error": "Réservé au staff Discord (ticket incident)."}, 403
 
     main = _bot()
     guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
