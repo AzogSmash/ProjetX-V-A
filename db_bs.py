@@ -560,3 +560,47 @@ def close_ticket(ticket_id: int, closed_by: str, reason: str | None, transcript:
             "closed_at": datetime.now(timezone.utc).isoformat(),
         }
     ).eq("id", ticket_id).execute()
+
+
+# ── Absences ──
+
+def create_absence(
+    discord_id: str, club: str, start_date: str, return_date: str | None,
+    reason: str, missed_event: str | None,
+) -> dict:
+    res = (
+        get_client()
+        .table("absences")
+        .insert(
+            {
+                "discord_id": discord_id,
+                "club": club,
+                "start_date": start_date,
+                "return_date": return_date,
+                "reason": reason,
+                "missed_event": missed_event,
+            }
+        )
+        .execute()
+    )
+    return res.data[0]
+
+
+def get_absence(absence_id: int) -> dict | None:
+    res = get_client().table("absences").select("*").eq("id", absence_id).limit(1).execute()
+    return res.data[0] if res.data else None
+
+
+def list_absences(club: str | None = None) -> list[dict]:
+    """Toutes les absences, triées par date de début décroissante — pour la
+    commande !absences et le panel staff/admin du site. Filtrage par club
+    optionnel (le site peut aussi re-trier côté client sur le jeu complet)."""
+    query = get_client().table("absences").select("*")
+    if club:
+        query = query.eq("club", club)
+    res = query.order("start_date", desc=True).execute()
+    return res.data
+
+
+def delete_absence(absence_id: int) -> None:
+    get_client().table("absences").delete().eq("id", absence_id).execute()

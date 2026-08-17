@@ -12,7 +12,7 @@ import re
 import unicodedata
 from collections import defaultdict
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont
 from keep_alive import keep_alive
@@ -55,6 +55,9 @@ TICKET_CATEGORIES = {
     "incident": "🔴 Incident",
     "other": "❓ Autre",
 }
+
+# ── Déclaration d'absences ──
+LOG_ABSENCE_CHANNEL_ID = 1538829307810676746
 
 # Intents du bot
 intents = discord.Intents.default()
@@ -1379,6 +1382,7 @@ async def on_ready():
     bot.add_view(TicketPanelView())
     for row in db_bs.list_open_tickets():
         bot.add_view(TicketControlView(row["id"]))
+    bot.add_view(AbsencePanelView())
 
     load_data()
 
@@ -9621,6 +9625,235 @@ async def cmd_fermer_ticket(ctx, arg: str = None, *, reste: str = None):
 
     await _finish_ticket_close(channel, ctx.author, ctx.guild, ticket_id, ticket, reste)
     await ctx.send(f"✅ Ticket #{ticket_id} fermé.")
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# ── Déclaration d'absences ───────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════
+# Ouvrable depuis Discord (panel + select club + modal, voir !absence_panel).
+# Même architecture que le système de tickets ci-dessus : _create_absence_apply
+# et _delete_absence_apply sont le cœur partagé par Discord et le site (voir
+# GET/POST /api/admin/absences* dans keep_alive.py).
+
+_ABSENCE_DATE_RE = re.compile(r"^(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?$")
+
+
+def _parse_absence_date(raw: str) -> date | None:
+    """Parse 'JJ/MM' ou 'JJ/MM/AAAA' (année courante par défaut). Retourne
+    None si le format ou la date est invalide — l'appelant renvoie alors une
+    erreur à l'utilisateur plutôt que de planter."""
+    m = _ABSENCE_DATE_RE.match(raw.strip())
+    if not m:
+        return None
+    day, month, year = m.groups()
+    year = int(year) if year else datetime.now().year
+    if year < 100:
+        year += 2000
+    try:
+        return date(year, int(month), int(day))
+    except ValueError:
+        return None
+
+
+def _is_absence_admin(member: discord.Member) -> bool:
+    """Seuls ces membres peuvent supprimer l'absence déclarée par quelqu'un
+    d'autre (l'auteur peut toujours supprimer la sienne, voir _delete_absence_apply)."""
+    return is_bot_owner(member) or member.guild_permissions.administrator
+
+
+def _is_absence_staff(member: discord.Member) -> bool:
+    """Qui peut consulter la liste complète des absences (!absences) — plus
+    large que _is_absence_admin, mêmes rôles que le staff ticket."""
+    return _is_absence_admin(member) or any(r.id in TICKET_STAFF_ROLE_IDS for r in member.roles)
+
+
+async def _create_absence_apply(
+    discord_id: str, club: str, start_raw: str, return_raw: str | None,
+    reason: str, missed_event: str | None,
+):
+    """Retourne (data, err). data = {'id','club','start_date','return_date'}."""
+    start_date = _parse_absence_date(start_raw)
+    if not start_date:
+        return None, f"Date de début invalide : `{start_raw}` (format attendu JJ/MM ou JJ/MM/AAAA)."
+
+    return_date = None
+    if return_raw:
+        return_date = _parse_absence_date(return_raw)
+        if not return_date:
+            return None, f"Date de retour invalide : `{return_raw}` (format attendu JJ/MM ou JJ/MM/AAAA)."
+        if return_date < start_date:
+            return None, "La date de retour ne peut pas être avant la date de début."
+
+    row = db_bs.create_absence(
+        discord_id, club, start_date.isoformat(),
+        return_date.isoformat() if return_date else None,
+        reason, missed_event,
+    )
+
+    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+    if guild:
+        fields = [
+            ("Membre", f"<@{discord_id}>", True),
+            ("Club", club, True),
+            ("Début", start_date.strftime("%d/%m/%Y"), True),
+        ]
+        if return_date:
+            fields.append(("Retour prévu", return_date.strftime("%d/%m/%Y"), True))
+        if missed_event:
+            fields.append(("Événement manqué", missed_event, False))
+        fields.append(("Raison", reason, False))
+        await send_log_message(
+            guild, LOG_ABSENCE_CHANNEL_ID,
+            "🌴 Absence déclarée", None, discord.Color.blue(), fields=fields,
+        )
+
+    return {
+        "id": row["id"], "club": club,
+        "start_date": start_date.isoformat(),
+        "return_date": return_date.isoformat() if return_date else None,
+    }, None
+
+
+async def _delete_absence_apply(absence_id: int, actor: discord.Member):
+    """Retourne (ok, err). Autorisé pour l'auteur de la déclaration ou un admin."""
+    absence = db_bs.get_absence(absence_id)
+    if not absence:
+        return False, "Absence introuvable."
+    if str(actor.id) != absence["discord_id"] and not _is_absence_admin(actor):
+        return False, "Réservé à l'auteur de la déclaration ou aux administrateurs."
+
+    db_bs.delete_absence(absence_id)
+
+    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+    if guild:
+        fields = [
+            ("Absence", f"#{absence_id}", True),
+            ("Membre", f"<@{absence['discord_id']}>", True),
+            ("Club", absence["club"], True),
+            ("Supprimée par", actor.mention, True),
+        ]
+        await send_log_message(
+            guild, LOG_ABSENCE_CHANNEL_ID,
+            "🗑️ Absence supprimée", None, discord.Color.light_grey(), fields=fields,
+        )
+    return True, None
+
+
+class AbsenceModal(discord.ui.Modal):
+    start_input = discord.ui.TextInput(
+        label="Date de début (JJ/MM/AAAA)", placeholder="17/08/2026",
+        required=True, max_length=10,
+    )
+    return_input = discord.ui.TextInput(
+        label="Date de retour prévue (optionnel)", placeholder="24/08/2026",
+        required=False, max_length=10,
+    )
+    missed_event_input = discord.ui.TextInput(
+        label="Événement manqué (optionnel)", placeholder="Ex : War du 20/08, scrim...",
+        required=False, max_length=100,
+    )
+    reason_input = discord.ui.TextInput(
+        label="Raison", style=discord.TextStyle.paragraph,
+        required=True, max_length=300,
+    )
+
+    def __init__(self, club: str):
+        super().__init__(title=f"Déclarer une absence — {club}"[:45])
+        self.club = club
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        data, err = await _create_absence_apply(
+            str(interaction.user.id), self.club,
+            str(self.start_input.value),
+            str(self.return_input.value) if self.return_input.value else None,
+            str(self.reason_input.value),
+            str(self.missed_event_input.value) if self.missed_event_input.value else None,
+        )
+        if err:
+            return await interaction.followup.send(f"❌ {err}", ephemeral=True)
+        await interaction.followup.send(
+            f"✅ Absence #{data['id']} déclarée pour **{data['club']}**. "
+            f"Tu peux la retirer à tout moment avec `!supprimer_absence {data['id']}`.",
+            ephemeral=True,
+        )
+
+
+class AbsencePanelView(discord.ui.View):
+    """Persistante (custom_id statique — même technique que TicketPanelView) :
+    choisir un club ouvre directement le modal de déclaration."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        clubs = db_bs.list_family_clubs()[:25]  # limite Discord : 25 options par select
+        options = [
+            discord.SelectOption(label=c["name"][:100], value=c["name"][:100], description=f"#{c['tag']}")
+            for c in clubs
+        ] or [discord.SelectOption(label="Aucun club configuré", value="none")]
+        self.select = discord.ui.Select(
+            placeholder="Choisis ton club pour déclarer une absence",
+            custom_id="absence_panel_select",
+            options=options,
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        club = self.select.values[0]
+        if club == "none":
+            return await interaction.response.send_message("❌ Aucun club n'est configuré pour le moment.", ephemeral=True)
+        await interaction.response.send_modal(AbsenceModal(club))
+
+
+@bot.command(name="absence_panel")
+async def cmd_absence_panel(ctx):
+    """Poste le panel de déclaration d'absence dans le salon courant — à
+    lancer une fois manuellement (même logique que !ticket_panel, pas
+    auto-reposté à chaque redémarrage, voir on_ready pour le
+    ré-enregistrement de la vue existante)."""
+    embed = discord.Embed(
+        title="🌴 Déclarer une absence",
+        description="Choisis ton club ci-dessous pour indiquer une absence (dates, raison, événement manqué éventuel).",
+        color=discord.Color.blue(),
+    )
+    await ctx.send(embed=embed, view=AbsencePanelView())
+
+
+@bot.command(name="absences")
+async def cmd_absences(ctx, club: str = None):
+    """Liste les absences (triées par date de début, plus récente en
+    premier), filtrables par club — réservé au staff. `!absences` pour tout
+    voir, `!absences NomDuClub` pour filtrer sur un club."""
+    if not _is_absence_staff(ctx.author):
+        return await ctx.send("❌ Réservé au staff.")
+
+    rows = db_bs.list_absences(club)
+    if not rows:
+        return await ctx.send("Aucune absence enregistrée." if not club else f"Aucune absence enregistrée pour **{club}**.")
+
+    embed = discord.Embed(
+        title=f"🌴 Absences{f' — {club}' if club else ''}",
+        color=discord.Color.blue(),
+    )
+    for row in rows[:25]:  # limite embed : 25 champs max
+        retour = row["return_date"] or "?"
+        value = f"<@{row['discord_id']}> — retour prévu : {retour}\n{row['reason']}"
+        if row.get("missed_event"):
+            value += f"\n🎯 Manqué : {row['missed_event']}"
+        embed.add_field(name=f"#{row['id']} — {row['club']} — {row['start_date']}", value=value, inline=False)
+    if len(rows) > 25:
+        embed.set_footer(text=f"+{len(rows) - 25} autres non affichées (filtre par club recommandé).")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="supprimer_absence", aliases=["delete_absence", "absence_supprimer"])
+async def cmd_supprimer_absence(ctx, absence_id: int):
+    """Supprime une déclaration d'absence — l'auteur peut supprimer la
+    sienne, un admin peut supprimer celle de n'importe qui."""
+    ok, err = await _delete_absence_apply(absence_id, ctx.author)
+    if not ok:
+        return await ctx.send(f"❌ {err}")
+    await ctx.send(f"✅ Absence #{absence_id} supprimée.")
 
 
 # Seuls ces comptes précis peuvent utiliser !punition et !annuler_punition,

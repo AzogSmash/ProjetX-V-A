@@ -797,6 +797,49 @@ def api_admin_tickets_fermer():
     return jsonify({"ok": True, "channel_deleted": True})
 
 
+# ── Absences (voir main.py — même architecture que les tickets ci-dessus) ──
+
+@app.route("/api/admin/absences")
+@_require_internal_secret
+def api_admin_absences_list():
+    """Liste triée par date de début décroissante, filtrable par ?club= —
+    pour l'onglet Absences du panel staff/admin du site (le site peut
+    re-trier côté client sur le jeu complet renvoyé ici)."""
+    discord_id = request.args.get("discord_id", "")
+    _actor, err = _require_admin({"discord_id": discord_id})
+    if err:
+        return err
+    club = request.args.get("club") or None
+    return jsonify(db_bs.list_absences(club))
+
+
+@app.route("/api/admin/absences/supprimer", methods=["POST"])
+@_require_internal_secret
+def api_admin_absences_supprimer():
+    """Suppression depuis le site — admin uniquement, même règle que côté
+    Discord (!supprimer_absence permet aussi à l'auteur de retirer la
+    sienne, mais ce chemin site est réservé au panel admin)."""
+    body = request.get_json(silent=True) or {}
+    discord_id, err = _require_admin(body)
+    if err:
+        return err
+    try:
+        absence_id = int(body.get("absence_id"))
+    except (TypeError, ValueError):
+        return {"error": "absence_id invalide"}, 400
+
+    main = _bot()
+    guild = main.bot.get_guild(main.BS_FAMILY_GUILD_ID)
+    actor = guild.get_member(int(discord_id)) if guild else None
+    if not actor:
+        return {"error": "Ton compte Discord est introuvable sur le serveur."}, 400
+
+    ok, apply_err = _run_mod_action(main, main._delete_absence_apply(absence_id, actor))
+    if apply_err:
+        return {"error": apply_err}, 400
+    return jsonify({"ok": ok})
+
+
 @app.route("/api/admin/clans/ajouter", methods=["POST"])
 @_require_internal_secret
 def api_admin_clans_ajouter():
