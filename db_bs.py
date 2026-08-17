@@ -489,6 +489,19 @@ def delete_best_build(brawler_slug: str) -> None:
     get_client().table("best_builds").delete().eq("brawler_slug", brawler_slug).execute()
 
 
+# ── État de la relance hebdomadaire du tag Brawl Stars ──
+
+def get_bs_tag_reminder_last_sent() -> str | None:
+    res = get_client().table("bs_tag_reminder_state").select("last_sent_at").limit(1).execute()
+    return res.data[0]["last_sent_at"] if res.data else None
+
+
+def set_bs_tag_reminder_last_sent() -> None:
+    get_client().table("bs_tag_reminder_state").update(
+        {"last_sent_at": datetime.now(timezone.utc).isoformat()}
+    ).eq("id", True).execute()
+
+
 # ── Profils personnalisés (bio) ──
 
 def get_player_profile(tag: str) -> dict | None:

@@ -12,7 +12,7 @@ import re
 import unicodedata
 from collections import defaultdict, deque
 from dotenv import load_dotenv
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont
 from keep_alive import keep_alive
@@ -2358,14 +2358,10 @@ async def _send_bs_tag_reminder_dm(member: discord.Member) -> bool:
         return False
 
 
-@tasks.loop(hours=24 * 7)
-async def remind_bs_tag_missing():
-    """Relance hebdomadaire (demande du 17/08/2026) des membres présents sur
-    le serveur qui n'ont toujours pas lié leur tag Brawl Stars (bs_accounts).
-    Pause entre chaque MP pour rester loin des rate limits Discord ; le
-    résultat est résumé dans #logs-general plutôt que de notifier pour
-    chaque membre individuellement."""
-    await bot.wait_until_ready()
+async def _run_bs_tag_reminder_batch():
+    """MP tous les membres sans tag lié et enregistre la date d'envoi —
+    cœur partagé par la tâche périodique (avec son garde-fou de délai) et
+    !relancer_tag_bs (qui force l'envoi immédiatement, sans attendre)."""
     guild = bot.get_guild(BS_FAMILY_GUILD_ID)
     if not guild:
         return
@@ -2377,6 +2373,8 @@ async def remind_bs_tag_missing():
             sent += 1
         await asyncio.sleep(2)
 
+    db_bs.set_bs_tag_reminder_last_sent()
+
     if missing:
         fields = [
             ("MP envoyés", str(sent), True),
@@ -2384,21 +2382,67 @@ async def remind_bs_tag_missing():
             ("Total sans tag lié", str(len(missing)), True),
         ]
         await send_log_message(
-            guild, LOG_GENERAL_CHANNEL_ID, "🏷️ Relance hebdomadaire — tag Brawl Stars",
+            guild, LOG_GENERAL_CHANNEL_ID, "🏷️ Relance — tag Brawl Stars",
             "Rappel envoyé aux membres n'ayant pas encore lié leur tag.",
             discord.Color.blue(), fields,
         )
 
 
+@tasks.loop(hours=24 * 7)
+async def remind_bs_tag_missing():
+    """Relance hebdomadaire (demande du 17/08/2026) des membres présents sur
+    le serveur qui n'ont toujours pas lié leur tag Brawl Stars (bs_accounts).
+    Garde-fou par date persistée (bs_tag_reminder_state) : tasks.loop exécute
+    son corps immédiatement à CHAQUE .start(), donc sans ce garde-fou, un
+    redémarrage du bot (redéploiement, crash...) redéclenchait une vague
+    complète de MP — incident du 17/08/2026, 3 relances en une journée à
+    cause de plusieurs déploiements successifs."""
+    await bot.wait_until_ready()
+
+    last_sent = db_bs.get_bs_tag_reminder_last_sent()
+    if last_sent:
+        elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(last_sent)
+        if elapsed < timedelta(days=6):
+            return
+
+    await _run_bs_tag_reminder_batch()
+
+
 @bot.command(name="relancer_tag_bs", aliases=["bs_tag_relance"])
 async def cmd_relancer_tag_bs(ctx):
-    """Déclenche immédiatement la relance hebdomadaire (voir
-    remind_bs_tag_missing) au lieu d'attendre le prochain cycle — réservé au
-    staff, ça peut prendre plusieurs minutes selon le nombre de membres."""
+    """Déclenche immédiatement la relance (voir remind_bs_tag_missing),
+    sans attendre le prochain cycle ni être bloqué par son garde-fou de
+    délai — réservé au staff, ça peut prendre plusieurs minutes selon le
+    nombre de membres."""
     if not _is_ticket_staff(ctx.author):
         return await ctx.send("❌ Réservé au staff.")
     await ctx.send("🏷️ Relance en cours (MP envoyés progressivement, ça peut prendre plusieurs minutes)...")
-    remind_bs_tag_missing.restart()
+    await _run_bs_tag_reminder_batch()
+
+
+@bot.command(name="excuser_relance_tag")
+async def cmd_excuser_relance_tag(ctx):
+    """Message d'excuse ponctuel suite au bug de relance en boucle du
+    17/08/2026 (voir remind_bs_tag_missing) — à lancer une seule fois,
+    réservé au staff."""
+    if not _is_ticket_staff(ctx.author):
+        return await ctx.send("❌ Réservé au staff.")
+    guild = ctx.guild
+    missing = [m for m in guild.members if not m.bot and str(m.id) not in bs_accounts]
+    await ctx.send(f"🙏 Envoi de l'excuse à {len(missing)} membres...")
+    sent = 0
+    for member in missing:
+        try:
+            await member.send(
+                "🙏 Désolé pour les MP en double aujourd'hui à propos du tag Brawl Stars — "
+                "un bug de notre côté a fait répéter le rappel plusieurs fois. C'est corrigé, "
+                "ça ne se reproduira pas. Merci pour ta patience !"
+            )
+            sent += 1
+        except discord.HTTPException:
+            pass
+        await asyncio.sleep(2)
+    await ctx.send(f"✅ Excuse envoyée à {sent}/{len(missing)} membres.")
 
 
 def _human_duration(delta: timedelta) -> str:
