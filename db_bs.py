@@ -654,6 +654,38 @@ def list_open_tickets_full() -> list[dict]:
     return res.data
 
 
+def list_closed_tickets(
+    limit: int = 20, offset: int = 0, category: str | None = None, exclude_incident: bool = False,
+) -> list[dict]:
+    """Tickets fermés (sans le transcript, trop volumineux pour une liste),
+    triés par date de fermeture décroissante — pour l'onglet historique du
+    panel staff/admin du site. Pagination par limit/offset ; exclude_incident
+    exclut la catégorie incident AU NIVEAU DE LA REQUÊTE (pas après coup) pour
+    que la pagination reste correcte pour le staff clan qui n'y a pas accès."""
+    query = (
+        get_client()
+        .table("tickets")
+        .select("id,discord_id,bs_tag,category,description,status,claimed_by,closed_by,close_reason,created_at,closed_at")
+        .eq("status", "closed")
+    )
+    if category:
+        query = query.eq("category", category)
+    elif exclude_incident:
+        query = query.neq("category", "incident")
+    res = query.order("closed_at", desc=True).range(offset, offset + limit - 1).execute()
+    return res.data
+
+
+def count_closed_tickets(category: str | None = None, exclude_incident: bool = False) -> int:
+    query = get_client().table("tickets").select("id", count="exact").eq("status", "closed")
+    if category:
+        query = query.eq("category", category)
+    elif exclude_incident:
+        query = query.neq("category", "incident")
+    res = query.execute()
+    return res.count or 0
+
+
 def claim_ticket(ticket_id: int, staff_discord_id: str) -> None:
     get_client().table("tickets").update({"claimed_by": staff_discord_id}).eq("id", ticket_id).execute()
 

@@ -779,6 +779,32 @@ def api_admin_mod_unsilence():
     return jsonify(data)
 
 
+@app.route("/api/admin/tickets/closed")
+@_require_internal_secret
+def api_admin_tickets_closed():
+    """Historique paginé des tickets fermés (sans transcript, voir
+    /api/tickets/<id> pour ça) — pour l'onglet Fermés du panel staff/admin
+    du site. exclude_incident appliqué au niveau de la requête SQL (pas
+    après coup) pour que la pagination reste correcte pour le staff clan."""
+    discord_id = request.args.get("discord_id", "")
+    _actor, err = _require_ticket_staff({"discord_id": discord_id})
+    if err:
+        return err
+    try:
+        limit = min(max(int(request.args.get("limit", 20)), 1), 100)
+        offset = max(int(request.args.get("offset", 0)), 0)
+    except ValueError:
+        return {"error": "limit/offset invalides"}, 400
+    category = request.args.get("category") or None
+    if category == "incident" and not _is_incident_staff(discord_id):
+        return {"error": "Réservé au staff Discord (ticket incident)."}, 403
+    exclude_incident = not _is_incident_staff(discord_id)
+
+    tickets = db_bs.list_closed_tickets(limit=limit, offset=offset, category=category, exclude_incident=exclude_incident)
+    total = db_bs.count_closed_tickets(category=category, exclude_incident=exclude_incident)
+    return jsonify({"tickets": tickets, "total": total})
+
+
 @app.route("/api/admin/tickets")
 @_require_internal_secret
 def api_admin_tickets_list():
