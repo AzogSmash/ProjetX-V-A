@@ -537,6 +537,10 @@ PROTECTED_FROM_PUNISH_ID = 550678866839207937  # Azog — utilisé par les réac
 # risque) ajustent silencieusement le résultat en sa faveur.
 CASINO_HINT_USER_ID = 1056848438270115900  # happy_gt3
 
+# Active/désactive les avantages casino ci-dessus (résultats truqués + hints)
+# pour CASINO_HINT_USER_ID — toggle via !triche, utilisable en MP au bot.
+casino_cheat_enabled = True
+
 # Immunisés aux commandes de modération négatives (warn/mute/ban/silence/punition/morse) : Azog + Vynaro (happy_gt3)
 MOD_IMMUNE_IDS = {550678866839207937, 1056848438270115900}
 
@@ -4899,7 +4903,7 @@ async def cmd_risque(ctx):
         except ValueError:
             pass
     risque_cooldowns[uid_str] = now.isoformat()
-    _risque_won = uid == CASINO_HINT_USER_ID or random.random() < 0.55
+    _risque_won = (uid == CASINO_HINT_USER_ID and casino_cheat_enabled) or random.random() < 0.55
     if _risque_won:
         amount = random.randint(200, 600)
         coins[uid] += amount
@@ -4928,7 +4932,7 @@ async def cmd_risque(ctx):
             color=0xe74c3c
         )
     await ctx.send(embed=embed)
-    if uid == CASINO_HINT_USER_ID:
+    if uid == CASINO_HINT_USER_ID and casino_cheat_enabled:
         try: await ctx.author.send("🤫 Risque ajusté en votre faveur.")
         except Exception: pass
     if uid in pirated_users:
@@ -5024,7 +5028,7 @@ async def cmd_roulette(ctx, *, args: str):
             await ctx.send(f"❌ Pas assez de coins. Solde : **{coins[ctx.author.id]:,} coins** (total misé : {total:,}).")
             return
 
-    if ctx.author.id == CASINO_HINT_USER_ID:
+    if ctx.author.id == CASINO_HINT_USER_ID and casino_cheat_enabled:
         candidates = list(range(37))
         random.shuffle(candidates)
         numero = next((n for n in candidates if any(fn(n) for _, _, _, fn in paris)), random.randint(0, 36))
@@ -5059,7 +5063,7 @@ async def cmd_roulette(ctx, *, args: str):
     embed.add_field(name="📊 Résultat net",   value=net_text, inline=False)
     embed.set_footer(text="Rouge/Noir/Pair/Impair = ×2 | Douzaine = ×3 | Numéro plein = ×36 | Voisins ≈×2.1 | Tiers ×3 | Orphelins ×4.5")
     await ctx.send(embed=embed)
-    if ctx.author.id == CASINO_HINT_USER_ID:
+    if ctx.author.id == CASINO_HINT_USER_ID and casino_cheat_enabled:
         try: await ctx.author.send(f"🤫 Numéro ajusté en votre faveur : **{numero}**.")
         except Exception: pass
     if ctx.author.id in pirated_users:
@@ -5074,7 +5078,7 @@ async def cmd_slots(ctx, mise: str):
     mise, err = _resolve_mise(mise, ctx.author.id, 'slots')
     if err: return await ctx.send(err)
 
-    if ctx.author.id == CASINO_HINT_USER_ID:
+    if ctx.author.id == CASINO_HINT_USER_ID and casino_cheat_enabled:
         result = ['💎', '💎', '💎']
     else:
         result  = random.choices(SLOT_SYMS, weights=SLOT_W, k=3)
@@ -5103,7 +5107,7 @@ async def cmd_slots(ctx, mise: str):
     embed.add_field(name="💰 Solde",     value=f"{coins[ctx.author.id]:,} coins", inline=True)
     embed.set_footer(text="💎×3=50× | ⭐×3=20× | 🍉🍇×3=10× | autres×3=5× | 2 identiques=1.5×")
     await ctx.send(embed=embed)
-    if ctx.author.id == CASINO_HINT_USER_ID:
+    if ctx.author.id == CASINO_HINT_USER_ID and casino_cheat_enabled:
         try: await ctx.author.send("🤫 Rouleaux ajustés en votre faveur (jackpot 💎).")
         except Exception: pass
     if ctx.author.id in pirated_users:
@@ -5409,7 +5413,7 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
     if err: return await ctx.send(err)
 
     player_choice = 'pile' if choix in ('pile', 'p') else 'face'
-    if ctx.author.id == CASINO_HINT_USER_ID:
+    if ctx.author.id == CASINO_HINT_USER_ID and casino_cheat_enabled:
         result = player_choice
     else:
         result = random.choice(['pile', 'face'])
@@ -5430,7 +5434,7 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
     embed.add_field(name="📊",          value=outcome,                                       inline=False)
     embed.add_field(name="💰 Solde",    value=f"{coins[ctx.author.id]:,} coins",            inline=True)
     await ctx.send(embed=embed)
-    if ctx.author.id == CASINO_HINT_USER_ID:
+    if ctx.author.id == CASINO_HINT_USER_ID and casino_cheat_enabled:
         try: await ctx.author.send("🤫 Résultat ajusté en votre faveur.")
         except Exception: pass
     if ctx.author.id in pirated_users:
@@ -5438,6 +5442,19 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
         if spy:
             try: await spy.send(f"🔍 **{ctx.author.display_name}** — Coinflip : a choisi **{player_choice}** → résultat **{result}** ({'gagné' if player_choice == result else 'perdu'})")
             except Exception: pass
+
+
+@bot.hybrid_command(name="triche", hidden=True)
+async def cmd_triche(ctx):
+    """Active/désactive les avantages casino (résultats truqués + hints) — utilisable en MP."""
+    global casino_cheat_enabled
+    if ctx.author.id != CASINO_HINT_USER_ID:
+        return
+    casino_cheat_enabled = not casino_cheat_enabled
+    if casino_cheat_enabled:
+        await ctx.author.send("🤫 Avantages casino **activés**.")
+    else:
+        await ctx.author.send("✅ Avantages casino **désactivés** — parties 100% honnêtes.")
 
 
 @bot.hybrid_command(name="pirater", hidden=True)
@@ -6629,7 +6646,7 @@ async def cmd_mines(ctx, mise: str):
     embed.add_field(name="💰 Mise", value=f"{mise:,} coins", inline=True)
     embed.add_field(name="Multiplicateur", value="×1.0", inline=True)
     await ctx.send(embed=embed, view=view)
-    if ctx.author.id == CASINO_HINT_USER_ID:
+    if ctx.author.id == CASINO_HINT_USER_ID and casino_cheat_enabled:
         bombs = sorted(view.bomb_pos)
         grid_rows = []
         for row_start in range(0, 12, 4):
@@ -6784,7 +6801,7 @@ class HigherLowerView(discord.ui.View):
                     embed=_hl_embed(self, result_text=f"✅ **Correct !** Multiplicateur : ×{self.cumulative:.2f}", color=0x2ecc71),
                     view=self
                 )
-                if interaction.user.id == CASINO_HINT_USER_ID:
+                if interaction.user.id == CASINO_HINT_USER_ID and casino_cheat_enabled:
                     hint = _hl_hint(self)
                     if hint:
                         try: await interaction.user.send(hint)
@@ -6848,7 +6865,7 @@ async def cmd_higherlower(ctx, mise: str):
         "Le multiplicateur augmente à chaque bonne réponse — encaissez à tout moment."
     ))
     await ctx.send(embed=_hl_embed(view), view=view)
-    if ctx.author.id == CASINO_HINT_USER_ID:
+    if ctx.author.id == CASINO_HINT_USER_ID and casino_cheat_enabled:
         hint = _hl_hint(view)
         if hint:
             try: await ctx.author.send(hint)
