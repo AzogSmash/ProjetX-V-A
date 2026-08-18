@@ -10588,17 +10588,23 @@ async def cmd_tournoi_ajouter(ctx, membre: discord.Member, *, team_name: str = N
 # keep_alive.py). _create_ticket_apply est le cœur partagé par les deux
 # chemins, même logique que _bslink_apply pour !bslink/POST /api/bslink.
 
-async def _create_ticket_apply(discord_id: str, category: str, description: str, bs_tag: str | None = None):
-    """Retourne (data, err). data = {'id','channel_id','channel_url','already_open'}."""
+async def _create_ticket_apply(discord_id: str, category: str, description: str, bs_tag: str | None = None, guild: discord.Guild | None = None):
+    """Retourne (data, err). data = {'id','channel_id','channel_url','already_open'}.
+    `guild` : serveur où créer le salon, passé explicitement depuis le panel Discord
+    (interaction.guild) — sinon (ex. formulaire du site, pas de contexte de serveur)
+    on retombe sur BS_FAMILY_GUILD_ID. Avant ce paramètre, la fonction créait TOUJOURS
+    le salon sur BS_FAMILY_GUILD_ID même si !ticket_panel était lancé ailleurs."""
     if category not in TICKET_CATEGORIES:
         return None, "Catégorie invalide."
 
     existing = db_bs.get_open_ticket_for_user(discord_id)
     if existing:
-        channel_url = f"https://discord.com/channels/{BS_FAMILY_GUILD_ID}/{existing['channel_id']}"
+        existing_channel = bot.get_channel(int(existing['channel_id']))
+        existing_guild_id = existing_channel.guild.id if existing_channel else BS_FAMILY_GUILD_ID
+        channel_url = f"https://discord.com/channels/{existing_guild_id}/{existing['channel_id']}"
         return {"id": existing["id"], "channel_id": existing["channel_id"], "channel_url": channel_url, "already_open": True}, None
 
-    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+    guild = guild or bot.get_guild(BS_FAMILY_GUILD_ID)
     if not guild:
         return None, "Serveur introuvable."
     member = guild.get_member(int(discord_id))
@@ -10645,7 +10651,7 @@ async def _create_ticket_apply(discord_id: str, category: str, description: str,
         allowed_mentions=discord.AllowedMentions(users=True, roles=True),
     )
 
-    channel_url = f"https://discord.com/channels/{BS_FAMILY_GUILD_ID}/{salon.id}"
+    channel_url = f"https://discord.com/channels/{guild.id}/{salon.id}"
     return {"id": row["id"], "channel_id": str(salon.id), "channel_url": channel_url, "already_open": False}, None
 
 
@@ -10807,7 +10813,7 @@ class TicketDescriptionModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        data, err = await _create_ticket_apply(str(interaction.user.id), self.category, str(self.description_input.value))
+        data, err = await _create_ticket_apply(str(interaction.user.id), self.category, str(self.description_input.value), guild=interaction.guild)
         if err:
             return await interaction.followup.send(f"❌ {err}", ephemeral=True)
         if data["already_open"]:
