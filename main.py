@@ -48,7 +48,10 @@ LEAVE_LOG_CHANNEL_ID = 1513110805707620405  # salon staff uniquement — rapport
 BRAWLSTARS_API_KEY = (os.getenv("BRAWLSTARS_API_KEY") or "").strip() or None
 
 # ── Système de tickets maison (remplace tickets.bot) ──
-TICKET_CATEGORY_ID = 1513110806382772407  # catégorie Discord où sont créés les salons de ticket
+TICKET_CATEGORY_ID = 1513110806382772407  # catégorie Discord par défaut où sont créés les salons de ticket
+# Override par motif de ticket (clé de TICKET_CATEGORIES -> ID de catégorie Discord) —
+# voir !set_ticket. Un motif absent de ce dict retombe sur TICKET_CATEGORY_ID.
+TICKET_CATEGORY_IDS: dict[str, int] = {}
 LOG_TICKET_CHANNEL_ID = 1513117932228706374  # salon #logs-ticket
 # Mêmes IDs de rôle que STAFF_ROLE_IDS côté site (src/lib/access.ts) — pour
 # que "staff" veuille dire la même chose partout.
@@ -65,7 +68,10 @@ def _ticket_staff_role_ids_for(category: str) -> set[int]:
     return TICKET_INCIDENT_STAFF_ROLE_IDS if category == "incident" else TICKET_STAFF_ROLE_IDS
 
 
-TICKET_CATEGORIES = {
+# Motifs proposés dans le panel de ticket (!ticket_panel) — clé -> libellé affiché
+# (emoji + texte). Défauts ci-dessous, modifiables via !set_ticket ajouter/retirer
+# (persisté dans data.json, voir load_data/save_data).
+TICKET_CATEGORIES: dict[str, str] = {
     "candidature": "💼 Candidature",
     "club_recruitment": "🎯 Recrutement Club",
     "incident": "🔴 Incident",
@@ -1097,7 +1103,7 @@ def load_data():
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments, casino_banned_users
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
     global CASINO_LOG_CHANNEL_ID, LOG_MODERATION_CHANNEL_ID, LOG_GIVEAWAY_CHANNEL_ID, LOG_GENERAL_CHANNEL_ID, LOG_TICKET_CHANNEL_ID
-    global TICKET_CATEGORY_ID
+    global TICKET_CATEGORY_ID, TICKET_CATEGORY_IDS, TICKET_CATEGORIES
     global LEAVE_LOG_CHANNEL_ID
     global bs_accounts, bs_role_config
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
@@ -1219,6 +1225,9 @@ def load_data():
                 LOG_GENERAL_CHANNEL_ID    = data.get('log_general_channel_id', LOG_GENERAL_CHANNEL_ID)
                 LOG_TICKET_CHANNEL_ID     = data.get('log_ticket_channel_id', LOG_TICKET_CHANNEL_ID)
                 TICKET_CATEGORY_ID        = data.get('ticket_category_id', TICKET_CATEGORY_ID)
+                TICKET_CATEGORY_IDS       = {k: int(v) for k, v in data.get('ticket_category_ids', {}).items()}
+                if data.get('ticket_categories'):
+                    TICKET_CATEGORIES = data['ticket_categories']
                 LEAVE_LOG_CHANNEL_ID      = data.get('leave_log_channel_id', LEAVE_LOG_CHANNEL_ID)
                 # punitions/morse_punitions : voir incident du 21/07/2026, un redémarrage en
                 # pleine punition laissait le membre bloqué dans tous les salons (les
@@ -1427,6 +1436,8 @@ def save_data(force: bool = False):
     data_to_save['log_general_channel_id']    = LOG_GENERAL_CHANNEL_ID
     data_to_save['log_ticket_channel_id']     = LOG_TICKET_CHANNEL_ID
     data_to_save['ticket_category_id']        = TICKET_CATEGORY_ID
+    data_to_save['ticket_category_ids']       = TICKET_CATEGORY_IDS
+    data_to_save['ticket_categories']         = TICKET_CATEGORIES
     data_to_save['leave_log_channel_id']      = LEAVE_LOG_CHANNEL_ID
     data_to_save['punitions']       = punitions
     data_to_save['morse_punitions'] = morse_punitions
@@ -1704,7 +1715,7 @@ ADMIN_LOCKED_CMDS = {
     'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter', 'tournoi_deplacer',
     'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log', 'set_logs',
     'ranked_sanction', 'ranked_ajuster', 'ranked_set', 'reset_casino', 'reset_duels', 'ranked_liberer',
-    'casino_ban', 'casino_unban', 'casino_pause', 'casino_resume', 'ticket_panel', 'permission',
+    'casino_ban', 'casino_unban', 'casino_pause', 'casino_resume', 'ticket_panel', 'set_ticket', 'permission',
 }
 
 # ── Anti-macro casino : incident du 23/07/2026 (martingale rouge/noir via
@@ -10588,17 +10599,23 @@ async def cmd_tournoi_ajouter(ctx, membre: discord.Member, *, team_name: str = N
 # keep_alive.py). _create_ticket_apply est le cœur partagé par les deux
 # chemins, même logique que _bslink_apply pour !bslink/POST /api/bslink.
 
-async def _create_ticket_apply(discord_id: str, category: str, description: str, bs_tag: str | None = None):
-    """Retourne (data, err). data = {'id','channel_id','channel_url','already_open'}."""
+async def _create_ticket_apply(discord_id: str, category: str, description: str, bs_tag: str | None = None, guild: discord.Guild | None = None):
+    """Retourne (data, err). data = {'id','channel_id','channel_url','already_open'}.
+    `guild` : serveur où créer le salon, passé explicitement depuis le panel Discord
+    (interaction.guild) — sinon (ex. formulaire du site, pas de contexte de serveur)
+    on retombe sur BS_FAMILY_GUILD_ID. Avant ce paramètre, la fonction créait TOUJOURS
+    le salon sur BS_FAMILY_GUILD_ID même si !ticket_panel était lancé ailleurs."""
     if category not in TICKET_CATEGORIES:
         return None, "Catégorie invalide."
 
     existing = db_bs.get_open_ticket_for_user(discord_id)
     if existing:
-        channel_url = f"https://discord.com/channels/{BS_FAMILY_GUILD_ID}/{existing['channel_id']}"
+        existing_channel = bot.get_channel(int(existing['channel_id']))
+        existing_guild_id = existing_channel.guild.id if existing_channel else BS_FAMILY_GUILD_ID
+        channel_url = f"https://discord.com/channels/{existing_guild_id}/{existing['channel_id']}"
         return {"id": existing["id"], "channel_id": existing["channel_id"], "channel_url": channel_url, "already_open": True}, None
 
-    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+    guild = guild or bot.get_guild(BS_FAMILY_GUILD_ID)
     if not guild:
         return None, "Serveur introuvable."
     member = guild.get_member(int(discord_id))
@@ -10615,7 +10632,7 @@ async def _create_ticket_apply(discord_id: str, category: str, description: str,
         if role:
             overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
-    ticket_category = guild.get_channel(TICKET_CATEGORY_ID)
+    ticket_category = guild.get_channel(TICKET_CATEGORY_IDS.get(category, TICKET_CATEGORY_ID))
     salon = await guild.create_text_channel(
         f"ticket-{category}-{member.name}"[:100],
         category=ticket_category if isinstance(ticket_category, discord.CategoryChannel) else None,
@@ -10645,7 +10662,7 @@ async def _create_ticket_apply(discord_id: str, category: str, description: str,
         allowed_mentions=discord.AllowedMentions(users=True, roles=True),
     )
 
-    channel_url = f"https://discord.com/channels/{BS_FAMILY_GUILD_ID}/{salon.id}"
+    channel_url = f"https://discord.com/channels/{guild.id}/{salon.id}"
     return {"id": row["id"], "channel_id": str(salon.id), "channel_url": channel_url, "already_open": False}, None
 
 
@@ -10807,7 +10824,7 @@ class TicketDescriptionModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        data, err = await _create_ticket_apply(str(interaction.user.id), self.category, str(self.description_input.value))
+        data, err = await _create_ticket_apply(str(interaction.user.id), self.category, str(self.description_input.value), guild=interaction.guild)
         if err:
             return await interaction.followup.send(f"❌ {err}", ephemeral=True)
         if data["already_open"]:
@@ -10835,36 +10852,140 @@ class TicketPanelView(discord.ui.View):
 
 
 @bot.command(name="ticket_panel")
-async def cmd_ticket_panel(ctx, categorie: discord.CategoryChannel = None):
+async def cmd_ticket_panel(ctx):
     """Poste le panel d'ouverture de ticket dans le salon courant — à lancer une
     fois manuellement (pas auto-posté à chaque redémarrage, voir on_ready pour
-    le ré-enregistrement des vues existantes).
-    `categorie` (optionnel, nom ou ID) change aussi la catégorie Discord où les
-    salons de ticket sont créés (TICKET_CATEGORY_ID, persisté) — via ce panel
-    comme via le formulaire du site (_create_ticket_apply est partagé)."""
-    global TICKET_CATEGORY_ID
-    if categorie is not None:
-        TICKET_CATEGORY_ID = categorie.id
-        save_data()
-
+    le ré-enregistrement des vues existantes). Pour gérer les motifs proposés
+    et leur catégorie Discord de création, voir !set_ticket."""
     embed = discord.Embed(
         title="🎫 Ouvrir un ticket",
         description="Choisis une catégorie ci-dessous pour contacter le staff.",
         color=0x3498db,
     )
     await ctx.send(embed=embed, view=TicketPanelView())
-    if categorie is not None:
-        await ctx.send(f"✅ Les salons de ticket seront désormais créés dans la catégorie **{categorie.name}**.")
+
+
+def _resolve_ticket_category_key(arg: str) -> str | None:
+    """Résout un motif tapé par un admin (clé technique ou libellé affiché, avec ou
+    sans emoji/accents/casse) vers une clé de TICKET_CATEGORIES."""
+    arg_norm = arg.strip().lower()
+    if arg_norm in TICKET_CATEGORIES:
+        return arg_norm
+    for key, label in TICKET_CATEGORIES.items():
+        label_norm = re.sub(r'[^\w\s]', '', label, flags=re.UNICODE).strip().lower()
+        if arg_norm == label_norm or arg_norm in label_norm:
+            return key
+    return None
+
+
+SET_TICKET_USAGE = (
+    "**Usage :**\n"
+    "`!set_ticket ajouter <clé> <emoji> <libellé...>` — ajoute un motif au panel "
+    "(ex : `!set_ticket ajouter support 🛠️ Support technique`)\n"
+    "`!set_ticket retirer <clé|motif>` — retire un motif du panel\n"
+    "`!set_ticket categorie <clé|motif> [#catégorie|défaut]` — catégorie Discord où "
+    "créer le salon pour ce motif (sans catégorie : celle du salon courant ; `défaut` : retire l'override)\n"
+    "`!set_ticket liste` — affiche les motifs configurés et leur catégorie\n\n"
+    "⚠️ Un panel déjà posté ne se met pas à jour tout seul — relance `!ticket_panel` "
+    "dans le salon voulu après un `ajouter`/`retirer` pour que le nouveau menu apparaisse."
+)
+
+
+@bot.command(name="set_ticket")
+async def cmd_set_ticket(ctx, action: str = None, cle: str = None, *, reste: str = None):
+    """Gère les motifs proposés dans !ticket_panel et leur catégorie Discord de
+    création — voir SET_TICKET_USAGE pour le détail des sous-commandes."""
+    global TICKET_CATEGORIES, TICKET_CATEGORY_IDS
+    valid_actions = ('ajouter', 'add', 'retirer', 'remove', 'categorie', 'category', 'liste', 'list')
+    if action is None or action.lower() not in valid_actions:
+        return await ctx.send(SET_TICKET_USAGE)
+    action = action.lower()
+
+    if action in ('liste', 'list'):
+        lines = []
+        for key, label in TICKET_CATEGORIES.items():
+            cid = TICKET_CATEGORY_IDS.get(key)
+            cat = ctx.guild.get_channel(cid) if (ctx.guild and cid) else None
+            lines.append(f"**{label}** (`{key}`) : {cat.name if cat else '*catégorie par défaut*'}")
+        if not lines:
+            return await ctx.send("Aucun motif de ticket configuré.")
+        return await ctx.send("📋 **Motifs de ticket configurés :**\n" + "\n".join(lines))
+
+    if action in ('ajouter', 'add'):
+        if not cle or not reste:
+            return await ctx.send(SET_TICKET_USAGE)
+        key = cle.strip().lower()
+        if not re.match(r'^[a-z0-9_]+$', key):
+            return await ctx.send("❌ La clé ne doit contenir que des lettres minuscules, chiffres et `_` (ex : `support`).")
+        if key in TICKET_CATEGORIES:
+            return await ctx.send(f"❌ Le motif `{key}` existe déjà (**{TICKET_CATEGORIES[key]}**). Utilise `!set_ticket retirer` d'abord pour le remplacer.")
+        TICKET_CATEGORIES[key] = reste.strip()
+        save_data()
+        return await ctx.send(
+            f"✅ Motif **{TICKET_CATEGORIES[key]}** (`{key}`) ajouté. "
+            f"Relance `!ticket_panel` où tu veux l'afficher pour le voir dans le menu."
+        )
+
+    if action in ('retirer', 'remove'):
+        if not cle:
+            return await ctx.send(SET_TICKET_USAGE)
+        key = _resolve_ticket_category_key(cle)
+        if key is None:
+            motifs = ", ".join(f"`{k}`" for k in TICKET_CATEGORIES)
+            return await ctx.send(f"❌ Motif inconnu : `{cle}`. Motifs valides : {motifs}.")
+        if len(TICKET_CATEGORIES) <= 1:
+            return await ctx.send("❌ Impossible de retirer le dernier motif restant.")
+        label = TICKET_CATEGORIES.pop(key)
+        TICKET_CATEGORY_IDS.pop(key, None)
+        save_data()
+        return await ctx.send(
+            f"✅ Motif **{label}** (`{key}`) retiré. Relance `!ticket_panel` où il était affiché "
+            f"pour mettre à jour le menu (les tickets déjà ouverts avec ce motif ne sont pas affectés)."
+        )
+
+    # action in ('categorie', 'category')
+    if not cle:
+        return await ctx.send(SET_TICKET_USAGE)
+    key = _resolve_ticket_category_key(cle)
+    if key is None:
+        motifs = ", ".join(f"`{k}`" for k in TICKET_CATEGORIES)
+        return await ctx.send(f"❌ Motif inconnu : `{cle}`. Motifs valides : {motifs}.")
+
+    if reste is not None and reste.strip().lower() in ('defaut', 'défaut', 'reset', 'retirer'):
+        TICKET_CATEGORY_IDS.pop(key, None)
+        save_data()
+        return await ctx.send(f"✅ Les tickets **{TICKET_CATEGORIES[key]}** retombent sur la catégorie par défaut.")
+
+    if reste is None:
+        cat_channel = ctx.channel.category
+    else:
+        try:
+            cat_channel = await commands.CategoryChannelConverter().convert(ctx, reste.strip())
+        except commands.BadArgument:
+            return await ctx.send(f"❌ Catégorie introuvable : `{reste}`.")
+    if cat_channel is None:
+        return await ctx.send("❌ Précise une catégorie (`!set_ticket categorie <motif> <catégorie>`) ou lance la commande depuis un salon qui en a une.")
+
+    TICKET_CATEGORY_IDS[key] = cat_channel.id
+    save_data()
+    await ctx.send(f"✅ Les tickets **{TICKET_CATEGORIES[key]}** seront désormais créés dans la catégorie **{cat_channel.name}**.")
 
 
 DEFAULT_TICKET_CLOSE_DELAY_S = 10
 _CHANNEL_MENTION_RE = re.compile(r"^<#(\d+)>$")
+_USER_MENTION_RE = re.compile(r"^<@!?(\d+)>$")
 
 
 def _resolve_ticket_arg(ctx, arg: str) -> dict | None:
     """Résout arg vers un ticket ouvert : mention de salon (#salon, ce qui
     donne <#id> une fois envoyé — marche sans le mode développeur, contrairement
-    à un ID de salon copié à la main), ID de salon brut, ou ID de ticket."""
+    à un ID de salon copié à la main), ID de salon brut, ID de ticket, ou
+    mention d'un membre (@membre) — utile quand le salon du ticket n'est plus
+    accessible (ex. supprimé, ou créé sur un autre serveur avant le fix du
+    18/08/2026) mais que le ticket est encore marqué ouvert en base."""
+    m = _USER_MENTION_RE.match(arg)
+    if m:
+        return db_bs.get_open_ticket_for_user(m.group(1))
     m = _CHANNEL_MENTION_RE.match(arg)
     channel_id = m.group(1) if m else (arg if arg.isdigit() and len(arg) >= 15 else None)
     if channel_id:
@@ -10880,10 +11001,12 @@ async def cmd_fermer_ticket(ctx, arg: str = None, *, reste: str = None):
     - Lancée dans le salon d'un ticket, sans argument de ciblage : ferme CE
       ticket, après un délai en secondes optionnel (`!fermer_ticket 30`,
       sinon délai par défaut).
-    - Lancée avec une mention de salon ou un ID en premier argument (depuis
-      n'importe quel salon) : ferme ce ticket immédiatement, avec une raison
-      optionnelle (`!fermer_ticket #ticket-incident-bob raison ici` ou
-      `!fermer_ticket 42 raison ici`)."""
+    - Lancée avec une mention de salon, un ID de ticket ou une mention de
+      membre en premier argument (depuis n'importe quel salon) : ferme ce
+      ticket immédiatement, avec une raison optionnelle
+      (`!fermer_ticket #ticket-incident-bob raison ici`, `!fermer_ticket 42 raison ici`
+      ou `!fermer_ticket @membre raison ici`). La mention de membre marche même si
+      le salon du ticket est introuvable (supprimé, ou sur un autre serveur)."""
     if not _is_ticket_staff(ctx.author):
         return await ctx.send("❌ Réservé au staff.")
 
@@ -10910,7 +11033,7 @@ async def cmd_fermer_ticket(ctx, arg: str = None, *, reste: str = None):
     if arg is None:
         return await ctx.send(
             "❌ Utilisation : `!fermer_ticket` dans le salon du ticket (délai optionnel en secondes), "
-            "ou `!fermer_ticket #salon-du-ticket [raison]` / `!fermer_ticket <id> [raison]` depuis n'importe quel salon."
+            "ou `!fermer_ticket #salon-du-ticket [raison]` / `!fermer_ticket <id> [raison]` / `!fermer_ticket @membre [raison]` depuis n'importe quel salon."
         )
     ticket = _resolve_ticket_arg(ctx, arg)
     if not ticket:
