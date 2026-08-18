@@ -10865,12 +10865,19 @@ async def cmd_ticket_panel(ctx, categorie: discord.CategoryChannel = None):
 
 DEFAULT_TICKET_CLOSE_DELAY_S = 10
 _CHANNEL_MENTION_RE = re.compile(r"^<#(\d+)>$")
+_USER_MENTION_RE = re.compile(r"^<@!?(\d+)>$")
 
 
 def _resolve_ticket_arg(ctx, arg: str) -> dict | None:
     """Résout arg vers un ticket ouvert : mention de salon (#salon, ce qui
     donne <#id> une fois envoyé — marche sans le mode développeur, contrairement
-    à un ID de salon copié à la main), ID de salon brut, ou ID de ticket."""
+    à un ID de salon copié à la main), ID de salon brut, ID de ticket, ou
+    mention d'un membre (@membre) — utile quand le salon du ticket n'est plus
+    accessible (ex. supprimé, ou créé sur un autre serveur avant le fix du
+    18/08/2026) mais que le ticket est encore marqué ouvert en base."""
+    m = _USER_MENTION_RE.match(arg)
+    if m:
+        return db_bs.get_open_ticket_for_user(m.group(1))
     m = _CHANNEL_MENTION_RE.match(arg)
     channel_id = m.group(1) if m else (arg if arg.isdigit() and len(arg) >= 15 else None)
     if channel_id:
@@ -10886,10 +10893,12 @@ async def cmd_fermer_ticket(ctx, arg: str = None, *, reste: str = None):
     - Lancée dans le salon d'un ticket, sans argument de ciblage : ferme CE
       ticket, après un délai en secondes optionnel (`!fermer_ticket 30`,
       sinon délai par défaut).
-    - Lancée avec une mention de salon ou un ID en premier argument (depuis
-      n'importe quel salon) : ferme ce ticket immédiatement, avec une raison
-      optionnelle (`!fermer_ticket #ticket-incident-bob raison ici` ou
-      `!fermer_ticket 42 raison ici`)."""
+    - Lancée avec une mention de salon, un ID de ticket ou une mention de
+      membre en premier argument (depuis n'importe quel salon) : ferme ce
+      ticket immédiatement, avec une raison optionnelle
+      (`!fermer_ticket #ticket-incident-bob raison ici`, `!fermer_ticket 42 raison ici`
+      ou `!fermer_ticket @membre raison ici`). La mention de membre marche même si
+      le salon du ticket est introuvable (supprimé, ou sur un autre serveur)."""
     if not _is_ticket_staff(ctx.author):
         return await ctx.send("❌ Réservé au staff.")
 
@@ -10916,7 +10925,7 @@ async def cmd_fermer_ticket(ctx, arg: str = None, *, reste: str = None):
     if arg is None:
         return await ctx.send(
             "❌ Utilisation : `!fermer_ticket` dans le salon du ticket (délai optionnel en secondes), "
-            "ou `!fermer_ticket #salon-du-ticket [raison]` / `!fermer_ticket <id> [raison]` depuis n'importe quel salon."
+            "ou `!fermer_ticket #salon-du-ticket [raison]` / `!fermer_ticket <id> [raison]` / `!fermer_ticket @membre [raison]` depuis n'importe quel salon."
         )
     ticket = _resolve_ticket_arg(ctx, arg)
     if not ticket:
