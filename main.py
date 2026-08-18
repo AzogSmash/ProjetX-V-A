@@ -99,10 +99,10 @@ silenced_users = {}
 # Journal d'audit des actions de modération (warn/mute/ban/silence/punition/morse) —
 # contrairement à warns/mutes/punitions qui ne décrivent que l'état ACTUEL (et perdent
 # toute trace une fois résolus/levés), ce journal est append-only : chaque action y
-# laisse une entrée permanente. Voir _log_moderation. Plafonné (MODERATION_LOG_MAX)
-# pour ne pas grossir data.json indéfiniment.
-moderation_log = []
-MODERATION_LOG_MAX = 300
+# laisse une entrée permanente. Voir _log_moderation. Indexé par membre (dict, pas de
+# plafond global) pour que l'historique d'un membre ne soit jamais tronqué par
+# l'activité de modération sur d'autres membres.
+moderation_log: dict[str, list] = {}
 coins = defaultdict(int)
 giveaway_data = {}
 giveaway_tasks = {}
@@ -575,7 +575,7 @@ def _log_moderation(action: str, target, moderator, reason: str = None, extra: s
     """Ajoute une entrée au journal d'audit (voir moderation_log) — n'appelle PAS
     save_data() lui-même, à faire par l'appelant juste après (comme pour toute
     autre mutation d'état)."""
-    moderation_log.append({
+    moderation_log.setdefault(str(target.id), []).append({
         'action': action,
         'target_id': str(target.id),
         'target_name': target.display_name,
@@ -584,8 +584,6 @@ def _log_moderation(action: str, target, moderator, reason: str = None, extra: s
         'extra': extra,
         'timestamp': datetime.now().isoformat(),
     })
-    if len(moderation_log) > MODERATION_LOG_MAX:
-        moderation_log[:] = moderation_log[-MODERATION_LOG_MAX:]
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -1226,7 +1224,15 @@ def load_data():
                 # qui permet à !annuler_punition de savoir qu'il faut les lever).
                 punitions       = data.get('punitions', {})
                 morse_punitions = data.get('morse_punitions', {})
-                moderation_log  = data.get('moderation_log', [])
+                # Migration one-shot depuis l'ancien format liste plafonnée (voir _log_moderation) :
+                # une liste signifie données pré-migration, à réindexer par target_id.
+                _raw_modlog = data.get('moderation_log', {})
+                if isinstance(_raw_modlog, list):
+                    moderation_log = {}
+                    for _entry in _raw_modlog:
+                        moderation_log.setdefault(_entry['target_id'], []).append(_entry)
+                else:
+                    moderation_log = _raw_modlog
                 ranked_1v1        = data.get('ranked_1v1', {})
                 ranked_challenges = data.get('ranked_challenges', {})
                 ranked_pending    = data.get('ranked_pending', {})
@@ -1853,6 +1859,7 @@ COMMAND_USAGE = {
     'rename':        '`!rename @membre <nouveau pseudo>`\nEx : `!rename @Joueur NouveauNom`',
     'giverole':      '`!giverole @membre <nom du rôle>`\nEx : `!giverole @Joueur VIP`',
     'sanctions':     '`!sanctions @membre`',
+    'historique_moderation': '`!historique_moderation [@membre]`',
     'say':           '`!say <message>`',
     'dm':            '`!dm @membre <message>`',
 }
@@ -2036,6 +2043,7 @@ def _build_help_categories(ctx):
         lines = []
         if has_manage_messages:
             lines.append("`!warn` `!mute` `!unmute` `!clear` `!silence` `!unsilence` `!sanctions`")
+            lines.append("`!historique_moderation [@membre]` (`!modlog`) — Détail chronologique des sanctions (raison, modérateur, date)")
             lines.append("`!punition <nb> @membre` (`!pun`) — Punition morse")
             lines.append("`!annuler_punition @membre` (`!apun`) — Annuler punition")
             lines.append("`!morse @membre` — Punition morse avancée")
@@ -3427,6 +3435,90 @@ async def sanctions(ctx, member: discord.Member = None):
         ("Est muté ?", "Oui" if is_muted else "Non", True)
     ]
     await send_log_message(ctx.guild, LOG_GENERAL_CHANNEL_ID, "📋 Sanctions Vérifiées", f"{ctx.author.mention} a vérifié les sanctions de {member.mention}.", discord.Color.light_grey(), fields)
+
+
+_MODLOG_ACTION_LABELS = {
+    'warn': ('⚠️', 'Avertissement'),
+    'mute': ('🔇', 'Mute'),
+    'mute_auto_antiraid': ('🔇', 'Mute automatique (anti-raid)'),
+    'ban': ('🔨', 'Ban'),
+    'kick': ('👢', 'Kick'),
+    'silence': ('🔈', 'Silence'),
+    'punition': ('📢', 'Punition (morse simple)'),
+    'punition_fin': ('✅', 'Fin de punition'),
+    'morse': ('📡', 'Punition morse avancée'),
+    'morse_fin': ('✅', 'Fin de punition morse'),
+    'casino_ban': ('🚫', 'Casino ban'),
+    'casino_unban': ('✅', 'Casino unban'),
+}
+
+
+def _modlog_entries_for(member_id: int) -> list[dict]:
+    """Entrées de moderation_log pour ce membre, plus récentes en premier — voir _log_moderation."""
+    return list(reversed(moderation_log.get(str(member_id), [])))
+
+
+class ModerationHistoryView(discord.ui.View):
+    """Pagination (8/page) de l'historique de modération d'un membre — même schéma de pagination
+    que RankedLeaderboardView/CasinoLeaderboardView, sans sélecteur de saison."""
+    PAGE_SIZE = 8
+
+    def __init__(self, member: discord.Member, entries: list[dict], page: int = 0):
+        super().__init__(timeout=180)
+        self.member = member
+        self.entries = entries
+        self.total_pages = max(1, (len(entries) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        self.page = max(0, min(page, self.total_pages - 1))
+
+        if self.page > 0:
+            prev_btn = discord.ui.Button(label="◀ Précédent", style=discord.ButtonStyle.secondary)
+            prev_btn.callback = self._prev
+            self.add_item(prev_btn)
+        if self.page < self.total_pages - 1:
+            next_btn = discord.ui.Button(label="Suivant ▶", style=discord.ButtonStyle.secondary)
+            next_btn.callback = self._next
+            self.add_item(next_btn)
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"📋 Historique de modération — {self.member.display_name}",
+            color=discord.Color.dark_gold(),
+        )
+        start = self.page * self.PAGE_SIZE
+        page_entries = self.entries[start:start + self.PAGE_SIZE]
+        if not page_entries:
+            embed.description = "Aucune sanction enregistrée pour ce membre."
+        for e in page_entries:
+            emoji, label = _MODLOG_ACTION_LABELS.get(e['action'], ('•', e['action']))
+            ts = datetime.fromisoformat(e['timestamp']).strftime('%d/%m/%Y %H:%M')
+            value = f"Par **{e['moderator']}** · {ts}"
+            if e.get('reason'):
+                value += f"\nRaison : {e['reason']}"
+            if e.get('extra'):
+                value += f"\n{e['extra']}"
+            embed.add_field(name=f"{emoji} {label}", value=value, inline=False)
+        embed.set_footer(text=f"{len(self.entries)} entrée(s) · Page {self.page + 1}/{self.total_pages}")
+        return embed
+
+    async def _prev(self, interaction: discord.Interaction):
+        view = ModerationHistoryView(self.member, self.entries, self.page - 1)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    async def _next(self, interaction: discord.Interaction):
+        view = ModerationHistoryView(self.member, self.entries, self.page + 1)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+
+@bot.command(name="historique_moderation", aliases=["modlog", "historique_mod"])
+@commands.has_permissions(manage_messages=True)
+async def cmd_historique_moderation(ctx, member: discord.Member = None):
+    """Détail chronologique des sanctions d'un membre (warns, mutes, bans, punitions, casino_ban...)
+    avec raison/modérateur/date — voir !sanctions pour juste le compteur de warns + statut mute."""
+    member = member or ctx.author
+    entries = _modlog_entries_for(member.id)
+    view = ModerationHistoryView(member, entries)
+    await ctx.send(embed=view.build_embed(), view=view)
+
 
 @bot.command()
 async def lock(ctx, channel: discord.TextChannel = None):
@@ -11839,6 +11931,7 @@ async def on_message(message):
             "silence": "**!silence @membre**\nSupprime automatiquement tous les messages du membre.",
             "unsilence": "**!unsilence @membre**\nArrête de supprimer les messages du membre.",
             "sanctions": "**!sanctions [@membre]**\nAffiche le nombre de warns et mutes d'un membre.",
+            "historique_moderation": "**!historique_moderation [@membre]** (`!modlog`)\nAffiche le détail chronologique des sanctions d'un membre (warns, mutes, bans, punitions...), avec raison, modérateur et date.",
             "addrole": "**!addrole nom_du_rôle**\nCrée un nouveau rôle sur le serveur.",
             "giverole": "**!giverole @membre nom_du_rôle**\nDonne un rôle spécifique à un membre.",
             "construction": "**!construction**\nCrée une architecture complète de serveur communautaire (créateur du bot uniquement).",
