@@ -1,0 +1,7 @@
+-- Sixième lot de builds fournis par le staff (18/08/2026) — voir
+-- 012_best_builds.sql pour le contexte de la table.
+insert into best_builds (brawler_slug, brawler_name, comment) values
+  ('jacky', 'Jacky', 'Vous n''avez pas 10 000 manières de jouer Jacky : attendez qu''une cible sans dégâts s''approche, et foncez lui dessus. Grâce à ce build vous irez très très vite, ce qui vous facilitera le travail. (Remplacez l''équipement gadget accéléré par vitesse si beaucoup de buissons sont sur la map.)'),
+  ('polly', 'Polly', 'Polly, le 1er sniper de Brawl Stars. En vous relayant sur vos alliés qui vous protègent des menaces rapprochées, vous les protégez des tireurs d''élite adverses ! Son gadget vous permet d''assurer de toucher une balle, que ce soit pour finir un ennemi ou charger un peu plus le super. Avec le gear vision, vos tirs seront plus souvent touchés, ce qui est fusionnel avec votre pouvoir star. Vous pouvez jouer le gear dégâts sur une map sans buissons. L''autre gadget n''est utilisable que s''il y a deux assassins ou plus en face.'),
+  ('frank', 'Frank', 'Frank, le tank originel. Un pouvoir star qui vous permet de prendre encore plus de dégâts, un gadget pour détruire vos ennemis à distance, et c''est tout. Beaucoup veulent utiliser l''autre pouvoir star, mais il est très inconsistant : il vous force à faire des kills pour gagner en rentabilité, ce qui est l''une des pires mécaniques du jeu.')
+on conflict (brawler_slug) do nothing;
