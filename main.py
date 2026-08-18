@@ -1097,6 +1097,7 @@ def load_data():
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments, casino_banned_users
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
     global CASINO_LOG_CHANNEL_ID, LOG_MODERATION_CHANNEL_ID, LOG_GIVEAWAY_CHANNEL_ID, LOG_GENERAL_CHANNEL_ID, LOG_TICKET_CHANNEL_ID
+    global TICKET_CATEGORY_ID
     global LEAVE_LOG_CHANNEL_ID
     global bs_accounts, bs_role_config
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
@@ -1217,6 +1218,7 @@ def load_data():
                 LOG_GIVEAWAY_CHANNEL_ID   = data.get('log_giveaway_channel_id', LOG_GIVEAWAY_CHANNEL_ID)
                 LOG_GENERAL_CHANNEL_ID    = data.get('log_general_channel_id', LOG_GENERAL_CHANNEL_ID)
                 LOG_TICKET_CHANNEL_ID     = data.get('log_ticket_channel_id', LOG_TICKET_CHANNEL_ID)
+                TICKET_CATEGORY_ID        = data.get('ticket_category_id', TICKET_CATEGORY_ID)
                 LEAVE_LOG_CHANNEL_ID      = data.get('leave_log_channel_id', LEAVE_LOG_CHANNEL_ID)
                 # punitions/morse_punitions : voir incident du 21/07/2026, un redémarrage en
                 # pleine punition laissait le membre bloqué dans tous les salons (les
@@ -1424,6 +1426,7 @@ def save_data(force: bool = False):
     data_to_save['log_giveaway_channel_id']   = LOG_GIVEAWAY_CHANNEL_ID
     data_to_save['log_general_channel_id']    = LOG_GENERAL_CHANNEL_ID
     data_to_save['log_ticket_channel_id']     = LOG_TICKET_CHANNEL_ID
+    data_to_save['ticket_category_id']        = TICKET_CATEGORY_ID
     data_to_save['leave_log_channel_id']      = LEAVE_LOG_CHANNEL_ID
     data_to_save['punitions']       = punitions
     data_to_save['morse_punitions'] = morse_punitions
@@ -10832,16 +10835,26 @@ class TicketPanelView(discord.ui.View):
 
 
 @bot.command(name="ticket_panel")
-async def cmd_ticket_panel(ctx):
+async def cmd_ticket_panel(ctx, categorie: discord.CategoryChannel = None):
     """Poste le panel d'ouverture de ticket dans le salon courant — à lancer une
     fois manuellement (pas auto-posté à chaque redémarrage, voir on_ready pour
-    le ré-enregistrement des vues existantes)."""
+    le ré-enregistrement des vues existantes).
+    `categorie` (optionnel, nom ou ID) change aussi la catégorie Discord où les
+    salons de ticket sont créés (TICKET_CATEGORY_ID, persisté) — via ce panel
+    comme via le formulaire du site (_create_ticket_apply est partagé)."""
+    global TICKET_CATEGORY_ID
+    if categorie is not None:
+        TICKET_CATEGORY_ID = categorie.id
+        save_data()
+
     embed = discord.Embed(
         title="🎫 Ouvrir un ticket",
         description="Choisis une catégorie ci-dessous pour contacter le staff.",
         color=0x3498db,
     )
     await ctx.send(embed=embed, view=TicketPanelView())
+    if categorie is not None:
+        await ctx.send(f"✅ Les salons de ticket seront désormais créés dans la catégorie **{categorie.name}**.")
 
 
 DEFAULT_TICKET_CLOSE_DELAY_S = 10
