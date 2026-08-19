@@ -2768,7 +2768,12 @@ async def cmd_addserv(ctx):
         permissions=discord.Permissions(administrator=True),
         scopes=("bot", "applications.commands"),
     )
-    await ctx.send(f"🔗 **Lien d'invitation du bot :**\n{url}")
+    try:
+        await ctx.author.send(f"🔗 **Lien d'invitation du bot :**\n{url}")
+    except discord.Forbidden:
+        return await ctx.send("❌ Impossible de t'envoyer un MP (DMs fermés pour ce serveur). Ouvre tes MPs et réessaie.")
+    if ctx.guild is not None:
+        await ctx.send("✅ Lien envoyé en MP.")
 
 
 @bot.command(name="leave", aliases=["quitter_serveur"])
