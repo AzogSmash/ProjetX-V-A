@@ -10865,110 +10865,141 @@ async def cmd_ticket_panel(ctx):
     await ctx.send(embed=embed, view=TicketPanelView())
 
 
-def _resolve_ticket_category_key(arg: str) -> str | None:
-    """Résout un motif tapé par un admin (clé technique ou libellé affiché, avec ou
-    sans emoji/accents/casse) vers une clé de TICKET_CATEGORIES."""
-    arg_norm = arg.strip().lower()
-    if arg_norm in TICKET_CATEGORIES:
-        return arg_norm
+def _set_ticket_embed(guild, selected_key: str | None) -> discord.Embed:
+    embed = discord.Embed(title="🎫 Configuration des tickets", color=0x3498db)
     for key, label in TICKET_CATEGORIES.items():
-        label_norm = re.sub(r'[^\w\s]', '', label, flags=re.UNICODE).strip().lower()
-        if arg_norm == label_norm or arg_norm in label_norm:
-            return key
-    return None
+        cid = TICKET_CATEGORY_IDS.get(key)
+        cat = guild.get_channel(cid) if (guild and cid) else None
+        marker = "➡️ " if key == selected_key else ""
+        embed.add_field(
+            name=f"{marker}{label}",
+            value=f"`{key}` — {cat.name if cat else '*catégorie par défaut*'}",
+            inline=False,
+        )
+    embed.set_footer(text="Choisis un motif dans le menu, puis sa catégorie ou un bouton d'action.")
+    return embed
 
 
-SET_TICKET_USAGE = (
-    "**Usage :**\n"
-    "`!set_ticket ajouter <clé> <emoji> <libellé...>` — ajoute un motif au panel "
-    "(ex : `!set_ticket ajouter support 🛠️ Support technique`)\n"
-    "`!set_ticket retirer <clé|motif>` — retire un motif du panel\n"
-    "`!set_ticket categorie <clé|motif> [#catégorie|défaut]` — catégorie Discord où "
-    "créer le salon pour ce motif (sans catégorie : celle du salon courant ; `défaut` : retire l'override)\n"
-    "`!set_ticket liste` — affiche les motifs configurés et leur catégorie\n\n"
-    "⚠️ Un panel déjà posté ne se met pas à jour tout seul — relance `!ticket_panel` "
-    "dans le salon voulu après un `ajouter`/`retirer` pour que le nouveau menu apparaisse."
-)
+class AddTicketMotifModal(discord.ui.Modal, title="Ajouter un motif de ticket"):
+    key_input = discord.ui.TextInput(label="Clé technique (minuscules, sans espace)", placeholder="support", max_length=32)
+    emoji_input = discord.ui.TextInput(label="Emoji", placeholder="🛠️", max_length=8, required=False)
+    label_input = discord.ui.TextInput(label="Libellé affiché", placeholder="Support technique", max_length=80)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        global TICKET_CATEGORIES
+        key = str(self.key_input.value).strip().lower()
+        if not re.match(r'^[a-z0-9_]+$', key):
+            return await interaction.response.send_message("❌ Clé invalide : lettres minuscules, chiffres et `_` uniquement.", ephemeral=True)
+        if key in TICKET_CATEGORIES:
+            return await interaction.response.send_message(f"❌ Le motif `{key}` existe déjà.", ephemeral=True)
+        label = f"{str(self.emoji_input.value).strip()} {str(self.label_input.value).strip()}".strip()
+        TICKET_CATEGORIES[key] = label
+        save_data()
+        await interaction.response.send_message(
+            f"✅ Motif **{label}** (`{key}`) ajouté. Relance `!set_ticket` pour le voir dans le menu, "
+            f"et `!ticket_panel` où tu veux l'afficher (un panel déjà posté ne se met pas à jour tout seul).",
+            ephemeral=True,
+        )
+
+
+class SetTicketView(discord.ui.View):
+    """Config interactive des motifs de ticket et de leur catégorie de création —
+    même esprit que SetLogsView (menu + ChannelSelect natif)."""
+
+    def __init__(self, guild, selected_key: str | None = None):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.selected_key = selected_key if selected_key in TICKET_CATEGORIES else next(iter(TICKET_CATEGORIES), None)
+
+        motif_options = [
+            discord.SelectOption(label=label[:100], value=key, default=(key == self.selected_key))
+            for key, label in TICKET_CATEGORIES.items()
+        ]
+        self.motif_select = discord.ui.Select(placeholder="🎫 Choisir un motif à configurer…", options=motif_options, row=0)
+        self.motif_select.callback = self._on_motif
+        self.add_item(self.motif_select)
+
+        if self.selected_key:
+            self.cat_select = discord.ui.ChannelSelect(
+                placeholder=f"📁 Catégorie pour « {TICKET_CATEGORIES[self.selected_key]} »…"[:150],
+                channel_types=[discord.ChannelType.category], row=1,
+            )
+            self.cat_select.callback = self._on_category
+            self.add_item(self.cat_select)
+
+        add_btn = discord.ui.Button(label="➕ Ajouter un motif", style=discord.ButtonStyle.secondary, row=2)
+        add_btn.callback = self._on_add
+        self.add_item(add_btn)
+
+        if self.selected_key:
+            reset_btn = discord.ui.Button(label="↩️ Catégorie par défaut", style=discord.ButtonStyle.secondary, row=2)
+            reset_btn.callback = self._on_reset
+            self.add_item(reset_btn)
+
+            remove_btn = discord.ui.Button(
+                label="🗑️ Retirer ce motif", style=discord.ButtonStyle.danger, row=2,
+                disabled=(len(TICKET_CATEGORIES) <= 1),
+            )
+            remove_btn.callback = self._on_remove
+            self.add_item(remove_btn)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not (interaction.user.guild_permissions.administrator or is_bot_owner(interaction.user)):
+            await interaction.response.send_message("❌ Réservé aux admins/owner.", ephemeral=True)
+            return False
+        return True
+
+    async def _on_motif(self, interaction: discord.Interaction):
+        view = SetTicketView(self.guild, self.motif_select.values[0])
+        await interaction.response.edit_message(embed=_set_ticket_embed(self.guild, view.selected_key), view=view)
+
+    async def _on_category(self, interaction: discord.Interaction):
+        global TICKET_CATEGORY_IDS
+        channel = self.cat_select.values[0]
+        TICKET_CATEGORY_IDS[self.selected_key] = channel.id
+        save_data()
+        view = SetTicketView(self.guild, self.selected_key)
+        await interaction.response.edit_message(
+            content=f"✅ Catégorie de **{TICKET_CATEGORIES[self.selected_key]}** mise à jour.",
+            embed=_set_ticket_embed(self.guild, self.selected_key), view=view,
+        )
+
+    async def _on_reset(self, interaction: discord.Interaction):
+        global TICKET_CATEGORY_IDS
+        TICKET_CATEGORY_IDS.pop(self.selected_key, None)
+        save_data()
+        view = SetTicketView(self.guild, self.selected_key)
+        await interaction.response.edit_message(
+            content=f"✅ **{TICKET_CATEGORIES[self.selected_key]}** retombe sur la catégorie par défaut.",
+            embed=_set_ticket_embed(self.guild, self.selected_key), view=view,
+        )
+
+    async def _on_remove(self, interaction: discord.Interaction):
+        global TICKET_CATEGORIES, TICKET_CATEGORY_IDS
+        if len(TICKET_CATEGORIES) <= 1:
+            return await interaction.response.send_message("❌ Impossible de retirer le dernier motif.", ephemeral=True)
+        label = TICKET_CATEGORIES.pop(self.selected_key)
+        TICKET_CATEGORY_IDS.pop(self.selected_key, None)
+        save_data()
+        new_key = next(iter(TICKET_CATEGORIES))
+        view = SetTicketView(self.guild, new_key)
+        await interaction.response.edit_message(
+            content=f"✅ Motif **{label}** retiré. Relance `!ticket_panel` où il était affiché pour mettre à jour le menu.",
+            embed=_set_ticket_embed(self.guild, new_key), view=view,
+        )
+
+    async def _on_add(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(AddTicketMotifModal())
 
 
 @bot.command(name="set_ticket")
-async def cmd_set_ticket(ctx, action: str = None, cle: str = None, *, reste: str = None):
-    """Gère les motifs proposés dans !ticket_panel et leur catégorie Discord de
-    création — voir SET_TICKET_USAGE pour le détail des sous-commandes."""
-    global TICKET_CATEGORIES, TICKET_CATEGORY_IDS
-    valid_actions = ('ajouter', 'add', 'retirer', 'remove', 'categorie', 'category', 'liste', 'list')
-    if action is None or action.lower() not in valid_actions:
-        return await ctx.send(SET_TICKET_USAGE)
-    action = action.lower()
-
-    if action in ('liste', 'list'):
-        lines = []
-        for key, label in TICKET_CATEGORIES.items():
-            cid = TICKET_CATEGORY_IDS.get(key)
-            cat = ctx.guild.get_channel(cid) if (ctx.guild and cid) else None
-            lines.append(f"**{label}** (`{key}`) : {cat.name if cat else '*catégorie par défaut*'}")
-        if not lines:
-            return await ctx.send("Aucun motif de ticket configuré.")
-        return await ctx.send("📋 **Motifs de ticket configurés :**\n" + "\n".join(lines))
-
-    if action in ('ajouter', 'add'):
-        if not cle or not reste:
-            return await ctx.send(SET_TICKET_USAGE)
-        key = cle.strip().lower()
-        if not re.match(r'^[a-z0-9_]+$', key):
-            return await ctx.send("❌ La clé ne doit contenir que des lettres minuscules, chiffres et `_` (ex : `support`).")
-        if key in TICKET_CATEGORIES:
-            return await ctx.send(f"❌ Le motif `{key}` existe déjà (**{TICKET_CATEGORIES[key]}**). Utilise `!set_ticket retirer` d'abord pour le remplacer.")
-        TICKET_CATEGORIES[key] = reste.strip()
-        save_data()
-        return await ctx.send(
-            f"✅ Motif **{TICKET_CATEGORIES[key]}** (`{key}`) ajouté. "
-            f"Relance `!ticket_panel` où tu veux l'afficher pour le voir dans le menu."
-        )
-
-    if action in ('retirer', 'remove'):
-        if not cle:
-            return await ctx.send(SET_TICKET_USAGE)
-        key = _resolve_ticket_category_key(cle)
-        if key is None:
-            motifs = ", ".join(f"`{k}`" for k in TICKET_CATEGORIES)
-            return await ctx.send(f"❌ Motif inconnu : `{cle}`. Motifs valides : {motifs}.")
-        if len(TICKET_CATEGORIES) <= 1:
-            return await ctx.send("❌ Impossible de retirer le dernier motif restant.")
-        label = TICKET_CATEGORIES.pop(key)
-        TICKET_CATEGORY_IDS.pop(key, None)
-        save_data()
-        return await ctx.send(
-            f"✅ Motif **{label}** (`{key}`) retiré. Relance `!ticket_panel` où il était affiché "
-            f"pour mettre à jour le menu (les tickets déjà ouverts avec ce motif ne sont pas affectés)."
-        )
-
-    # action in ('categorie', 'category')
-    if not cle:
-        return await ctx.send(SET_TICKET_USAGE)
-    key = _resolve_ticket_category_key(cle)
-    if key is None:
-        motifs = ", ".join(f"`{k}`" for k in TICKET_CATEGORIES)
-        return await ctx.send(f"❌ Motif inconnu : `{cle}`. Motifs valides : {motifs}.")
-
-    if reste is not None and reste.strip().lower() in ('defaut', 'défaut', 'reset', 'retirer'):
-        TICKET_CATEGORY_IDS.pop(key, None)
-        save_data()
-        return await ctx.send(f"✅ Les tickets **{TICKET_CATEGORIES[key]}** retombent sur la catégorie par défaut.")
-
-    if reste is None:
-        cat_channel = ctx.channel.category
-    else:
-        try:
-            cat_channel = await commands.CategoryChannelConverter().convert(ctx, reste.strip())
-        except commands.BadArgument:
-            return await ctx.send(f"❌ Catégorie introuvable : `{reste}`.")
-    if cat_channel is None:
-        return await ctx.send("❌ Précise une catégorie (`!set_ticket categorie <motif> <catégorie>`) ou lance la commande depuis un salon qui en a une.")
-
-    TICKET_CATEGORY_IDS[key] = cat_channel.id
-    save_data()
-    await ctx.send(f"✅ Les tickets **{TICKET_CATEGORIES[key]}** seront désormais créés dans la catégorie **{cat_channel.name}**.")
+async def cmd_set_ticket(ctx):
+    """Interface interactive (menu + boutons) pour gérer les motifs proposés dans
+    !ticket_panel et leur catégorie Discord de création."""
+    if not ctx.guild:
+        return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
+    view = SetTicketView(ctx.guild)
+    await ctx.send(embed=_set_ticket_embed(ctx.guild, view.selected_key), view=view)
 
 
 DEFAULT_TICKET_CLOSE_DELAY_S = 10
