@@ -2757,6 +2757,36 @@ async def say(ctx, *, message):
         await ctx.send(f"❌ Une erreur est survenue : {e}")
 
 
+@bot.command(name="addserv", aliases=["invite", "addbot"])
+async def cmd_addserv(ctx):
+    """Génère le lien d'invitation du bot sur un autre serveur — réservé au créateur
+    du bot, qui décide seul où le bot peut être ajouté."""
+    if not is_bot_owner(ctx.author):
+        return await ctx.send("❌ Seul le créateur du bot peut utiliser cette commande.")
+    url = discord.utils.oauth_url(
+        bot.user.id,
+        permissions=discord.Permissions(administrator=True),
+        scopes=("bot", "applications.commands"),
+    )
+    await ctx.send(f"🔗 **Lien d'invitation du bot :**\n{url}")
+
+
+@bot.command(name="leave", aliases=["quitter_serveur"])
+async def cmd_leave(ctx):
+    """Fait quitter le bot du serveur courant — réservé au créateur du bot. Destructif :
+    il faudra réinviter le bot (voir !addserv) pour qu'il revienne, d'où la confirmation."""
+    if not is_bot_owner(ctx.author):
+        return await ctx.send("❌ Seul le créateur du bot peut utiliser cette commande.")
+    if not await _confirm_action(
+        ctx,
+        f"⚠️ **ATTENTION :** le bot va quitter **{ctx.guild.name}**. "
+        f"Il faudra le réinviter (`!addserv`) pour qu'il revienne."
+    ):
+        return
+    await ctx.send("👋 Je quitte ce serveur. Au revoir !")
+    await ctx.guild.leave()
+
+
 @bot.command(name="addrole")
 @commands.has_permissions(manage_roles=True)
 async def addrole(ctx, *, role_name: str = None):
