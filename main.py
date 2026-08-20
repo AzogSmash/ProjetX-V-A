@@ -88,6 +88,15 @@ def _ticket_staff_role_ids_for(category: str) -> set[int]:
     return TICKET_CATEGORY_STAFF_ROLE_IDS.get(category, TICKET_STAFF_ROLE_IDS)
 
 
+def _join_fr_ou(items: list[str]) -> str:
+    """Liste à la française : virgules entre les items, "ou" avant le
+    dernier (ex: "A, B ou C") — "Un membre du A ou B ou C" ne se lit pas
+    naturellement dès qu'il y a 3+ rôles (voir #logs-ticket du 20/08/2026)."""
+    if len(items) <= 1:
+        return items[0] if items else ""
+    return ", ".join(items[:-1]) + " ou " + items[-1]
+
+
 # Motifs proposés dans le panel de ticket (!ticket_panel) — clé -> libellé affiché
 # (emoji + texte). Défauts ci-dessous, modifiables via !set_ticket ajouter/retirer
 # (persisté dans data.json, voir load_data/save_data).
@@ -10711,10 +10720,10 @@ async def _create_ticket_apply(discord_id: str, category: str, description: str,
     embed.set_footer(text="Non pris en charge")
 
     staff_mentions = [f"<@&{rid}>" for rid in _ticket_staff_role_ids_for(category) if guild.get_role(rid)]
-    staff_part = " ou ".join(staff_mentions) if staff_mentions else "staff"
+    staff_part = _join_fr_ou(staff_mentions) if staff_mentions else "le staff"
     welcome = (
         f"Bienvenue {member.mention} dans le salon de ton ticket ! "
-        f"Un membre du {staff_part} va venir gérer ta demande."
+        f"Quelqu'un parmi {staff_part} va venir gérer ta demande."
     )
     await salon.send(
         content=welcome, embed=embed, view=TicketControlView(row["id"]),
