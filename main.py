@@ -119,10 +119,9 @@ slash_global_purged = False  # persisté : la purge des commandes globales ne do
 # Les données seront chargées depuis data.json
 warns = {}
 punitions = {}
-morse_punitions = {}
 mutes = {}
 silenced_users = {}
-# Journal d'audit des actions de modération (warn/mute/ban/silence/punition/morse) —
+# Journal d'audit des actions de modération (warn/mute/ban/silence/punition) —
 # contrairement à warns/mutes/punitions qui ne décrivent que l'état ACTUEL (et perdent
 # toute trace une fois résolus/levés), ce journal est append-only : chaque action y
 # laisse une entrée permanente. Voir _log_moderation. Indexé par membre (dict, pas de
@@ -567,7 +566,7 @@ CASINO_HINT_USER_ID = 1056848438270115900  # happy_gt3
 # pour CASINO_HINT_USER_ID — toggle via !triche, utilisable en MP au bot.
 casino_cheat_enabled = True
 
-# Immunisés aux commandes de modération négatives (warn/mute/ban/silence/punition/morse) : Azog + Vynaro (happy_gt3)
+# Immunisés aux commandes de modération négatives (warn/mute/ban/silence/punition) : Azog + Vynaro (happy_gt3)
 MOD_IMMUNE_IDS = {550678866839207937, 1056848438270115900}
 
 PROTECTED_REJECT_LINES = [
@@ -639,6 +638,13 @@ _antiraid_repeat: dict[int, tuple[int, datetime]] = {}  # uid -> (nb de mutes an
 
 def _antiraid_exempt(member: discord.Member) -> bool:
     return member.id in MOD_IMMUNE_IDS or member.guild_permissions.administrator
+
+
+def _is_punition_channel(channel_id: int) -> bool:
+    """Salons de !punition (voir punitions) — le principe même de cette punition
+    demande d'y compter rapidement (spam de nombres), ce que l'anti-raid
+    confondrait avec un flood et sanctionnerait par-dessus la punition déjà en cours."""
+    return any(d.get('salon_id') == channel_id for d in punitions.values())
 
 
 async def _antiraid_mute(message: discord.Message, reason: str) -> None:
@@ -721,6 +727,8 @@ async def _antiraid_check(message: discord.Message) -> bool:
         return False
     member = message.author
     if _antiraid_exempt(member):
+        return False
+    if _is_punition_channel(message.channel.id):
         return False
 
     now = datetime.now()
@@ -1129,7 +1137,7 @@ def load_data():
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
     global ranked_season_month, slash_global_purged, casino_season_month
-    global punitions, morse_punitions, moderation_log
+    global punitions, moderation_log
     load_path = _resolve_data_path()
     if os.path.exists(load_path):
         with open(load_path, 'r', encoding='utf-8-sig') as f:
@@ -1249,12 +1257,11 @@ def load_data():
                 if data.get('ticket_categories'):
                     TICKET_CATEGORIES = data['ticket_categories']
                 LEAVE_LOG_CHANNEL_ID      = data.get('leave_log_channel_id', LEAVE_LOG_CHANNEL_ID)
-                # punitions/morse_punitions : voir incident du 21/07/2026, un redémarrage en
-                # pleine punition laissait le membre bloqué dans tous les salons (les
-                # restrictions Discord survivent au redémarrage, mais plus le dict en mémoire
-                # qui permet à !annuler_punition de savoir qu'il faut les lever).
+                # punitions : voir incident du 21/07/2026, un redémarrage en pleine punition
+                # laissait le membre bloqué dans tous les salons (les restrictions Discord
+                # survivent au redémarrage, mais plus le dict en mémoire qui permet à
+                # !annuler_punition de savoir qu'il faut les lever).
                 punitions       = data.get('punitions', {})
-                morse_punitions = data.get('morse_punitions', {})
                 # Migration one-shot depuis l'ancien format liste plafonnée (voir _log_moderation) :
                 # une liste signifie données pré-migration, à réindexer par target_id.
                 _raw_modlog = data.get('moderation_log', {})
@@ -1460,7 +1467,6 @@ def save_data(force: bool = False):
     data_to_save['ticket_categories']         = TICKET_CATEGORIES
     data_to_save['leave_log_channel_id']      = LEAVE_LOG_CHANNEL_ID
     data_to_save['punitions']       = punitions
-    data_to_save['morse_punitions'] = morse_punitions
     data_to_save['moderation_log']  = moderation_log
     data_to_save['ranked_1v1']        = ranked_1v1
     data_to_save['ranked_challenges'] = ranked_challenges
@@ -1733,7 +1739,7 @@ ADMIN_LOCKED_CMDS = {
     'giveaway', 'cancelgiveaway', 'listgiveaways', 'gdt', 'prix_casino', 'ouvrir_course', 'lancer_course',
     'freeze_crypto', 'addcoins', 'removecoins', 'tournois', 'prix_tournoi',
     'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter', 'tournoi_deplacer',
-    'punition', 'annuler_punition', 'morse', 'annuler_morse', 'set_admin_log', 'set_logs',
+    'punition', 'annuler_punition', 'set_admin_log', 'set_logs',
     'ranked_sanction', 'ranked_ajuster', 'ranked_set', 'reset_casino', 'reset_duels', 'ranked_liberer',
     'casino_ban', 'casino_unban', 'casino_pause', 'casino_resume', 'ticket_panel', 'set_ticket', 'permission',
 }
@@ -2080,8 +2086,6 @@ def _build_help_categories(ctx):
             lines.append("`!historique_moderation [@membre]` (`!modlog`) — Détail chronologique des sanctions (raison, modérateur, date)")
             lines.append("`!punition <nb> @membre` (`!pun`) — Punition morse")
             lines.append("`!annuler_punition @membre` (`!apun`) — Annuler punition")
-            lines.append("`!morse @membre` — Punition morse avancée")
-            lines.append("`!annuler_morse @membre` (`!amorse`) — Annuler morse")
         if has_ban_members:
             lines.append("`!ban` `!unban`")
         cats.append(("mod", "⚖️ Modération",
@@ -2775,6 +2779,41 @@ async def say(ctx, *, message):
         await ctx.send("❌ Je n'ai pas la permission d'envoyer des messages ou de supprimer la commande.")
     except Exception as e:
         await ctx.send(f"❌ Une erreur est survenue : {e}")
+
+
+@bot.command(name="addserv", aliases=["invite", "addbot"])
+async def cmd_addserv(ctx):
+    """Génère le lien d'invitation du bot sur un autre serveur — réservé au créateur
+    du bot, qui décide seul où le bot peut être ajouté."""
+    if not is_bot_owner(ctx.author):
+        return await ctx.send("❌ Seul le créateur du bot peut utiliser cette commande.")
+    url = discord.utils.oauth_url(
+        bot.user.id,
+        permissions=discord.Permissions(administrator=True),
+        scopes=("bot", "applications.commands"),
+    )
+    try:
+        await ctx.author.send(f"🔗 **Lien d'invitation du bot :**\n{url}")
+    except discord.Forbidden:
+        return await ctx.send("❌ Impossible de t'envoyer un MP (DMs fermés pour ce serveur). Ouvre tes MPs et réessaie.")
+    if ctx.guild is not None:
+        await ctx.send("✅ Lien envoyé en MP.")
+
+
+@bot.command(name="leave", aliases=["quitter_serveur"])
+async def cmd_leave(ctx):
+    """Fait quitter le bot du serveur courant — réservé au créateur du bot. Destructif :
+    il faudra réinviter le bot (voir !addserv) pour qu'il revienne, d'où la confirmation."""
+    if not is_bot_owner(ctx.author):
+        return await ctx.send("❌ Seul le créateur du bot peut utiliser cette commande.")
+    if not await _confirm_action(
+        ctx,
+        f"⚠️ **ATTENTION :** le bot va quitter **{ctx.guild.name}**. "
+        f"Il faudra le réinviter (`!addserv`) pour qu'il revienne."
+    ):
+        return
+    await ctx.send("👋 Je quitte ce serveur. Au revoir !")
+    await ctx.guild.leave()
 
 
 @bot.command(name="addrole")
@@ -12085,27 +12124,6 @@ async def on_message(message):
             print(f"❌ Erreur lors de la suppression du message de {message.author.name}: {e}")
         return
 
-    # Vérification punition morse
-    if uid in morse_punitions:
-        data = morse_punitions[uid]
-        if message.channel.id == data['salon_id']:
-            data['attempts'] += 1
-            if message.content.strip() == data['morse']:
-                await message.channel.send(f"🎉 {message.author.mention} **BRAVO !** Tu as réussi ! Punition terminée !")
-                await _liberer_membre_morse(message.guild, message.author)
-            else:
-                # Nouveau mot aléatoire
-                new_word = random.choice(MORSE_WORDS)
-                new_morse = _text_to_morse(new_word)
-                data['word'] = new_word
-                data['morse'] = new_morse
-                buf = _morse_to_image(new_morse, new_word)
-                await message.channel.send(
-                    f"❌ {message.author.mention} **FAUX !** (tentative #{data['attempts']})\nNouveau mot :",
-                    file=discord.File(buf, filename="morse.png")
-                )
-            return
-
     if message.content.startswith('!') and message.content.lower().endswith(' aide'):
         command_name = message.content[1:-5]
         command_help = {
@@ -12152,142 +12170,6 @@ async def on_message(message):
 
     
 
-MORSE_CODE = {
-    'A': '.-', 'B': '-...', 'C': '-.-.', 'D': '-..', 'E': '.', 'F': '..-.',
-    'G': '--.', 'H': '....', 'I': '..', 'J': '.---', 'K': '-.-', 'L': '.-..',
-    'M': '--', 'N': '-.', 'O': '---', 'P': '.--.', 'Q': '--.-', 'R': '.-.',
-    'S': '...', 'T': '-', 'U': '..-', 'V': '...-', 'W': '.--', 'X': '-..-',
-    'Y': '-.--', 'Z': '--..', '0': '-----', '1': '.----', '2': '..---',
-    '3': '...--', '4': '....-', '5': '.....', '6': '-....', '7': '--...',
-    '8': '---..', '9': '----.'
-}
-
-MORSE_WORDS = [
-    "CHAT", "CHIEN", "DISCORD", "BONJOUR", "PYTHON", "SERVEUR",
-    "PUNITION", "COMPTE", "GAMING", "MUSIQUE", "SOLEIL", "DRAGON"
-]
-
-def _text_to_morse(text):
-    return ' '.join(MORSE_CODE.get(c, '') for c in text.upper() if c in MORSE_CODE)
-
-def _morse_to_image(morse_text, word):
-    width, height = 800, 150
-    img = Image.new('RGB', (width, height), color=(30, 30, 30))
-    draw = ImageDraw.Draw(img)
-    
-    try:
-        font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
-        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
-    except:
-        font_big = ImageFont.load_default()
-        font_small = ImageFont.load_default()
-    
-    draw.text((20, 20), f"Mot à coder : {word}", fill=(255, 200, 0), font=font_big)
-    draw.text((20, 80), morse_text, fill=(255, 255, 255), font=font_big)
-    draw.text((20, 120), "Recopiez le code morse ci-dessus ↑", fill=(150, 150, 150), font=font_small)
-    
-    buf = io.BytesIO()
-    img.save(buf, format='PNG')
-    buf.seek(0)
-    return buf
-
-morse_punitions = {}
-
-@bot.command(name="morse")
-async def cmd_morse(ctx, membre: discord.Member):
-    if await _check_protected_target(ctx, membre):
-        return
-    guild = ctx.guild
-
-    if str(membre.id) in morse_punitions:
-        return await ctx.send(f"❌ {membre.mention} est déjà en punition morse !")
-    
-    # Créer le salon
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        membre: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)
-    }
-    salon = await guild.create_text_channel(
-        f"morse-{membre.display_name}",
-        overwrites=overwrites,
-        reason=f"Punition morse pour {membre.display_name}"
-    )
-    
-    word = random.choice(MORSE_WORDS)
-    morse = _text_to_morse(word)
-    
-    morse_punitions[str(membre.id)] = {
-        'salon_id': salon.id,
-        'guild_id': guild.id,
-        'word': word,
-        'morse': morse,
-        'attempts': 0
-    }
-    _log_moderation('morse', membre, ctx.author)
-    save_data()
-    await send_log_message(
-        guild, LOG_MODERATION_CHANNEL_ID, "🔒 Punition morse",
-        f"{membre.mention} a été mis en punition morse par {ctx.author.mention}.",
-        discord.Color.dark_red(),
-    )
-
-    buf = _morse_to_image(morse, word)
-    await salon.send(
-        f"🔒 {membre.mention} tu es en **punition morse** !\n"
-        f"Recopie exactement le code morse affiché dans l'image ci-dessous.\n"
-        f"⚠️ Pas de copier-coller possible — c'est une image !\n"
-        f"✅ Réussis pour retrouver accès aux salons.",
-        file=discord.File(buf, filename="morse.png")
-    )
-    
-    # Couper l'accès aux autres salons
-    for channel in guild.channels:
-        if channel.id != salon.id:
-            try:
-                await channel.set_permissions(membre, view_channel=False, send_messages=False)
-            except:
-                pass
-    
-    await ctx.send(f"✅ {membre.mention} est en punition morse !")
-
-
-async def _liberer_membre_morse(guild, membre, resolved_by=None):
-    uid = str(membre.id)
-    if uid not in morse_punitions:
-        return
-    data = morse_punitions[uid]
-    salon = guild.get_channel(data['salon_id'])
-    if salon:
-        await salon.delete()
-    for channel in guild.channels:
-        try:
-            await channel.set_permissions(membre, overwrite=None)
-        except:
-            pass
-    del morse_punitions[uid]
-    extra = "annulée manuellement" if resolved_by else "code résolu"
-    _log_moderation('morse_fin', membre, resolved_by or guild.me, extra=extra)
-    save_data()
-    await send_log_message(
-        guild, LOG_MODERATION_CHANNEL_ID, "🔓 Fin de punition morse",
-        f"La punition morse de {membre.mention} est terminée ({extra}, par "
-        f"{(resolved_by.mention if resolved_by else 'auto')}).",
-        discord.Color.green(),
-    )
-    try:
-        await membre.send(f"✅ Ta punition morse sur **{guild.name}** est terminée !")
-    except:
-        pass
-
-
-@bot.command(name="annuler_morse", aliases=["amorse", "unmorse"])
-async def cmd_annuler_morse(ctx, membre: discord.Member):
-    if str(membre.id) not in morse_punitions:
-        return await ctx.send(f"❌ {membre.mention} n'est pas en punition morse.")
-    await _liberer_membre_morse(ctx.guild, membre, resolved_by=ctx.author)
-    await ctx.send(f"✅ Punition morse de {membre.mention} annulée.")
-    
 # =======================================================================
 # ======================== NOUVELLES FONCTIONNALITÉS ====================
 # =======================================================================
