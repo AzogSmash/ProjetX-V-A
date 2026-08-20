@@ -1872,7 +1872,7 @@ COMMAND_USAGE = {
     'lierbs':        '`!bslink <tag>` (alias `!lierbs`)\nEx : `!lierbs #2ABC123`',
     'bsprofil':      '`!bsprofil [@membre]`\nEx : `!bsprofil` · `!bs @Joueur`',
     'bs':            '`!bsprofil [@membre]` (alias `!bs`)\nEx : `!bs @Joueur`',
-    'bs_roles':      '`!bs_roles trophees <min> @role` · `!bs_roles ranked <min_points> @role` · `!bs_roles liste` *(Admin)*',
+    'bs_roles':      '`!bs_roles trophees <min> @role` · `!bs_roles ranked <min_points> @role` · `!bs_roles liste` · `!bs_roles_panel` (version panel) *(Admin)*',
     'bs_famille':    '`!bs_famille ajouter <tag_clan>` · `!bs_famille retirer <tag_clan>` · `!bs_famille liste` *(Admin)*',
     'classement_trophees_famille': '`!classement_trophees_famille` (alias `!ctf`, `!top_famille`)',
     'evolution_trophees': '`!evolution_trophees` (alias `!evo`, `!evolution`) — Progression de trophées de la saison BS en cours, sélecteur de saisons passées et filtre par clan',
@@ -2073,6 +2073,7 @@ def _build_help_categories(ctx):
                  "*(Admin)* `!bs_roles trophees <min> @role` — Palier de trophées → rôle\n"
                  "*(Admin)* `!bs_roles ranked <min_points> @role` — Palier de points classé → rôle\n"
                  "*(Admin)* `!bs_roles liste` — Voir la configuration\n"
+                 "*(Admin)* `!bs_roles_panel` — Même chose via un panel interactif (menus + sélection de rôle)\n"
                  "`!classement_trophees_famille` (`!ctf`) — Classement trophées de la famille de clans\n"
                  "`!evolution_trophees` (`!evo`) — Progression de trophées depuis le début de la saison BS en cours (+ historique des saisons passées, par membre/clan)\n"
                  "`!classement_ranked_famille` (`!crf`) — Classement classé de la famille (mis à jour ttes les 4h)\n"
@@ -13648,7 +13649,8 @@ async def cmd_bs_roles(ctx, action: str = None, *, reste: str = None):
         "`!bs_roles trophees <min> @role` — définit un palier de trophées\n"
         "`!bs_roles ranked <min_points> @role` — définit un palier de points classé\n"
         "`!bs_roles trophees|ranked <min> retirer` — supprime un palier\n"
-        "`!bs_roles liste` — affiche la configuration actuelle\n\n"
+        "`!bs_roles liste` — affiche la configuration actuelle\n"
+        "💡 `!bs_roles_panel` — même chose via un panel avec menus/RoleSelect\n\n"
         f"**Repères points classé :** {ranked_ref}\n"
         "Un palier couvre tout jusqu'au suivant configuré : ex. `!bs_roles ranked 3000 @Diamant` "
         "couvre tout Diamant (I à III) si tu n'as qu'un seul rôle pour ce rang."
@@ -13707,6 +13709,194 @@ async def cmd_bs_roles(ctx, action: str = None, *, reste: str = None):
     save_data()
     unit = "🏆" if category == 'trophies' else "pts"
     await ctx.send(f"✅ ≥ {int(key):,} {unit} → {role.mention}", allowed_mentions=discord.AllowedMentions.none())
+
+
+def _bs_role_config_embed(guild) -> discord.Embed:
+    def _line(mn, rid, ranked: bool) -> str:
+        role = guild.get_role(rid)
+        target = role.mention if role else "`rôle supprimé`"
+        return f"≥ {int(mn):,} pts ({_ranked_tier_name(int(mn))}) → {target}" if ranked else f"≥ {int(mn):,} 🏆 → {target}"
+
+    trophy_items = sorted(bs_role_config['trophies'].items(), key=lambda x: int(x[0]))
+    rank_items = sorted(bs_role_config['ranked'].items(), key=lambda x: int(x[0]))
+    trophy_desc = "\n".join(_line(mn, rid, False) for mn, rid in trophy_items) or "*Aucun palier configuré.*"
+    rank_desc = "\n".join(_line(mn, rid, True) for mn, rid in rank_items) or "*Aucun palier configuré.*"
+
+    embed = discord.Embed(title="🎮 Config rôles Brawl Stars", color=0xf1c40f)
+    embed.add_field(name="🏆 Trophées", value=trophy_desc[:1024], inline=False)
+    embed.add_field(name="🎖️ Classé", value=rank_desc[:1024], inline=False)
+    embed.set_footer(text="Choisis une catégorie puis un palier, ou ajoute un palier de trophées. Un rôle classé couvre tout le rang jusqu'au prochain palier configuré.")
+    return embed
+
+
+class BsTrophyRoleAssignView(discord.ui.View):
+    """Étape 2 de l'ajout d'un palier trophées (un Modal ne peut pas contenir
+    de RoleSelect) — non persistante, instance fraîche par interaction, même
+    principe que AbsenceTypeSelectView : jamais partagée entre utilisateurs."""
+
+    def __init__(self, key: str):
+        super().__init__(timeout=180)
+        self.key = key
+        self.role_select = discord.ui.RoleSelect(placeholder="Choisir le rôle à attribuer…")
+        self.role_select.callback = self._on_role
+        self.add_item(self.role_select)
+
+    async def _on_role(self, interaction: discord.Interaction):
+        role = self.role_select.values[0]
+        bs_role_config['trophies'][self.key] = role.id
+        save_data()
+        await interaction.response.edit_message(
+            content=f"✅ ≥ {int(self.key):,} 🏆 → {role.mention}\nRelance `!bs_roles_panel` pour voir la config à jour.",
+            view=None, allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
+class AddTrophyThresholdModal(discord.ui.Modal, title="Ajouter un palier de trophées"):
+    threshold_input = discord.ui.TextInput(label="Seuil de trophées (ex: 100000)", placeholder="100000", max_length=10)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.threshold_input.value).replace(' ', '').replace(',', '').replace('.', '')
+        try:
+            key = str(int(raw))
+        except ValueError:
+            return await interaction.response.send_message("❌ Le seuil doit être un nombre entier.", ephemeral=True)
+        if key in bs_role_config['trophies']:
+            return await interaction.response.send_message(
+                f"❌ Un palier existe déjà pour ≥ {int(key):,} 🏆. Modifie-le depuis `!bs_roles_panel`.", ephemeral=True,
+            )
+        view = BsTrophyRoleAssignView(key)
+        await interaction.response.send_message(
+            f"Seuil **≥ {int(key):,} 🏆** — choisis maintenant le rôle à attribuer :", view=view, ephemeral=True,
+        )
+
+
+class BsRolesView(discord.ui.View):
+    """Config interactive des paliers trophées/classé → rôle Discord, même esprit
+    que SetTicketView (menu + select natif). Les paliers classé listent les 22
+    sous-paliers de RANKED_TIERS, mais un seul rôle configuré sur le 1er
+    sous-palier d'un rang (ex. Or 1 = 1500 pts) couvre tout le rang jusqu'au
+    prochain palier configuré — pas besoin d'un rôle par sous-palier (cf.
+    !bs_roles). Les paliers trophées sont arbitraires (pas de barème fixe côté
+    jeu) donc listés à partir de ce qui est déjà configuré, avec un bouton
+    dédié pour en ajouter un nouveau."""
+
+    def __init__(self, guild, mode: str = 'trophies', selected_key: str | None = None):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.mode = mode if mode in ('trophies', 'ranked') else 'trophies'
+
+        mode_options = [
+            discord.SelectOption(label="🏆 Trophées", value='trophies', default=(self.mode == 'trophies')),
+            discord.SelectOption(label="🎖️ Classé", value='ranked', default=(self.mode == 'ranked')),
+        ]
+        self.mode_select = discord.ui.Select(placeholder="Choisir une catégorie…", options=mode_options, row=0)
+        self.mode_select.callback = self._on_mode
+        self.add_item(self.mode_select)
+
+        if self.mode == 'ranked':
+            key_values = {str(pts) for pts, _name in RANKED_TIERS}
+            key_options = [
+                discord.SelectOption(
+                    label=f"{name} — {pts:,} pts"[:100], value=str(pts),
+                    default=(selected_key == str(pts)),
+                    description=self._current_role_desc('ranked', str(pts)),
+                )
+                for pts, name in RANKED_TIERS
+            ]
+            key_placeholder = "🎖️ Choisir un palier classé…"
+        else:
+            trophy_keys = sorted(bs_role_config['trophies'].items(), key=lambda x: int(x[0]))
+            key_values = {mn for mn, _rid in trophy_keys}
+            key_options = [
+                discord.SelectOption(
+                    label=f"≥ {int(mn):,} 🏆"[:100], value=mn, default=(selected_key == mn),
+                    description=self._current_role_desc('trophies', mn),
+                )
+                for mn, _rid in trophy_keys
+            ]
+            key_placeholder = "🏆 Choisir un palier trophées…" if key_options else "Aucun palier — ajoute-en un ci-dessous ➕"
+
+        self.selected_key = selected_key if selected_key in key_values else None
+        if key_options:
+            self.key_select = discord.ui.Select(placeholder=key_placeholder, options=key_options[:25], row=1)
+            self.key_select.callback = self._on_key
+            self.add_item(self.key_select)
+
+        if self.selected_key:
+            self.role_select = discord.ui.RoleSelect(placeholder="Choisir le rôle à attribuer…", row=2)
+            self.role_select.callback = self._on_role
+            self.add_item(self.role_select)
+
+            remove_btn = discord.ui.Button(
+                label="🗑️ Retirer ce palier", style=discord.ButtonStyle.danger, row=3,
+                disabled=(self.selected_key not in bs_role_config[self.mode]),
+            )
+            remove_btn.callback = self._on_remove
+            self.add_item(remove_btn)
+
+        if self.mode == 'trophies':
+            add_btn = discord.ui.Button(label="➕ Ajouter un palier", style=discord.ButtonStyle.secondary, row=3)
+            add_btn.callback = self._on_add
+            self.add_item(add_btn)
+
+    def _current_role_desc(self, mode: str, key: str) -> str:
+        rid = bs_role_config[mode].get(key)
+        role = self.guild.get_role(rid) if rid else None
+        if role:
+            return f"Actuel : @{role.name}"[:100]
+        return "Rôle supprimé" if rid else "Non configuré"
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not (interaction.user.guild_permissions.administrator or is_bot_owner(interaction.user)):
+            await interaction.response.send_message("❌ Réservé aux admins/owner.", ephemeral=True)
+            return False
+        return True
+
+    async def _on_mode(self, interaction: discord.Interaction):
+        view = BsRolesView(self.guild, self.mode_select.values[0])
+        await interaction.response.edit_message(
+            embed=_bs_role_config_embed(self.guild), view=view, allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _on_key(self, interaction: discord.Interaction):
+        view = BsRolesView(self.guild, self.mode, self.key_select.values[0])
+        await interaction.response.edit_message(
+            embed=_bs_role_config_embed(self.guild), view=view, allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _on_role(self, interaction: discord.Interaction):
+        role = self.role_select.values[0]
+        bs_role_config[self.mode][self.selected_key] = role.id
+        save_data()
+        view = BsRolesView(self.guild, self.mode, self.selected_key)
+        await interaction.response.edit_message(
+            content=f"✅ Palier mis à jour → {role.mention}",
+            embed=_bs_role_config_embed(self.guild), view=view, allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _on_remove(self, interaction: discord.Interaction):
+        bs_role_config[self.mode].pop(self.selected_key, None)
+        save_data()
+        view = BsRolesView(self.guild, self.mode)
+        await interaction.response.edit_message(
+            content=f"✅ Palier retiré ({'trophées' if self.mode == 'trophies' else 'classé'}).",
+            embed=_bs_role_config_embed(self.guild), view=view, allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _on_add(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(AddTrophyThresholdModal())
+
+
+@bot.command(name="bs_roles_panel", aliases=["bsrolespanel"])
+async def cmd_bs_roles_panel(ctx):
+    """Interface interactive (menus + RoleSelect natif) pour configurer les
+    paliers trophées/classé → rôle, en alternative à !bs_roles."""
+    if not ctx.guild:
+        return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
+    if not (ctx.author.guild_permissions.administrator or is_bot_owner(ctx.author)):
+        return await ctx.send("❌ Réservé aux administrateurs.")
+    view = BsRolesView(ctx.guild)
+    await ctx.send(embed=_bs_role_config_embed(ctx.guild), view=view, allowed_mentions=discord.AllowedMentions.none())
 
 
 @tasks.loop(hours=1)
