@@ -54,18 +54,38 @@ TICKET_CATEGORY_ID = 1513110806382772407  # catégorie Discord par défaut où s
 TICKET_CATEGORY_IDS: dict[str, int] = {}
 LOG_TICKET_CHANNEL_ID = 1513117932228706374  # salon #logs-ticket
 # Mêmes IDs de rôle que STAFF_ROLE_IDS côté site (src/lib/access.ts) — pour
-# que "staff" veuille dire la même chose partout.
+# que "staff" veuille dire la même chose partout. Reste le fallback pour un
+# motif custom (ajouté via !set_ticket) qui n'a pas d'entrée dédiée ci-dessous.
 TICKET_STAFF_ROLE_IDS = {1513110804595998788, 1516514610881237084}
-# Les incidents serveur ne concernent que le staff Discord (1516514610881237084)
-# — le staff des clans (vice-présidents etc., 1513110804595998788) gère les
-# candidatures/recrutements mais pas les incidents généraux (demande du
-# 17/08/2026). Utilisé pour les overwrites du salon ET les mentions de
-# bienvenue, voir _ticket_staff_role_ids_for.
-TICKET_INCIDENT_STAFF_ROLE_IDS = {1516514610881237084}
+
+# Nouvelle hiérarchie de rôles (demande du 20/08/2026, voir sondage #général).
+ROLE_FONDA_ID = 1513110804621430888
+ROLE_ADMIN_ID = 1539949380881358898  # ex-"Technicien Discord", renommé Admin
+ROLE_MODERATEUR_ID = 1516514610881237084  # = Staff Discord (déjà dans TICKET_STAFF_ROLE_IDS)
+ROLE_RECRUTEUR_ID = 1517971980299534517
+ROLE_PRESIDENT_ID = 1513110804621430889
+ROLE_VICE_PRESIDENT_ID = 1513110804621430887
+ROLE_CONSEILLER_ID = 1513110804621430886
+
+# Qui voit le salon d'un ticket, par motif (clé de TICKET_CATEGORIES) — les
+# incidents serveur et les candidatures générales ne concernent que la ligne
+# Fonda/Admin/Modérateur, pas le staff de club ; les candidatures club
+# concernent le staff de club + les recruteurs, pas la modération générale.
+# "other" reste sur TICKET_STAFF_ROLE_IDS (motif générique "à voir"), et tout
+# motif custom ajouté via !set_ticket qui n'a pas d'entrée ici retombe dessus
+# aussi (voir _ticket_staff_role_ids_for).
+TICKET_CATEGORY_STAFF_ROLE_IDS: dict[str, set[int]] = {
+    "candidature": {ROLE_FONDA_ID, ROLE_ADMIN_ID, ROLE_MODERATEUR_ID},
+    "club_recruitment": {ROLE_PRESIDENT_ID, ROLE_VICE_PRESIDENT_ID, ROLE_CONSEILLER_ID, ROLE_RECRUTEUR_ID},
+    "incident": {ROLE_FONDA_ID, ROLE_ADMIN_ID, ROLE_MODERATEUR_ID},
+}
+# Alias conservé pour la clarté du code appelant (même règle que les incidents
+# côté site, voir _is_incident_staff dans keep_alive.py).
+TICKET_INCIDENT_STAFF_ROLE_IDS = TICKET_CATEGORY_STAFF_ROLE_IDS["incident"]
 
 
 def _ticket_staff_role_ids_for(category: str) -> set[int]:
-    return TICKET_INCIDENT_STAFF_ROLE_IDS if category == "incident" else TICKET_STAFF_ROLE_IDS
+    return TICKET_CATEGORY_STAFF_ROLE_IDS.get(category, TICKET_STAFF_ROLE_IDS)
 
 
 # Motifs proposés dans le panel de ticket (!ticket_panel) — clé -> libellé affiché
