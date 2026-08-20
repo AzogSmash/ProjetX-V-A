@@ -2142,6 +2142,7 @@ def _build_help_categories(ctx):
                      "(`admin`/`moderation`/`casino`/`general`/`giveaway`/`ticket`) · `!set_logs liste` pour voir la config\n"
                      "`!lock` / `!unlock` — Verrouiller un salon\n"
                      "`!commandes_admin` — Index complet des commandes admin/modération\n"
+                     "`!annonce_site [message_id]` — Poste l'annonce du site par le bot (et supprime l'ancien message si un ID est donné)\n"
                      "\n**Ranked 1v1 :**\n"
                      "`!ranked_sanction @m` — Valider un signalement (réputation, ban auto si trop bas)\n"
                      "`!signalements` — Panel listant les signalements non résolus (sanctionner/rejeter, sans avoir à connaître le membre à l'avance)\n"
@@ -2589,6 +2590,52 @@ async def cmd_excuser_relance_tag(ctx):
             pass
         await asyncio.sleep(2)
     await ctx.send(f"✅ Excuse envoyée à {sent}/{len(missing)} membres.")
+
+
+@bot.command(name="annonce_site", aliases=["maj_annonce_site", "repost_site"])
+async def cmd_annonce_site(ctx, message_id: int = None):
+    """Remplace l'annonce du site web (postée manuellement) par une version
+    postée par le bot, plus complète — usage ponctuel dans #site-web.
+    Si message_id est fourni (clic droit sur le message > Copier l'ID lien,
+    mode développeur requis), le message correspondant DANS CE SALON est
+    supprimé avant le repost ; sinon la nouvelle annonce est juste postée
+    à la suite, sans rien supprimer — la suppression n'est jamais automatique
+    par défaut, on ne devine pas quel message effacer."""
+    if not (ctx.author.guild_permissions.administrator or is_bot_owner(ctx.author)):
+        return await ctx.send("❌ Réservé aux administrateurs.")
+
+    if message_id is not None:
+        try:
+            old = await ctx.channel.fetch_message(message_id)
+            await old.delete()
+        except discord.NotFound:
+            await ctx.send("⚠️ Message introuvable dans ce salon (ID invalide, ou déjà supprimé) — je poste quand même la nouvelle annonce.")
+        except discord.Forbidden:
+            await ctx.send("⚠️ Permission manquante pour supprimer ce message — je poste quand même la nouvelle annonce.")
+
+    site_url = os.environ.get("SITE_URL") or "https://site-projet-x-communaute-brawl-star.vercel.app"
+    embed = discord.Embed(
+        title="🌐 Site officiel de Projet X",
+        url=site_url,
+        description=(
+            "Bienvenue sur le site officiel de **Projet X** ! Toute la communauté au même endroit :\n\n"
+            "🏆 Classements trophées & classé de la famille de clans\n"
+            "⚔️ Suivi du 1v1 classé interne au serveur\n"
+            "🎯 Meilleurs builds recommandés par le staff, brawler par brawler\n"
+            "👥 Détail des clans et de leurs membres\n"
+            "📈 Évolution des trophées, saison par saison\n"
+            "🎫 Ouvrir un ticket et suivre son historique"
+        ),
+        color=0x3498db,
+    )
+    embed.add_field(name="🔗 Accéder au site", value=site_url, inline=False)
+    embed.set_footer(text="Pense à le consulter régulièrement pour ne rater aucune nouveauté !")
+    await ctx.send(embed=embed)
+
+    try:
+        await ctx.message.delete()
+    except (discord.Forbidden, discord.NotFound):
+        pass
 
 
 @bot.command(name="bs_stats_liaison", aliases=["bs_lies", "stats_bs_link"])
