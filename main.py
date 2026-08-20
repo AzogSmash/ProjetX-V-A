@@ -1750,7 +1750,7 @@ ADMIN_LOCKED_CMDS = {
     'freeze_crypto', 'addcoins', 'removecoins', 'tournois', 'prix_tournoi',
     'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter', 'tournoi_deplacer',
     'punition', 'annuler_punition', 'set_admin_log', 'set_logs',
-    'ranked_sanction', 'ranked_ajuster', 'ranked_set', 'reset_casino', 'reset_duels', 'ranked_liberer',
+    'ranked_sanction', 'signalements', 'ranked_ajuster', 'ranked_set', 'reset_casino', 'reset_duels', 'ranked_liberer',
     'casino_ban', 'casino_unban', 'casino_pause', 'casino_resume', 'ticket_panel', 'set_ticket', 'permission',
 }
 
@@ -1907,7 +1907,7 @@ COMMAND_USAGE = {
     'unban':         '`!unban <ID ou @membre>`',
     'clear':         '`!clear <nombre>` — Supprimer des messages\nEx : `!clear 20`',
     'rename':        '`!rename @membre <nouveau pseudo>`\nEx : `!rename @Joueur NouveauNom`',
-    'giverole':      '`!giverole @membre <nom du rôle>`\nEx : `!giverole @Joueur VIP`',
+    'giverole':      '`!giverole @membre <@role>`\nEx : `!giverole @Joueur @VIP`',
     'sanctions':     '`!sanctions @membre`',
     'historique_moderation': '`!historique_moderation [@membre]`',
     'say':           '`!say <message>`',
@@ -2081,6 +2081,7 @@ def _build_help_categories(ctx):
                  "`!classement_ranked_famille` (`!crf`) — Classement classé de la famille (mis à jour ttes les 4h)\n"
                  "`!famille_stats` (`!fs`) — Vue d'ensemble : membres, trophées, répartition par clan/rang\n"
                  "*(Admin)* `!bs_famille ajouter/retirer <tag_clan>` — Gérer les clans de la famille\n"
+                 "*(Admin)* `!bs_famille_panel` — Même chose via un panel (select pour retirer + modal pour ajouter)\n"
                  "Chaque clan ajouté obtient aussi sa propre commande (ex : `!projetx`) — voir `!bs_famille liste`"))
     cats.append(("tickets", "🎫 Tickets",
                  "Contacter le staff (candidature, recrutement club, incident, autre)",
@@ -2143,6 +2144,7 @@ def _build_help_categories(ctx):
                      "`!commandes_admin` — Index complet des commandes admin/modération\n"
                      "\n**Ranked 1v1 :**\n"
                      "`!ranked_sanction @m` — Valider un signalement (réputation, ban auto si trop bas)\n"
+                     "`!signalements` — Panel listant les signalements non résolus (sanctionner/rejeter, sans avoir à connaître le membre à l'avance)\n"
                      "`!ranked_ajuster @m <+/-N>` — Ajuster les points d'un joueur\n"
                      "`!ranked_set @m <points> <V> <D>` — Fixer précisément points/V/D\n"
                      "`!ranked_liberer @m` — Débloquer un défi/duel en attente coincé\n"
@@ -2908,19 +2910,7 @@ async def addrole(ctx, *, role_name: str = None):
 
 @bot.command(name="giverole")
 @commands.has_permissions(manage_roles=True)
-async def giverole(ctx, member: discord.Member, *, role_name: str):
-    role = discord.utils.get(ctx.guild.roles, name=role_name)
-    if role is None:
-        await ctx.send(f"❌ Le rôle '{role_name}' n'existe pas.")
-        fields = [
-            ("Demandé par", ctx.author.mention, True),
-            ("Membre", member.mention, True),
-            ("Nom du rôle", role_name, True),
-            ("Raison", "Le rôle spécifié n'existe pas.", False)
-        ]
-        await send_log_message(ctx.guild, LOG_GENERAL_CHANNEL_ID, "ℹ️ Rôle Inexistant (Giverole)", f"{ctx.author.mention} a tenté de donner un rôle inexistant à {member.mention}.", discord.Color.light_grey(), fields)
-        return
-
+async def giverole(ctx, member: discord.Member, *, role: discord.Role):
     if role in member.roles:
         await ctx.send(f"ℹ️ {member.mention} a déjà le rôle **{role.name}**.")
         fields = [
@@ -12186,7 +12176,7 @@ async def on_message(message):
             "sanctions": "**!sanctions [@membre]**\nAffiche le nombre de warns et mutes d'un membre.",
             "historique_moderation": "**!historique_moderation [@membre]** (`!modlog`)\nAffiche le détail chronologique des sanctions d'un membre (warns, mutes, bans, punitions...), avec raison, modérateur et date.",
             "addrole": "**!addrole nom_du_rôle**\nCrée un nouveau rôle sur le serveur.",
-            "giverole": "**!giverole @membre nom_du_rôle**\nDonne un rôle spécifique à un membre.",
+            "giverole": "**!giverole @membre @role**\nDonne un rôle spécifique à un membre.",
             "construction": "**!construction**\nCrée une architecture complète de serveur communautaire (créateur du bot uniquement).",
             "nuke": "**!nuke**\n⚠️ DANGER : Supprime TOUS les salons du serveur (créateur du bot uniquement).",
             "lock": "**!lock**\nVerrouille le salon actuel (empêche d'écrire).",
@@ -12553,12 +12543,15 @@ async def cmd_classement_tournoi(ctx):
 # ── Config salons de logs ─────────────────────────────────────────────────
 @bot.command(name="set_admin_log", aliases=["admin_log"])
 async def cmd_set_admin_log(ctx, channel: discord.TextChannel = None):
+    """Redondant avec `!set_logs admin` (même variable ADMIN_LOG_CHANNEL_ID,
+    voir LOG_CATEGORY_VARS) — gardée pour compatibilité mais `!set_logs`
+    couvre ce cas et les 6 autres catégories via un panel."""
     global ADMIN_LOG_CHANNEL_ID
     if channel is None:
         channel = ctx.channel
     ADMIN_LOG_CHANNEL_ID = channel.id
     save_data()
-    await ctx.send(f"✅ Logs admin configurés dans {channel.mention}.")
+    await ctx.send(f"✅ Logs admin configurés dans {channel.mention}.\n💡 `!set_logs` gère ce salon (et les autres catégories de logs) via un panel.")
 
 
 LOG_CATEGORY_VARS = {
@@ -13963,7 +13956,8 @@ async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
         "**Usage :**\n"
         "`!bs_famille ajouter <tag_clan>` — ajoute un clan à la famille\n"
         "`!bs_famille retirer <tag_clan>` — retire un clan\n"
-        "`!bs_famille liste` — affiche les clans configurés"
+        "`!bs_famille liste` — affiche les clans configurés\n"
+        "💡 `!bs_famille_panel` — même chose via un panel (select + modal)"
     )
     if action is None or action.lower() not in ('ajouter', 'add', 'retirer', 'remove', 'liste'):
         return await ctx.send(usage)
@@ -14075,6 +14069,91 @@ async def _apply_bs_famille_remove(tag: str) -> tuple[dict | None, str | None]:
     if guild:
         await bot.tree.sync(guild=guild)
     return {"tag": clean, "name": entry['name'], "slug": entry['slug']}, None
+
+
+def _bs_famille_embed(family_clubs: list[dict]) -> discord.Embed:
+    embed = discord.Embed(title="🏠 Clans de la famille Brawl Stars", color=0xf1c40f)
+    if family_clubs:
+        embed.description = "\n".join(
+            f"**{e['name']}** — `#{e['tag']}` — `!{e['slug']}`" + (f" / `!{e['alias']}`" if e.get('alias') else "")
+            for e in family_clubs
+        )
+    else:
+        embed.description = "*Aucun clan configuré.*"
+    embed.set_footer(text="Choisis un clan à retirer dans le menu, ou ajoute-en un nouveau.")
+    return embed
+
+
+class AddFamilyClubModal(discord.ui.Modal, title="Ajouter un clan à la famille"):
+    tag_input = discord.ui.TextInput(label="Tag du clan (avec ou sans #)", placeholder="#2ABC123", max_length=20)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Le fetch vers l'API Brawl Stars peut prendre plusieurs secondes — au-delà
+        # des 3s d'ack Discord, d'où le defer avant l'appel (voir _apply_bs_famille_add).
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        data, err = await _apply_bs_famille_add(str(self.tag_input.value))
+        if err:
+            return await interaction.followup.send(f"❌ {err}", ephemeral=True)
+        await interaction.followup.send(
+            f"✅ **{data['name']}** (`#{data['tag']}`) ajouté — {data['member_count']} membres.\n"
+            f"Commande dédiée : `!{data['slug']}` (alias `!{data['alias']}`).\n"
+            f"Relance `!bs_famille_panel` pour voir la liste à jour.",
+            ephemeral=True,
+        )
+
+
+class BsFamilleView(discord.ui.View):
+    """Config interactive des clans de la famille — select natif pour retirer,
+    modal pour ajouter (pas de Select Discord possible pour un tag de clan en
+    jeu, contrairement à un rôle/salon)."""
+
+    def __init__(self, family_clubs: list[dict]):
+        super().__init__(timeout=300)
+        self.family_clubs = family_clubs
+
+        if family_clubs:
+            options = [
+                discord.SelectOption(label=f"{e['name']} (#{e['tag']})"[:100], value=e['tag'])
+                for e in family_clubs[:25]
+            ]
+            self.remove_select = discord.ui.Select(placeholder="🗑️ Choisir un clan à retirer…", options=options, row=0)
+            self.remove_select.callback = self._on_remove
+            self.add_item(self.remove_select)
+
+        add_btn = discord.ui.Button(label="➕ Ajouter un clan", style=discord.ButtonStyle.secondary, row=1)
+        add_btn.callback = self._on_add
+        self.add_item(add_btn)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not (interaction.user.guild_permissions.administrator or is_bot_owner(interaction.user)):
+            await interaction.response.send_message("❌ Réservé aux admins/owner.", ephemeral=True)
+            return False
+        return True
+
+    async def _on_remove(self, interaction: discord.Interaction):
+        tag = self.remove_select.values[0]
+        data, err = await _apply_bs_famille_remove(tag)
+        if err:
+            return await interaction.response.send_message(f"❌ {err}", ephemeral=True)
+        family_clubs = db_bs.list_family_clubs()
+        view = BsFamilleView(family_clubs)
+        await interaction.response.edit_message(
+            content=f"✅ **{data['name']}** (`#{data['tag']}`) retiré, commande `!{data['slug']}` supprimée.",
+            embed=_bs_famille_embed(family_clubs), view=view,
+        )
+
+    async def _on_add(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(AddFamilyClubModal())
+
+
+@bot.command(name="bs_famille_panel", aliases=["bsfamillepanel"])
+async def cmd_bs_famille_panel(ctx):
+    """Interface interactive (select + modal) pour gérer les clans de la
+    famille, en alternative à !bs_famille ajouter/retirer."""
+    if not (ctx.author.guild_permissions.administrator or is_bot_owner(ctx.author)):
+        return await ctx.send("❌ Réservé aux administrateurs.")
+    family_clubs = db_bs.list_family_clubs()
+    await ctx.send(embed=_bs_famille_embed(family_clubs), view=BsFamilleView(family_clubs))
 
 
 class BsFamilyLeaderboardView(discord.ui.View):
@@ -15474,6 +15553,162 @@ async def cmd_ranked_sanction(ctx, joueur: discord.Member):
             f"Réputation → {prof['reputation']}/100.{banned_msg}",
             color=0xc0392b, author=ctx.author
         )
+
+
+def _pending_ranked_reports(guild_id: int | None):
+    """Liste (target_uid, index, report) des signalements non résolus, du plus
+    ancien au plus récent — guild_id optionnel pour ne montrer que ceux du
+    serveur courant (un report sans guild_id enregistré passe quand même,
+    même logique que cmd_ranked_sanction qui ne filtre pas non plus par serveur)."""
+    out = []
+    for target_uid, reports in ranked_reports.items():
+        for i, r in enumerate(reports):
+            if r.get('resolved'):
+                continue
+            if guild_id is not None and r.get('guild_id') not in (None, guild_id):
+                continue
+            out.append((target_uid, i, r))
+    out.sort(key=lambda t: t[2].get('created_at', ''))
+    return out
+
+
+def _ranked_reports_embed(guild, pending) -> discord.Embed:
+    embed = discord.Embed(title="🚩 Signalements 1v1 en attente", color=0xe67e22)
+    if not pending:
+        embed.description = "*Aucun signalement en attente.*"
+        return embed
+    lines = []
+    for target_uid, _i, r in pending[:25]:
+        target = guild.get_member(int(target_uid)) if guild else None
+        reporter = guild.get_member(r['reporter']) if guild else None
+        target_name = target.display_name if target else f"ID {target_uid}"
+        reporter_name = reporter.display_name if reporter else f"ID {r['reporter']}"
+        lines.append(f"**{target_name}** — signalé par {reporter_name} : {r['reason'][:80]}")
+    embed.description = "\n".join(lines)
+    embed.set_footer(text="Choisis un signalement dans le menu pour le traiter.")
+    return embed
+
+
+class RankedReportActionView(discord.ui.View):
+    """Étape 2 : sanctionner ou rejeter le signalement choisi dans RankedReportsView."""
+
+    def __init__(self, guild, target_uid: str, index: int):
+        super().__init__(timeout=180)
+        self.guild = guild
+        self.target_uid = target_uid
+        self.index = index
+
+        sanction_btn = discord.ui.Button(label="⚖️ Sanctionner", style=discord.ButtonStyle.danger)
+        sanction_btn.callback = self._on_sanction
+        self.add_item(sanction_btn)
+
+        reject_btn = discord.ui.Button(label="🗑️ Rejeter (sans pénalité)", style=discord.ButtonStyle.secondary)
+        reject_btn.callback = self._on_reject
+        self.add_item(reject_btn)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not (interaction.user.guild_permissions.administrator or is_bot_owner(interaction.user)):
+            await interaction.response.send_message("❌ Réservé aux admins/owner.", ephemeral=True)
+            return False
+        return True
+
+    def _report(self):
+        reports = ranked_reports.get(self.target_uid, [])
+        return reports[self.index] if self.index < len(reports) else None
+
+    async def _refresh(self, interaction: discord.Interaction, content: str):
+        pending = _pending_ranked_reports(self.guild.id if self.guild else None)
+        await interaction.response.edit_message(
+            content=content, embed=_ranked_reports_embed(self.guild, pending),
+            view=RankedReportsView(self.guild, pending), allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _on_sanction(self, interaction: discord.Interaction):
+        report = self._report()
+        if not report or report.get('resolved'):
+            return await self._refresh(interaction, "ℹ️ Ce signalement a déjà été traité.")
+        report['resolved'] = True
+        prof = _r1v1_profile(self.target_uid)
+        prof['reputation'] = max(0, prof['reputation'] - RANKED_REP_PENALTY)
+        banned_msg = ""
+        if prof['reputation'] <= RANKED_REP_BAN_THRESHOLD:
+            until = datetime.now() + timedelta(hours=RANKED_REP_BAN_HOURS)
+            prof['banned_until'] = until.isoformat()
+            banned_msg = f"\n🚫 Réputation trop basse : exclu des 1v1 classés pendant {RANKED_REP_BAN_HOURS}h."
+        save_data()
+        member = self.guild.get_member(int(self.target_uid)) if self.guild else None
+        name = member.mention if member else f"<@{self.target_uid}>"
+        if self.guild:
+            await _admin_log(
+                self.guild, "⚖️ Sanction 1v1 appliquée",
+                f"{interaction.user.mention} a validé un signalement contre {name} (via panel). "
+                f"Réputation → {prof['reputation']}/100.{banned_msg}",
+                color=0xc0392b, author=interaction.user,
+            )
+        await self._refresh(interaction, f"✅ Signalement traité pour {name}. Réputation : **{prof['reputation']}/100**.{banned_msg}")
+
+    async def _on_reject(self, interaction: discord.Interaction):
+        report = self._report()
+        if not report or report.get('resolved'):
+            return await self._refresh(interaction, "ℹ️ Ce signalement a déjà été traité.")
+        report['resolved'] = True
+        save_data()
+        member = self.guild.get_member(int(self.target_uid)) if self.guild else None
+        name = member.mention if member else f"<@{self.target_uid}>"
+        await self._refresh(interaction, f"🗑️ Signalement rejeté pour {name} (aucune pénalité appliquée).")
+
+
+class RankedReportsView(discord.ui.View):
+    """Panel listant les signalements 1v1 non résolus, en alternative à
+    !ranked_sanction @membre qui exige de déjà savoir qui a un signalement
+    en attente — même esprit que AbsenceStaffPanelView."""
+
+    def __init__(self, guild, pending):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.pending = pending
+
+        if pending:
+            options = []
+            for target_uid, i, r in pending[:25]:
+                member = guild.get_member(int(target_uid)) if guild else None
+                name = member.display_name if member else f"ID {target_uid}"
+                options.append(discord.SelectOption(label=name[:100], description=r['reason'][:100], value=f"{target_uid}:{i}"))
+            self.report_select = discord.ui.Select(placeholder="🚩 Choisir un signalement à traiter…", options=options, row=0)
+            self.report_select.callback = self._on_select
+            self.add_item(self.report_select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not (interaction.user.guild_permissions.administrator or is_bot_owner(interaction.user)):
+            await interaction.response.send_message("❌ Réservé aux admins/owner.", ephemeral=True)
+            return False
+        return True
+
+    async def _on_select(self, interaction: discord.Interaction):
+        target_uid, idx = self.report_select.values[0].split(":")
+        report = ranked_reports.get(target_uid, [])[int(idx)]
+        member = self.guild.get_member(int(target_uid)) if self.guild else None
+        name = member.mention if member else f"<@{target_uid}>"
+        embed = discord.Embed(
+            title="🚩 Signalement sélectionné", color=0xe67e22,
+            description=f"**Joueur :** {name}\n**Signalé par :** <@{report['reporter']}>\n**Raison :** {report['reason']}",
+        )
+        await interaction.response.edit_message(
+            embed=embed, view=RankedReportActionView(self.guild, target_uid, int(idx)),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
+@bot.command(name="signalements", aliases=["signalements_1v1", "ranked_sanction_panel"])
+async def cmd_signalements(ctx):
+    """Panel listant les signalements 1v1 non résolus avec Sanctionner/Rejeter,
+    en alternative à !ranked_sanction @membre. Réservé au propriétaire du
+    serveur / rôle autorisé via !permission, comme !ranked_sanction (voir
+    ADMIN_LOCKED_CMDS) — pas de check ici, géré par le gate global."""
+    if not ctx.guild:
+        return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
+    pending = _pending_ranked_reports(ctx.guild.id)
+    await ctx.send(embed=_ranked_reports_embed(ctx.guild, pending), view=RankedReportsView(ctx.guild, pending))
 
 
 @bot.command(name="ranked_ajuster")
