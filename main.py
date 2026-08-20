@@ -2075,12 +2075,22 @@ def _build_help_categories(ctx):
                  "*(Admin)* `!bs_roles liste` — Voir la configuration\n"
                  "*(Admin)* `!bs_roles_panel` — Même chose via un panel interactif (menus + sélection de rôle)\n"
                  "*(Staff)* `!bs_stats_liaison` (`!bs_lies`) — Combien de membres ont lié leur compte\n"
+                 "*(Staff)* `!relancer_tag_bs` (`!bs_tag_relance`) — Forcer l'envoi immédiat du rappel MP aux membres sans tag lié\n"
                  "`!classement_trophees_famille` (`!ctf`) — Classement trophées de la famille de clans\n"
                  "`!evolution_trophees` (`!evo`) — Progression de trophées depuis le début de la saison BS en cours (+ historique des saisons passées, par membre/clan)\n"
                  "`!classement_ranked_famille` (`!crf`) — Classement classé de la famille (mis à jour ttes les 4h)\n"
                  "`!famille_stats` (`!fs`) — Vue d'ensemble : membres, trophées, répartition par clan/rang\n"
                  "*(Admin)* `!bs_famille ajouter/retirer <tag_clan>` — Gérer les clans de la famille\n"
                  "Chaque clan ajouté obtient aussi sa propre commande (ex : `!projetx`) — voir `!bs_famille liste`"))
+    cats.append(("tickets", "🎫 Tickets",
+                 "Contacter le staff (candidature, recrutement club, incident, autre)",
+                 "Utilise le panel posté dans le salon dédié : choisis un motif, un salon privé "
+                 "est créé automatiquement, avec le staff concerné mentionné dedans (le rôle "
+                 "mentionné dépend du motif — ex. incident → Staff Discord uniquement)\n"
+                 "*(Admin)* `!ticket_panel` — Poste le panel d'ouverture dans le salon courant\n"
+                 "*(Admin)* `!set_ticket` — Configure les motifs proposés et leur catégorie Discord de création\n"
+                 "*(Staff)* `!fermer_ticket` (`!close_ticket`) — Ferme le ticket du salon courant "
+                 "(délai optionnel), ou `!fermer_ticket #salon|<id>|@membre [raison]` depuis n'importe où"))
     cats.append(("absences", "🌴 Absences",
                  "Déclarer, consulter et gérer les absences",
                  "`!absence_panel` — Poste le panel de déclaration dans le salon courant "
