@@ -2074,6 +2074,7 @@ def _build_help_categories(ctx):
                  "*(Admin)* `!bs_roles ranked <min_points> @role` — Palier de points classé → rôle\n"
                  "*(Admin)* `!bs_roles liste` — Voir la configuration\n"
                  "*(Admin)* `!bs_roles_panel` — Même chose via un panel interactif (menus + sélection de rôle)\n"
+                 "*(Staff)* `!bs_stats_liaison` (`!bs_lies`) — Combien de membres ont lié leur compte\n"
                  "`!classement_trophees_famille` (`!ctf`) — Classement trophées de la famille de clans\n"
                  "`!evolution_trophees` (`!evo`) — Progression de trophées depuis le début de la saison BS en cours (+ historique des saisons passées, par membre/clan)\n"
                  "`!classement_ranked_famille` (`!crf`) — Classement classé de la famille (mis à jour ttes les 4h)\n"
@@ -2576,6 +2577,32 @@ async def cmd_excuser_relance_tag(ctx):
             pass
         await asyncio.sleep(2)
     await ctx.send(f"✅ Excuse envoyée à {sent}/{len(missing)} membres.")
+
+
+@bot.command(name="bs_stats_liaison", aliases=["bs_lies", "stats_bs_link"])
+async def cmd_bs_stats_liaison(ctx):
+    """Combien de membres ont lié leur compte Brawl Stars (bs_accounts) —
+    lecture seule, contrairement à !relancer_tag_bs qui envoie des MP."""
+    if not _is_ticket_staff(ctx.author):
+        return await ctx.send("❌ Réservé au staff.")
+    guild = ctx.guild
+    if not guild:
+        return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
+
+    humans = [m for m in guild.members if not m.bot]
+    linked = [m for m in humans if str(m.id) in bs_accounts]
+    total = len(humans)
+    pct = (len(linked) / total * 100) if total else 0
+
+    embed = discord.Embed(
+        title="🔗 Liaisons Brawl Stars",
+        description=(
+            f"**{len(linked)}** / **{total}** membres ont lié leur compte ({pct:.0f}%)\n"
+            f"**{total - len(linked)}** membres sans tag lié."
+        ),
+        color=0xf1c40f,
+    )
+    await ctx.send(embed=embed)
 
 
 def _human_duration(delta: timedelta) -> str:
