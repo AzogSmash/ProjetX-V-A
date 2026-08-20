@@ -73,18 +73,19 @@ ROLE_CONSEILLER_ID = 1513110804621430886
 # concernent le staff de club + les recruteurs, pas la modération générale.
 # "other" reste sur TICKET_STAFF_ROLE_IDS (motif générique "à voir"), et tout
 # motif custom ajouté via !set_ticket qui n'a pas d'entrée ici retombe dessus
-# aussi (voir _ticket_staff_role_ids_for).
-TICKET_CATEGORY_STAFF_ROLE_IDS: dict[str, set[int]] = {
-    "candidature": {ROLE_FONDA_ID, ROLE_ADMIN_ID, ROLE_MODERATEUR_ID},
-    "club_recruitment": {ROLE_PRESIDENT_ID, ROLE_VICE_PRESIDENT_ID, ROLE_CONSEILLER_ID, ROLE_RECRUTEUR_ID},
-    "incident": {ROLE_FONDA_ID, ROLE_ADMIN_ID, ROLE_MODERATEUR_ID},
+# aussi (voir _ticket_staff_role_ids_for). Listes (pas des set) : l'ordre est
+# repris tel quel dans le message d'accueil du ticket (voir _join_fr_ou).
+TICKET_CATEGORY_STAFF_ROLE_IDS: dict[str, list[int]] = {
+    "candidature": [ROLE_FONDA_ID, ROLE_ADMIN_ID, ROLE_MODERATEUR_ID],
+    "club_recruitment": [ROLE_RECRUTEUR_ID, ROLE_PRESIDENT_ID, ROLE_VICE_PRESIDENT_ID, ROLE_CONSEILLER_ID],
+    "incident": [ROLE_FONDA_ID, ROLE_ADMIN_ID, ROLE_MODERATEUR_ID],
 }
 # Alias conservé pour la clarté du code appelant (même règle que les incidents
 # côté site, voir _is_incident_staff dans keep_alive.py).
 TICKET_INCIDENT_STAFF_ROLE_IDS = TICKET_CATEGORY_STAFF_ROLE_IDS["incident"]
 
 
-def _ticket_staff_role_ids_for(category: str) -> set[int]:
+def _ticket_staff_role_ids_for(category: str) -> list[int] | set[int]:
     return TICKET_CATEGORY_STAFF_ROLE_IDS.get(category, TICKET_STAFF_ROLE_IDS)
 
 
