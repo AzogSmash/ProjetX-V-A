@@ -405,6 +405,8 @@ bs_role_config   = {'trophies': {}, 'ranked': {}}  # 'trophies': {str(min): role
 # officielle à chaque sync_trophy_history (toutes les heures), donc une valeur périmée
 # après un redémarrage n'a aucun intérêt à être gardée sur disque.
 bs_family_club_details = {}
+FAMILY_CLUBS_PANEL_CHANNEL_ID = None  # salon du panel auto-actualisé (!clubs_panel), voir refresh_family_clubs_panel
+FAMILY_CLUBS_PANEL_MESSAGE_ID = None  # message édité en place à chaque rafraîchissement (pas de repost)
 ADMIN_LOG_CHANNEL_ID = 1528513026691563540  # écrasé par load_data() si !set_admin_log/!set_logs a déjà été utilisé
 CASINO_LOG_CHANNEL_ID = None  # pas de salon dédié par défaut — à configurer via !set_logs casino
 draft_sessions       = {}   # channel_id -> session dict (phase de ban Brawl Stars)
@@ -1144,6 +1146,7 @@ def load_data():
     global TICKET_CATEGORY_ID, TICKET_CATEGORY_IDS, TICKET_CATEGORIES
     global LEAVE_LOG_CHANNEL_ID
     global bs_accounts, bs_role_config
+    global FAMILY_CLUBS_PANEL_CHANNEL_ID, FAMILY_CLUBS_PANEL_MESSAGE_ID
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
     global ranked_season_month, slash_global_purged, casino_season_month
@@ -1267,6 +1270,8 @@ def load_data():
                 if data.get('ticket_categories'):
                     TICKET_CATEGORIES = data['ticket_categories']
                 LEAVE_LOG_CHANNEL_ID      = data.get('leave_log_channel_id', LEAVE_LOG_CHANNEL_ID)
+                FAMILY_CLUBS_PANEL_CHANNEL_ID = data.get('family_clubs_panel_channel_id', FAMILY_CLUBS_PANEL_CHANNEL_ID)
+                FAMILY_CLUBS_PANEL_MESSAGE_ID = data.get('family_clubs_panel_message_id', FAMILY_CLUBS_PANEL_MESSAGE_ID)
                 # punitions : voir incident du 21/07/2026, un redémarrage en pleine punition
                 # laissait le membre bloqué dans tous les salons (les restrictions Discord
                 # survivent au redémarrage, mais plus le dict en mémoire qui permet à
@@ -1476,6 +1481,8 @@ def save_data(force: bool = False):
     data_to_save['ticket_category_ids']       = TICKET_CATEGORY_IDS
     data_to_save['ticket_categories']         = TICKET_CATEGORIES
     data_to_save['leave_log_channel_id']      = LEAVE_LOG_CHANNEL_ID
+    data_to_save['family_clubs_panel_channel_id'] = FAMILY_CLUBS_PANEL_CHANNEL_ID
+    data_to_save['family_clubs_panel_message_id'] = FAMILY_CLUBS_PANEL_MESSAGE_ID
     data_to_save['punitions']       = punitions
     data_to_save['moderation_log']  = moderation_log
     data_to_save['ranked_1v1']        = ranked_1v1
@@ -1703,6 +1710,8 @@ async def on_ready():
         sync_absence_roles.start()
     if not remind_bs_tag_missing.is_running():
         remind_bs_tag_missing.start()
+    if not refresh_family_clubs_panel_task.is_running():
+        refresh_family_clubs_panel_task.start()
 
     global _slash_synced, slash_global_purged
     if not _slash_synced:
@@ -2085,6 +2094,8 @@ def _build_help_categories(ctx):
                  "`!famille_stats` (`!fs`) — Vue d'ensemble : membres, trophées, répartition par clan/rang\n"
                  "*(Admin)* `!bs_famille ajouter/retirer <tag_clan>` — Gérer les clans de la famille\n"
                  "*(Admin)* `!bs_famille_panel` — Même chose via un panel (select pour retirer + modal pour ajouter)\n"
+                 "*(Admin)* `!clubs_panel` (`!maj_clubs`) — Poste/rafraîchit le panel des clubs de la famille dans le salon courant "
+                 "(roster + trophées par clan, auto-actualisé toutes les 24h, remplace un screenshot posté à la main)\n"
                  "Chaque clan ajouté obtient aussi sa propre commande (ex : `!projetx`) — voir `!bs_famille liste`"))
     cats.append(("tickets", "🎫 Tickets",
                  "Contacter le staff (candidature, recrutement club, incident, autre)",
@@ -14204,6 +14215,122 @@ async def cmd_bs_famille_panel(ctx):
         return await ctx.send("❌ Réservé aux administrateurs.")
     family_clubs = db_bs.list_family_clubs()
     await ctx.send(embed=_bs_famille_embed(family_clubs), view=BsFamilleView(family_clubs))
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# ── Panel #infos-clubs (!clubs_panel) — remplace le screenshot manuel ─────
+# ═════════════════════════════════════════════════════════════════════════
+# L'API Brawl Stars n'expose JAMAIS le statut "en ligne" en temps réel (donnée
+# uniquement visible en jeu) — contrairement au screenshot manuel qu'il
+# remplace, ce panel ne peut donc pas l'afficher. Tout le reste (rôle, nom,
+# trophées par membre) vient de /clubs/#TAG (_bs_fetch_club), sans appel
+# supplémentaire par joueur.
+CLUB_ROLE_ICONS = {'president': '👑', 'vicePresident': '🥈', 'senior': '⭐', 'member': ''}
+
+
+def _family_club_embed(club: dict, entry: dict) -> discord.Embed:
+    members = sorted(club['members'], key=lambda m: m['trophies'], reverse=True)
+    lines = [
+        f"{CLUB_ROLE_ICONS.get(m['role'], '')} **{m['name']}** — {m['trophies']:,} 🏆".strip()
+        for m in members
+    ]
+    embed = discord.Embed(
+        title=f"{club['name']} — `#{club['tag'].lstrip('#')}`",
+        description="\n".join(lines)[:4096] or "*Aucun membre.*",
+        color=0x3498db,
+    )
+    cmd_hint = f"!{entry['slug']}" + (f" / !{entry['alias']}" if entry.get('alias') else "")
+    embed.add_field(name="🏆 Trophées du club", value=f"{club['trophies']:,}", inline=True)
+    embed.add_field(name="👥 Membres", value=f"{len(club['members'])}/30", inline=True)
+    embed.add_field(name="📊 Requis", value=f"{club['requiredTrophies']:,}", inline=True)
+    embed.set_footer(text=f"Commande dédiée : {cmd_hint} · Statut en ligne non disponible via l'API")
+    return embed
+
+
+async def _refresh_family_clubs_panel() -> tuple[bool, str]:
+    """Cœur partagé par la tâche quotidienne et !clubs_panel. Retourne
+    (ok, message) — édite le message existant si FAMILY_CLUBS_PANEL_MESSAGE_ID
+    est déjà connu, sinon en poste un nouveau dans FAMILY_CLUBS_PANEL_CHANNEL_ID."""
+    global FAMILY_CLUBS_PANEL_MESSAGE_ID
+    if not FAMILY_CLUBS_PANEL_CHANNEL_ID:
+        return False, "❌ Aucun salon configuré — lance `!clubs_panel` dans le salon voulu d'abord."
+    channel = bot.get_channel(FAMILY_CLUBS_PANEL_CHANNEL_ID)
+    if not channel:
+        return False, "❌ Le salon configuré est introuvable (supprimé ?)."
+
+    entries = db_bs.list_family_clubs()
+    if not entries:
+        return False, "❌ Aucun clan configuré dans la famille (voir `!bs_famille_panel`)."
+
+    ok_clubs = []
+    for entry in entries:
+        data, err = await _bs_fetch_club(entry['tag'])
+        if data:
+            ok_clubs.append((data, entry))
+    if not ok_clubs:
+        return False, "❌ Impossible de récupérer les données d'un seul clan (API indisponible ?)."
+    ok_clubs.sort(key=lambda t: t[0]['trophies'], reverse=True)
+
+    total_trophies = sum(c['trophies'] for c, _e in ok_clubs)
+    total_members = sum(len(c['members']) for c, _e in ok_clubs)
+    header = discord.Embed(
+        title="🏆 État actuel des clubs de la famille",
+        description=(
+            f"**{len(ok_clubs)}** clans · **{total_members}** membres · **{total_trophies:,}** 🏆 cumulés\n"
+            f"Dernière actualisation : {discord.utils.format_dt(discord.utils.utcnow(), style='f')}"
+        ),
+        color=0xf1c40f,
+    )
+    embeds = [header] + [_family_club_embed(c, e) for c, e in ok_clubs[:9]]  # 10 embeds max/message (header inclus)
+
+    message = None
+    if FAMILY_CLUBS_PANEL_MESSAGE_ID:
+        try:
+            message = await channel.fetch_message(FAMILY_CLUBS_PANEL_MESSAGE_ID)
+        except (discord.NotFound, discord.Forbidden):
+            message = None
+
+    if message:
+        await message.edit(content=None, embeds=embeds)
+    else:
+        message = await channel.send(embeds=embeds)
+        FAMILY_CLUBS_PANEL_MESSAGE_ID = message.id
+        save_data()
+
+    return True, f"✅ Panel actualisé dans {channel.mention} ({len(ok_clubs)}/{len(entries)} clans récupérés)."
+
+
+@tasks.loop(hours=24)
+async def refresh_family_clubs_panel_task():
+    await bot.wait_until_ready()
+    if not FAMILY_CLUBS_PANEL_CHANNEL_ID:
+        return
+    ok, msg = await _refresh_family_clubs_panel()
+    if not ok:
+        print(f"[clubs_panel] Échec du rafraîchissement automatique : {msg}")
+
+
+@bot.command(name="clubs_panel", aliases=["maj_clubs", "clubs_panel_ici"])
+async def cmd_clubs_panel(ctx):
+    """Poste (la 1ère fois) ou force le rafraîchissement immédiat du panel
+    #infos-clubs dans le salon courant — remplace le screenshot manuel.
+    Un rafraîchissement automatique tourne aussi toutes les 24h
+    (refresh_family_clubs_panel_task), qui édite ce même message en place."""
+    global FAMILY_CLUBS_PANEL_CHANNEL_ID
+    if not (ctx.author.guild_permissions.administrator or is_bot_owner(ctx.author)):
+        return await ctx.send("❌ Réservé aux administrateurs.")
+    if not ctx.guild:
+        return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
+
+    if FAMILY_CLUBS_PANEL_CHANNEL_ID != ctx.channel.id:
+        FAMILY_CLUBS_PANEL_CHANNEL_ID = ctx.channel.id
+        global FAMILY_CLUBS_PANEL_MESSAGE_ID
+        FAMILY_CLUBS_PANEL_MESSAGE_ID = None  # nouveau salon → nouveau message, pas d'édition d'un ancien message d'un autre salon
+        save_data()
+
+    async with ctx.typing():
+        ok, result_msg = await _refresh_family_clubs_panel()
+    await ctx.send(result_msg)
 
 
 class BsFamilyLeaderboardView(discord.ui.View):
