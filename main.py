@@ -16497,7 +16497,10 @@ STAFF_ROLE_INFO = {
         'title': "🎯 Recruteur",
         'mission': (
             "En charge du recrutement dans les clans de la famille : traite les tickets de "
-            "recrutement club et oriente les nouveaux joueurs vers le clan adapté à leur niveau."
+            "recrutement club et oriente les nouveaux joueurs vers le clan adapté à leur niveau. "
+            "Outil dédié : `!recrutement <clan>` (self-service, sans argument affiche la liste des "
+            "clans) donne une fiche à jour à envoyer directement au prospect, avec le nom du clan "
+            "cliquable pour ouvrir le jeu et faire sa propre capture."
         ),
     },
     'president': {
