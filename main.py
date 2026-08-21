@@ -1968,7 +1968,10 @@ def _build_help_categories(ctx):
                  "`!cd` (`!cooldown`) — Voir tous tes cooldowns en cours *(privé)*\n"
                  "`!anniversaire JJ/MM` (`!anniv`) — Enregistrer son anniversaire\n"
                  "`!stats_serveur` (`!serveur`) — Vue globale du serveur\n"
-                 "`!snipe [nb] [@membre]` — Voir le(s) dernier(s) message(s) supprimé(s) du salon"))
+                 "`!snipe [nb] [@membre]` — Voir le(s) dernier(s) message(s) supprimé(s) du salon\n"
+                 "`!help_staff` — Ta fiche staff (mission + commandes) si tu as un rôle staff\n"
+                 "`!help_fonda` `!help_admin` `!help_modo` `!help_recruteur` `!help_president` "
+                 "`!help_vicepre` `!help_conseiller` — Fiche d'un rôle staff en particulier"))
     cats.append(("eco", "🪙 Économie de base",
                  "Solde, daily, travail, coffre, rob, etc.",
                  "`!coins` (`!bal`, `!solde`) — Voir votre solde\n"
@@ -16187,6 +16190,212 @@ async def cmd_commandes_admin(ctx, *, mot_cle: str = None):
         "!permission permet de déléguer une commande à un rôle non-admin."
     )
     await ctx.send(embed=embed)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# ── Fiches staff (!help_<rôle>) — mission + accès réel aux commandes ──────
+# ═════════════════════════════════════════════════════════════════════════
+# La partie "mission" est un brouillon rédigé à partir des indices déjà présents
+# dans le code (catégories de tickets par rôle — voir TICKET_CATEGORY_STAFF_ROLE_IDS)
+# et d'une hiérarchie clan-family classique — à corriger si besoin, ce n'est PAS
+# une donnée officielle de la communauté. La partie "accès commandes" est calculée
+# en direct depuis les vraies permissions du rôle Discord + cmd_role_perms (jamais
+# codée en dur), donc toujours à jour même si !permission est utilisé plus tard.
+STAFF_ROLE_INFO = {
+    'fonda': {
+        'role_id_var': 'ROLE_FONDA_ID',
+        'title': "👑 Fonda",
+        'mission': (
+            "Fondateur·rice de Projet X — responsable en dernier ressort de la communauté. "
+            "Tranche les décisions importantes, supervise le staff Discord (Admin, Modérateur) "
+            "et le staff club (Président, Vice-président, Conseiller, Recruteur)."
+        ),
+    },
+    'admin': {
+        'role_id_var': 'ROLE_ADMIN_ID',
+        'title': "⚙️ Admin",
+        'mission': (
+            "Bras droit du Fonda côté Discord : gestion technique du serveur (salons, rôles, "
+            "configuration du bot), modération de dernier recours, traitement des candidatures "
+            "et des incidents (voir les tickets « incident »)."
+        ),
+    },
+    'modo': {
+        'role_id_var': 'ROLE_MODERATEUR_ID',
+        'title': "🛡️ Modérateur (Staff Discord)",
+        'mission': (
+            "Modération au quotidien du serveur : fait respecter le règlement, traite les tickets "
+            "de candidature et d'incident, intervient en cas de comportement problématique."
+        ),
+    },
+    'recruteur': {
+        'role_id_var': 'ROLE_RECRUTEUR_ID',
+        'title': "🎯 Recruteur",
+        'mission': (
+            "En charge du recrutement dans les clans de la famille : traite les tickets de "
+            "recrutement club et oriente les nouveaux joueurs vers le clan adapté à leur niveau."
+        ),
+    },
+    'president': {
+        'role_id_var': 'ROLE_PRESIDENT_ID',
+        'title': "🏅 Président",
+        'mission': (
+            "Dirige un clan de la famille : gestion des membres en jeu, décisions internes au "
+            "clan, relais entre son clan et le reste de la famille. Concerné par les tickets de "
+            "recrutement club."
+        ),
+    },
+    'vicepre': {
+        'role_id_var': 'ROLE_VICE_PRESIDENT_ID',
+        'title': "🥈 Vice-président",
+        'mission': (
+            "Second du Président au sein d'un clan : le supplée en son absence et l'assiste dans "
+            "la gestion quotidienne du clan et le recrutement."
+        ),
+    },
+    'conseiller': {
+        'role_id_var': 'ROLE_CONSEILLER_ID',
+        'title': "🧭 Conseiller",
+        'mission': (
+            "Conseille la direction du clan (Président/Vice-président), aide à la gestion des "
+            "membres et participe au recrutement."
+        ),
+    },
+}
+
+
+def _staff_role_commands_section(role: discord.Role) -> str:
+    """Calculé depuis les vraies permissions Discord du rôle + les délégations
+    !permission — jamais une liste écrite à la main, pour ne jamais se périmer."""
+    perms = role.permissions
+    lines = []
+    if perms.administrator:
+        lines.append(
+            "✅ **Administrateur Discord** — accès à toutes les commandes admin "
+            "(`!gestion`, `!permission`, `!cd_set`, `!prix_casino`, `!set_logs`, `!bs_roles_panel`, "
+            "`!bs_famille_panel`, `!annonce_site`, etc.) sauf les commandes réservées au "
+            "propriétaire du serveur (voir plus bas)."
+        )
+    else:
+        if perms.manage_messages:
+            lines.append(
+                "✅ Modération : `!warn` `!mute` `!unmute` `!clear` `!silence` `!unsilence` "
+                "`!sanctions` `!historique_moderation` `!punition` `!annuler_punition`"
+            )
+        if perms.ban_members:
+            lines.append("✅ `!ban` `!unban`")
+        if perms.manage_nicknames:
+            lines.append("✅ `!rename` — renommer un membre")
+        if not (perms.manage_messages or perms.ban_members or perms.manage_nicknames):
+            lines.append("➖ Aucune permission Discord spéciale — commandes générales du bot uniquement (voir `!aide`).")
+
+    delegated = sorted(cmd for cmd, roles in cmd_role_perms.items() if role.id in (roles or []))
+    if delegated:
+        lines.append("🔓 Commandes sensibles déléguées via `!permission` : " + ", ".join(f"`!{c}`" for c in delegated))
+    elif not perms.administrator:
+        locked_sample = ", ".join(f"`!{c}`" for c in sorted(ADMIN_LOCKED_CMDS)[:6])
+        lines.append(f"🔒 Pas d'accès aux commandes sensibles (ex. {locked_sample}, …) sauf délégation via `!permission`.")
+
+    return "\n".join(lines)
+
+
+def _staff_role_ticket_categories(role_id: int) -> list[str]:
+    return [
+        TICKET_CATEGORIES.get(cat, cat)
+        for cat, role_ids in TICKET_CATEGORY_STAFF_ROLE_IDS.items()
+        if role_id in role_ids
+    ]
+
+
+def _staff_help_embed(guild: discord.Guild, key: str) -> discord.Embed | None:
+    info = STAFF_ROLE_INFO.get(key)
+    if not info:
+        return None
+    role_id = globals().get(info['role_id_var'])
+    role = guild.get_role(role_id) if role_id else None
+    if not role:
+        return None
+
+    embed = discord.Embed(
+        title=f"{info['title']} — Fiche staff",
+        color=role.color.value or 0x95a5a6,
+    )
+    embed.add_field(name="🎯 Mission", value=info['mission'], inline=False)
+    embed.add_field(name="⚙️ Accès commandes", value=_staff_role_commands_section(role), inline=False)
+
+    cats = _staff_role_ticket_categories(role.id)
+    if cats:
+        embed.add_field(name="🎫 Tickets concernés", value=", ".join(cats), inline=False)
+
+    embed.set_footer(text=f"Rôle Discord : {role.name} · Tape !aide pour les commandes générales")
+    return embed
+
+
+async def _send_staff_help(ctx, key: str):
+    if not ctx.guild:
+        return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
+    embed = _staff_help_embed(ctx.guild, key)
+    if not embed:
+        return await ctx.send("❌ Ce rôle n'existe pas (ou plus) sur ce serveur.")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="help_fonda")
+async def cmd_help_fonda(ctx):
+    await _send_staff_help(ctx, 'fonda')
+
+
+@bot.command(name="help_admin_role", aliases=["help_admin"])
+async def cmd_help_admin_role(ctx):
+    await _send_staff_help(ctx, 'admin')
+
+
+@bot.command(name="help_modo", aliases=["help_moderateur"])
+async def cmd_help_modo(ctx):
+    await _send_staff_help(ctx, 'modo')
+
+
+@bot.command(name="help_recruteur")
+async def cmd_help_recruteur(ctx):
+    await _send_staff_help(ctx, 'recruteur')
+
+
+@bot.command(name="help_president", aliases=["help_pre"])
+async def cmd_help_president(ctx):
+    await _send_staff_help(ctx, 'president')
+
+
+@bot.command(name="help_vicepre", aliases=["help_viceprsident", "help_vp"])
+async def cmd_help_vicepre(ctx):
+    await _send_staff_help(ctx, 'vicepre')
+
+
+@bot.command(name="help_conseiller", aliases=["help_conseil"])
+async def cmd_help_conseiller(ctx):
+    await _send_staff_help(ctx, 'conseiller')
+
+
+@bot.command(name="help_staff")
+async def cmd_help_staff(ctx):
+    """Sans argument : détecte automatiquement le(s) rôle(s) staff du membre et
+    affiche sa/ses propre(s) fiche(s) — pratique pour ne pas avoir à retenir
+    le bon !help_<rôle>."""
+    if not ctx.guild:
+        return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
+    author_role_ids = {r.id for r in ctx.author.roles}
+    matches = [
+        key for key, info in STAFF_ROLE_INFO.items()
+        if globals().get(info['role_id_var']) in author_role_ids
+    ]
+    if not matches:
+        return await ctx.send(
+            "ℹ️ Tu n'as aucun rôle staff reconnu. Fiches disponibles : "
+            + ", ".join(f"`!help_{k}`" for k in STAFF_ROLE_INFO)
+        )
+    for key in matches:
+        embed = _staff_help_embed(ctx.guild, key)
+        if embed:
+            await ctx.send(embed=embed)
 
 
 token = os.getenv("TOKEN")
