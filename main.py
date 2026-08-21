@@ -406,7 +406,10 @@ bs_role_config   = {'trophies': {}, 'ranked': {}}  # 'trophies': {str(min): role
 # après un redémarrage n'a aucun intérêt à être gardée sur disque.
 bs_family_club_details = {}
 FAMILY_CLUBS_PANEL_CHANNEL_ID = None  # salon du panel auto-actualisé (!clubs_panel), voir refresh_family_clubs_panel
-FAMILY_CLUBS_PANEL_MESSAGE_ID = None  # message édité en place à chaque rafraîchissement (pas de repost)
+# Un message par embed (header + un par clan), pas un seul message multi-embeds : Discord limite
+# à 6000 caractères cumulés tous embeds confondus PAR MESSAGE, qu'un roster de 30 membres peut
+# à lui seul approcher — incident du 21/08/2026 (HTTPException 50035 "Embed size exceeds 6000").
+FAMILY_CLUBS_PANEL_MESSAGE_IDS = []  # liste ordonnée [header_id, club1_id, club2_id, ...], éditée en place
 ADMIN_LOG_CHANNEL_ID = 1528513026691563540  # écrasé par load_data() si !set_admin_log/!set_logs a déjà été utilisé
 CASINO_LOG_CHANNEL_ID = None  # pas de salon dédié par défaut — à configurer via !set_logs casino
 draft_sessions       = {}   # channel_id -> session dict (phase de ban Brawl Stars)
@@ -1146,7 +1149,7 @@ def load_data():
     global TICKET_CATEGORY_ID, TICKET_CATEGORY_IDS, TICKET_CATEGORIES
     global LEAVE_LOG_CHANNEL_ID
     global bs_accounts, bs_role_config
-    global FAMILY_CLUBS_PANEL_CHANNEL_ID, FAMILY_CLUBS_PANEL_MESSAGE_ID
+    global FAMILY_CLUBS_PANEL_CHANNEL_ID, FAMILY_CLUBS_PANEL_MESSAGE_IDS
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
     global ranked_season_month, slash_global_purged, casino_season_month
@@ -1271,7 +1274,7 @@ def load_data():
                     TICKET_CATEGORIES = data['ticket_categories']
                 LEAVE_LOG_CHANNEL_ID      = data.get('leave_log_channel_id', LEAVE_LOG_CHANNEL_ID)
                 FAMILY_CLUBS_PANEL_CHANNEL_ID = data.get('family_clubs_panel_channel_id', FAMILY_CLUBS_PANEL_CHANNEL_ID)
-                FAMILY_CLUBS_PANEL_MESSAGE_ID = data.get('family_clubs_panel_message_id', FAMILY_CLUBS_PANEL_MESSAGE_ID)
+                FAMILY_CLUBS_PANEL_MESSAGE_IDS = data.get('family_clubs_panel_message_ids', FAMILY_CLUBS_PANEL_MESSAGE_IDS)
                 # punitions : voir incident du 21/07/2026, un redémarrage en pleine punition
                 # laissait le membre bloqué dans tous les salons (les restrictions Discord
                 # survivent au redémarrage, mais plus le dict en mémoire qui permet à
@@ -1481,8 +1484,8 @@ def save_data(force: bool = False):
     data_to_save['ticket_category_ids']       = TICKET_CATEGORY_IDS
     data_to_save['ticket_categories']         = TICKET_CATEGORIES
     data_to_save['leave_log_channel_id']      = LEAVE_LOG_CHANNEL_ID
-    data_to_save['family_clubs_panel_channel_id'] = FAMILY_CLUBS_PANEL_CHANNEL_ID
-    data_to_save['family_clubs_panel_message_id'] = FAMILY_CLUBS_PANEL_MESSAGE_ID
+    data_to_save['family_clubs_panel_channel_id']  = FAMILY_CLUBS_PANEL_CHANNEL_ID
+    data_to_save['family_clubs_panel_message_ids'] = FAMILY_CLUBS_PANEL_MESSAGE_IDS
     data_to_save['punitions']       = punitions
     data_to_save['moderation_log']  = moderation_log
     data_to_save['ranked_1v1']        = ranked_1v1
@@ -14248,10 +14251,14 @@ def _family_club_embed(club: dict, entry: dict) -> discord.Embed:
 
 
 async def _refresh_family_clubs_panel() -> tuple[bool, str]:
-    """Cœur partagé par la tâche quotidienne et !clubs_panel. Retourne
-    (ok, message) — édite le message existant si FAMILY_CLUBS_PANEL_MESSAGE_ID
-    est déjà connu, sinon en poste un nouveau dans FAMILY_CLUBS_PANEL_CHANNEL_ID."""
-    global FAMILY_CLUBS_PANEL_MESSAGE_ID
+    """Cœur partagé par la tâche quotidienne et !clubs_panel. Un message par
+    embed (header + un par clan) plutôt qu'un seul message multi-embeds :
+    Discord limite à 6000 caractères cumulés PAR MESSAGE tous embeds
+    confondus, qu'un roster de 30 membres peut à lui seul approcher — c'est
+    ce qui faisait planter la version à un seul message multi-embeds.
+    Chaque message est édité en place s'il existe déjà (FAMILY_CLUBS_PANEL_MESSAGE_IDS),
+    sinon posté dans FAMILY_CLUBS_PANEL_CHANNEL_ID."""
+    global FAMILY_CLUBS_PANEL_MESSAGE_IDS
     if not FAMILY_CLUBS_PANEL_CHANNEL_ID:
         return False, "❌ Aucun salon configuré — lance `!clubs_panel` dans le salon voulu d'abord."
     channel = bot.get_channel(FAMILY_CLUBS_PANEL_CHANNEL_ID)
@@ -14273,7 +14280,7 @@ async def _refresh_family_clubs_panel() -> tuple[bool, str]:
 
     total_trophies = sum(c['trophies'] for c, _e in ok_clubs)
     total_members = sum(len(c['members']) for c, _e in ok_clubs)
-    header = discord.Embed(
+    header_embed = discord.Embed(
         title="🏆 État actuel des clubs de la famille",
         description=(
             f"**{len(ok_clubs)}** clans · **{total_members}** membres · **{total_trophies:,}** 🏆 cumulés\n"
@@ -14281,23 +14288,38 @@ async def _refresh_family_clubs_panel() -> tuple[bool, str]:
         ),
         color=0xf1c40f,
     )
-    embeds = [header] + [_family_club_embed(c, e) for c, e in ok_clubs[:9]]  # 10 embeds max/message (header inclus)
+    all_embeds = [header_embed] + [_family_club_embed(c, e) for c, e in ok_clubs]
 
-    message = None
-    if FAMILY_CLUBS_PANEL_MESSAGE_ID:
+    old_ids = list(FAMILY_CLUBS_PANEL_MESSAGE_IDS)
+    new_ids = []
+    for i, embed in enumerate(all_embeds):
+        msg = None
+        if i < len(old_ids):
+            try:
+                msg = await channel.fetch_message(old_ids[i])
+            except (discord.NotFound, discord.Forbidden):
+                msg = None
+        if msg:
+            await msg.edit(content=None, embed=embed)
+            new_ids.append(msg.id)
+        else:
+            msg = await channel.send(embed=embed)
+            new_ids.append(msg.id)
+
+    # Messages en trop (un clan retiré de la famille depuis le dernier
+    # rafraîchissement) — supprimés pour ne pas laisser un roster périmé traîner.
+    for old_id in old_ids[len(all_embeds):]:
         try:
-            message = await channel.fetch_message(FAMILY_CLUBS_PANEL_MESSAGE_ID)
+            leftover = await channel.fetch_message(old_id)
+            await leftover.delete()
         except (discord.NotFound, discord.Forbidden):
-            message = None
+            pass
 
-    if message:
-        await message.edit(content=None, embeds=embeds)
-    else:
-        message = await channel.send(embeds=embeds)
-        FAMILY_CLUBS_PANEL_MESSAGE_ID = message.id
+    if new_ids != FAMILY_CLUBS_PANEL_MESSAGE_IDS:
+        FAMILY_CLUBS_PANEL_MESSAGE_IDS = new_ids
         save_data()
 
-    return True, f"✅ Panel actualisé dans {channel.mention} ({len(ok_clubs)}/{len(entries)} clans récupérés)."
+    return True, f"✅ Panel actualisé dans {channel.mention} ({len(ok_clubs)}/{len(entries)} clans récupérés, {len(all_embeds)} messages)."
 
 
 @tasks.loop(hours=24)
@@ -14324,8 +14346,8 @@ async def cmd_clubs_panel(ctx):
 
     if FAMILY_CLUBS_PANEL_CHANNEL_ID != ctx.channel.id:
         FAMILY_CLUBS_PANEL_CHANNEL_ID = ctx.channel.id
-        global FAMILY_CLUBS_PANEL_MESSAGE_ID
-        FAMILY_CLUBS_PANEL_MESSAGE_ID = None  # nouveau salon → nouveau message, pas d'édition d'un ancien message d'un autre salon
+        global FAMILY_CLUBS_PANEL_MESSAGE_IDS
+        FAMILY_CLUBS_PANEL_MESSAGE_IDS = []  # nouveau salon → nouveaux messages, pas d'édition d'anciens messages d'un autre salon
         save_data()
 
     async with ctx.typing():
