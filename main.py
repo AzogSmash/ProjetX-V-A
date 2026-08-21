@@ -10880,9 +10880,22 @@ async def _finish_ticket_close(
         pass
 
 
+def _all_ticket_staff_role_ids() -> set[int]:
+    """Union de TICKET_STAFF_ROLE_IDS et de tous les rôles staff assignés à un
+    motif dans TICKET_CATEGORY_STAFF_ROLE_IDS — calculé, jamais dupliqué à la
+    main, pour ne plus se périmer si un motif/rôle change (voir l'oubli du
+    motif « autre » côté staff club, corrigé le 21/08/2026 : Recruteur/
+    Président/Vice-président/Conseiller pouvaient VOIR leurs tickets de
+    recrutement club sans pouvoir les fermer, faute d'être dans ce set)."""
+    ids = set(TICKET_STAFF_ROLE_IDS)
+    for role_ids in TICKET_CATEGORY_STAFF_ROLE_IDS.values():
+        ids.update(role_ids)
+    return ids
+
+
 def _is_ticket_staff(member: discord.Member) -> bool:
     return is_bot_owner(member) or member.guild_permissions.administrator or any(
-        r.id in TICKET_STAFF_ROLE_IDS for r in member.roles
+        r.id in _all_ticket_staff_role_ids() for r in member.roles
     )
 
 
@@ -16392,8 +16405,8 @@ STAFF_ROLE_INFO = {
         'title': "⚙️ Admin",
         'mission': (
             "Bras droit du Fonda côté Discord : gestion technique du serveur (salons, rôles, "
-            "configuration du bot), modération de dernier recours, traitement des candidatures "
-            "et des incidents (voir les tickets « incident »)."
+            "configuration du bot), modération de dernier recours, traitement des candidatures, "
+            "des incidents et des tickets « autre »."
         ),
     },
     'modo': {
@@ -16401,7 +16414,7 @@ STAFF_ROLE_INFO = {
         'title': "🛡️ Modérateur (Staff Discord)",
         'mission': (
             "Modération au quotidien du serveur : fait respecter le règlement, traite les tickets "
-            "de candidature et d'incident, intervient en cas de comportement problématique."
+            "de candidature, d'incident et « autre », intervient en cas de comportement problématique."
         ),
     },
     'recruteur': {
