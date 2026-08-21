@@ -14228,24 +14228,42 @@ async def cmd_bs_famille_panel(ctx):
 # remplace, ce panel ne peut donc pas l'afficher. Tout le reste (rôle, nom,
 # trophées par membre) vient de /clubs/#TAG (_bs_fetch_club), sans appel
 # supplémentaire par joueur.
-CLUB_ROLE_ICONS = {'president': '👑', 'vicePresident': '🥈', 'senior': '⭐', 'member': ''}
+CLUB_ROLE_ICONS  = {'president': '👑', 'vicePresident': '🥈', 'senior': '⭐', 'member': '👤'}
+CLUB_ROLE_LABELS = {'president': 'Président', 'vicePresident': 'Vice-président', 'senior': 'Aîné', 'member': 'Membre'}
+CLUB_TYPE_LABELS = {'open': '🟢 Ouvert', 'inviteOnly': '🟡 Sur invitation', 'closed': '🔴 Fermé'}
 
 
 def _family_club_embed(club: dict, entry: dict) -> discord.Embed:
     members = sorted(club['members'], key=lambda m: m['trophies'], reverse=True)
-    lines = [
-        f"{CLUB_ROLE_ICONS.get(m['role'], '')} **{m['name']}** — {m['trophies']:,} 🏆".strip()
-        for m in members
-    ]
+    avg_trophies = club['trophies'] // len(members) if members else 0
+    role_counts = {r: sum(1 for m in members if m['role'] == r) for r in CLUB_ROLE_ICONS}
+
     embed = discord.Embed(
-        title=f"{club['name']} — `#{club['tag'].lstrip('#')}`",
-        description="\n".join(lines)[:4096] or "*Aucun membre.*",
+        title=f"🏰 {club['name']}",
+        description=(club.get('description') or "*Pas de description.*")[:400],
         color=0x3498db,
     )
-    cmd_hint = f"!{entry['slug']}" + (f" / !{entry['alias']}" if entry.get('alias') else "")
+    # Infos du club en premier (grille compacte), roster ensuite.
+    embed.add_field(name="🔖 Tag", value=f"`#{club['tag'].lstrip('#')}`", inline=True)
+    embed.add_field(name="🚪 Type", value=CLUB_TYPE_LABELS.get(club['type'], club['type']), inline=True)
+    embed.add_field(name="👥 Effectif", value=f"{len(members)}/30", inline=True)
     embed.add_field(name="🏆 Trophées du club", value=f"{club['trophies']:,}", inline=True)
-    embed.add_field(name="👥 Membres", value=f"{len(club['members'])}/30", inline=True)
-    embed.add_field(name="📊 Requis", value=f"{club['requiredTrophies']:,}", inline=True)
+    embed.add_field(name="📊 Trophées requis", value=f"{club['requiredTrophies']:,}", inline=True)
+    embed.add_field(name="📈 Moyenne / membre", value=f"{avg_trophies:,} 🏆", inline=True)
+    embed.add_field(
+        name="🎖️ Répartition des rôles",
+        value=" · ".join(
+            f"{CLUB_ROLE_ICONS[r]} {role_counts[r]} {CLUB_ROLE_LABELS[r]}"
+            for r in ('president', 'vicePresident', 'senior', 'member')
+        ),
+        inline=False,
+    )
+
+    roster_lines = [f"{CLUB_ROLE_ICONS.get(m['role'], '👤')} **{m['name']}** — {m['trophies']:,} 🏆" for m in members]
+    for i, chunk in enumerate(_chunk_lines(roster_lines, limit=1000)):
+        embed.add_field(name=f"📋 Roster ({len(members)})" if i == 0 else "📋 Roster (suite)", value=chunk, inline=False)
+
+    cmd_hint = f"!{entry['slug']}" + (f" / !{entry['alias']}" if entry.get('alias') else "")
     embed.set_footer(text=f"Commande dédiée : {cmd_hint} · Statut en ligne non disponible via l'API")
     return embed
 
@@ -14280,14 +14298,22 @@ async def _refresh_family_clubs_panel() -> tuple[bool, str]:
 
     total_trophies = sum(c['trophies'] for c, _e in ok_clubs)
     total_members = sum(len(c['members']) for c, _e in ok_clubs)
+    medals = ['🥇', '🥈', '🥉']
+    ranking_lines = [
+        f"{medals[i] if i < 3 else f'**{i + 1}.**'} {c['name']} — {c['trophies']:,} 🏆 ({len(c['members'])}/30)"
+        for i, (c, _e) in enumerate(ok_clubs)
+    ]
     header_embed = discord.Embed(
         title="🏆 État actuel des clubs de la famille",
         description=(
-            f"**{len(ok_clubs)}** clans · **{total_members}** membres · **{total_trophies:,}** 🏆 cumulés\n"
-            f"Dernière actualisation : {discord.utils.format_dt(discord.utils.utcnow(), style='f')}"
+            f"**{len(ok_clubs)}** clans · **{total_members}** membres · **{total_trophies:,}** 🏆 cumulés\n\n"
+            + "\n".join(ranking_lines)
         ),
         color=0xf1c40f,
     )
+    if channel.guild and channel.guild.icon:
+        header_embed.set_thumbnail(url=channel.guild.icon.url)
+    header_embed.set_footer(text=f"Dernière actualisation : {discord.utils.format_dt(discord.utils.utcnow(), style='f')} · auto toutes les 24h")
     all_embeds = [header_embed] + [_family_club_embed(c, e) for c, e in ok_clubs]
 
     old_ids = list(FAMILY_CLUBS_PANEL_MESSAGE_IDS)
