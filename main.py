@@ -14573,22 +14573,46 @@ def _recruitment_club_embed(club: dict, entry: dict) -> discord.Embed:
     return embed
 
 
+class RecrutementClubSelectView(discord.ui.View):
+    """Sélection cliquable du clan pour !recrutement sans argument — pas
+    besoin de connaître le nom/slug exact à taper (demande du 21/08/2026)."""
+
+    def __init__(self, entries: list[dict]):
+        super().__init__(timeout=180)
+        self.entries_by_tag = {e['tag']: e for e in entries}
+        options = [
+            discord.SelectOption(label=e['name'][:100], value=e['tag'], description=f"!{e['slug']}"[:100])
+            for e in entries[:25]
+        ]
+        self.select = discord.ui.Select(placeholder="🏰 Choisir un clan…", options=options)
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        tag = self.select.values[0]
+        entry = self.entries_by_tag.get(tag)
+        await interaction.response.defer(thinking=True)
+        data, err = await _bs_fetch_club(tag)
+        if err:
+            return await interaction.followup.send(f"❌ {err}", ephemeral=True)
+        await interaction.followup.send(embed=_recruitment_club_embed(data, entry))
+
+
 @bot.hybrid_command(name="recrutement", aliases=["pitch_club", "fiche_club"])
 async def cmd_recrutement(ctx, *, club: str = None):
     """Fiche de recrutement à jour pour un clan de la famille (nom, tag, slug
     ou alias) — self-service pour les recruteurs : plus besoin d'attendre
     qu'un staff envoie un screenshot du jeu à chaque fois. Sans argument,
-    liste les clans disponibles."""
+    menu cliquable pour choisir le clan."""
     entries = db_bs.list_family_clubs()
     if not entries:
         return await ctx.send("❌ Aucun clan configuré dans la famille (voir `!bs_famille_panel`).")
 
     if not club:
-        options = "\n".join(
-            f"`!{e['slug']}`" + (f" / `!{e['alias']}`" if e.get('alias') else "") + f" — {e['name']}"
-            for e in entries
+        return await ctx.send(
+            "🏰 Choisis un clan dans le menu (ou tape directement `!recrutement <nom>` la prochaine fois) :",
+            view=RecrutementClubSelectView(entries),
         )
-        return await ctx.send(f"**Utilisation :** `!recrutement <nom ou tag du clan>`\n\n**Clans disponibles :**\n{options}")
 
     needle = club.strip().lower().lstrip('#')
     entry = next(
