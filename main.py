@@ -14015,10 +14015,19 @@ async def sync_bs_roles():
             if data['ranked_tier'] is None:
                 data['ranked_pts']  = acc.get('ranked_pts')
                 data['ranked_tier'] = acc.get('ranked_tier')
+            # _bs_announce_promotion poste sur un salon fixe (BS_CONGRATS_CHANNEL_ID),
+            # pas un par serveur — l'appeler une fois par guild partagée avec le membre
+            # envoyait le même message plusieurs fois de suite au même endroit si le
+            # bot est sur plusieurs serveurs (incident du 21/08/2026, Yann mentionné
+            # 3 fois pour le même palier). _bs_sync_member_roles, elle, reste bien
+            # appelée pour chaque guild : les rôles sont propres à chaque serveur.
+            announced = False
             for guild in bot.guilds:
                 member = guild.get_member(int(uid_str))
                 if member:
-                    await _bs_announce_promotion(member, acc, data)
+                    if not announced:
+                        await _bs_announce_promotion(member, acc, data)
+                        announced = True
                     await _bs_sync_member_roles(member, data['trophies'], data['ranked_pts'])
             bs_accounts[uid_str] = data
         await asyncio.sleep(1)
