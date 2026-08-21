@@ -14257,15 +14257,6 @@ CLUB_ROLE_LABELS = {'president': 'Président', 'vicePresident': 'Vice-président
 CLUB_TYPE_LABELS = {'open': '🟢 Ouvert', 'inviteOnly': '🟡 Sur invitation', 'closed': '🔴 Fermé'}
 
 
-def _bs_club_deeplink(tag: str) -> str:
-    """Lien officiel Brawl Stars (même format que le bouton « Partager » en
-    jeu) — ouvre l'appli directement sur le clan si installée, sinon une page
-    web de fallback. Demande du 21/08/2026 : donner aux recruteurs un accès
-    direct au clan en jeu pour faire leur propre capture, sans repasser par
-    un staff."""
-    return f"https://link.brawlstars.com/invite/gc/fr?tag={tag.lstrip('#')}"
-
-
 def _family_club_embed(club: dict, entry: dict) -> discord.Embed:
     members = sorted(club['members'], key=lambda m: m['trophies'], reverse=True)
     avg_trophies = club['trophies'] // len(members) if members else 0
@@ -14273,7 +14264,6 @@ def _family_club_embed(club: dict, entry: dict) -> discord.Embed:
 
     embed = discord.Embed(
         title=f"🏰 {club['name']}",
-        url=_bs_club_deeplink(club['tag']),
         description=(club.get('description') or "*Pas de description.*")[:400],
         color=0x3498db,
     )
@@ -14560,7 +14550,6 @@ def _recruitment_club_embed(club: dict, entry: dict) -> discord.Embed:
     (demande du 21/08/2026)."""
     embed = discord.Embed(
         title=f"🏰 {club['name']}",
-        url=_bs_club_deeplink(club['tag']),
         description=club.get('description') or "*Pas de description.*",
         color=0x2ecc71,
     )
@@ -16530,7 +16519,7 @@ STAFF_ROLE_INFO = {
             "recrutement club et oriente les nouveaux joueurs vers le clan adapté à leur niveau. "
             "Outil dédié : `!recrutement <clan>` (self-service, sans argument affiche un menu "
             "cliquable pour choisir le clan) donne une fiche à jour à envoyer directement au "
-            "prospect, avec le nom du clan cliquable pour ouvrir le jeu et faire sa propre capture."
+            "prospect, avec le tag facilement copiable pour le rechercher en jeu."
         ),
     },
     'president': {
