@@ -2100,6 +2100,7 @@ def _build_help_categories(ctx):
                  "*(Admin)* `!bs_famille_panel` — Même chose via un panel (select pour retirer + modal pour ajouter)\n"
                  "*(Admin)* `!clubs_panel` (`!maj_clubs`) — Poste/rafraîchit le panel des clubs de la famille dans le salon courant "
                  "(roster + trophées par clan, auto-actualisé toutes les 24h, remplace un screenshot posté à la main)\n"
+                 "`!recrutement <clan>` (`!pitch_club`) — Fiche de recrutement à jour pour un clan (self-service, pas besoin d'attendre un staff)\n"
                  "Chaque clan ajouté obtient aussi sa propre commande (ex : `!projetx`) — voir `!bs_famille liste`"))
     cats.append(("tickets", "🎫 Tickets",
                  "Contacter le staff (candidature, recrutement club, incident, autre)",
@@ -14256,6 +14257,15 @@ CLUB_ROLE_LABELS = {'president': 'Président', 'vicePresident': 'Vice-président
 CLUB_TYPE_LABELS = {'open': '🟢 Ouvert', 'inviteOnly': '🟡 Sur invitation', 'closed': '🔴 Fermé'}
 
 
+def _bs_club_deeplink(tag: str) -> str:
+    """Lien officiel Brawl Stars (même format que le bouton « Partager » en
+    jeu) — ouvre l'appli directement sur le clan si installée, sinon une page
+    web de fallback. Demande du 21/08/2026 : donner aux recruteurs un accès
+    direct au clan en jeu pour faire leur propre capture, sans repasser par
+    un staff."""
+    return f"https://link.brawlstars.com/invite/gc/fr?tag={tag.lstrip('#')}"
+
+
 def _family_club_embed(club: dict, entry: dict) -> discord.Embed:
     members = sorted(club['members'], key=lambda m: m['trophies'], reverse=True)
     avg_trophies = club['trophies'] // len(members) if members else 0
@@ -14263,6 +14273,7 @@ def _family_club_embed(club: dict, entry: dict) -> discord.Embed:
 
     embed = discord.Embed(
         title=f"🏰 {club['name']}",
+        url=_bs_club_deeplink(club['tag']),
         description=(club.get('description') or "*Pas de description.*")[:400],
         color=0x3498db,
     )
@@ -14538,6 +14549,61 @@ def _bs_register_club_command(entry: dict):
 
 def _bs_unregister_club_command(entry: dict):
     bot.remove_command(entry['slug'])
+
+
+def _recruitment_club_embed(club: dict, entry: dict) -> discord.Embed:
+    """Fiche « prête à envoyer » pour un recruteur — contrairement à
+    _family_club_embed (staff, roster complet dans #infos-clubs), pas de
+    liste de membres : juste de quoi convaincre un prospect. Appel API live
+    à chaque fois (_bs_fetch_club, pas de cache), donc toujours à jour —
+    plus besoin d'attendre qu'un staff envoie un screenshot manuel du jeu
+    (demande du 21/08/2026)."""
+    embed = discord.Embed(
+        title=f"🏰 {club['name']}",
+        url=_bs_club_deeplink(club['tag']),
+        description=club.get('description') or "*Pas de description.*",
+        color=0x2ecc71,
+    )
+    embed.add_field(name="🔖 Tag", value=f"`#{club['tag'].lstrip('#')}`", inline=True)
+    embed.add_field(name="🚪 Type", value=CLUB_TYPE_LABELS.get(club['type'], club['type']), inline=True)
+    embed.add_field(name="👥 Places", value=f"{len(club['members'])}/30", inline=True)
+    embed.add_field(name="🏆 Trophées du club", value=f"{club['trophies']:,}", inline=True)
+    embed.add_field(name="📊 Trophées requis", value=f"{club['requiredTrophies']:,}", inline=True)
+    embed.set_footer(text=f"Pour rejoindre : rechercher « {club['name']} » ou le tag #{club['tag'].lstrip('#')} en jeu · Actualisé à l'instant")
+    return embed
+
+
+@bot.hybrid_command(name="recrutement", aliases=["pitch_club", "fiche_club"])
+async def cmd_recrutement(ctx, *, club: str = None):
+    """Fiche de recrutement à jour pour un clan de la famille (nom, tag, slug
+    ou alias) — self-service pour les recruteurs : plus besoin d'attendre
+    qu'un staff envoie un screenshot du jeu à chaque fois. Sans argument,
+    liste les clans disponibles."""
+    entries = db_bs.list_family_clubs()
+    if not entries:
+        return await ctx.send("❌ Aucun clan configuré dans la famille (voir `!bs_famille_panel`).")
+
+    if not club:
+        options = "\n".join(
+            f"`!{e['slug']}`" + (f" / `!{e['alias']}`" if e.get('alias') else "") + f" — {e['name']}"
+            for e in entries
+        )
+        return await ctx.send(f"**Utilisation :** `!recrutement <nom ou tag du clan>`\n\n**Clans disponibles :**\n{options}")
+
+    needle = club.strip().lower().lstrip('#')
+    entry = next(
+        (e for e in entries if needle in (e['slug'], (e.get('alias') or '').lower(), e['name'].lower(), e['tag'].lower())),
+        None,
+    )
+    if not entry:
+        return await ctx.send(f"❌ Clan `{club}` introuvable dans la famille. `!recrutement` sans argument pour voir la liste.")
+
+    await ctx.typing()
+    data, err = await _bs_fetch_club(entry['tag'])
+    if err:
+        return await ctx.send(f"❌ {err}")
+
+    await ctx.send(embed=_recruitment_club_embed(data, entry))
 
 
 @bot.hybrid_command(name="classement_trophees_famille", aliases=["ctf", "top_famille"])
