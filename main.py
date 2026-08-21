@@ -14595,7 +14595,10 @@ class RecrutementClubSelectView(discord.ui.View):
         data, err = await _bs_fetch_club(tag)
         if err:
             return await interaction.followup.send(f"❌ {err}", ephemeral=True)
-        await interaction.followup.send(embed=_recruitment_club_embed(data, entry))
+        await interaction.followup.send(
+            content=f"🔖 Tag à copier : `#{data['tag'].lstrip('#')}`",
+            embed=_recruitment_club_embed(data, entry),
+        )
 
 
 @bot.hybrid_command(name="recrutement", aliases=["pitch_club", "fiche_club"])
@@ -14627,7 +14630,10 @@ async def cmd_recrutement(ctx, *, club: str = None):
     if err:
         return await ctx.send(f"❌ {err}")
 
-    await ctx.send(embed=_recruitment_club_embed(data, entry))
+    await ctx.send(
+        content=f"🔖 Tag à copier : `#{data['tag'].lstrip('#')}`",
+        embed=_recruitment_club_embed(data, entry),
+    )
 
 
 @bot.hybrid_command(name="classement_trophees_famille", aliases=["ctf", "top_famille"])
