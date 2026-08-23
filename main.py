@@ -582,6 +582,26 @@ CASINO_HINT_USER_ID = 1056848438270115900  # happy_gt3
 # pour CASINO_HINT_USER_ID — toggle via !triche, utilisable en MP au bot.
 casino_cheat_enabled = True
 
+# Extension du territoire active. Les extensions sont temporaires et ne sont
+# volontairement pas persistées : un redémarrage du bot met fin à leur effet.
+territory_extension = {'name': None, 'until': None, 'channel_id': None}
+territory_extension_prompts = set()
+
+
+def _casino_chance_multiplier() -> float:
+    until = territory_extension.get('until')
+    if until and datetime.now() < until:
+        return 3.0 if territory_extension.get('name') == 'idle_death_gamble' else 1.0
+    if until:
+        territory_extension.update(name=None, until=None, channel_id=None)
+    return 1.0
+
+
+def _casino_success(base_chance: float) -> bool:
+    """Jet de chance casino affecté par l'extension du territoire active."""
+    chance = max(0.0, min(1.0, base_chance * _casino_chance_multiplier()))
+    return random.random() < chance
+
 # Immunisés aux commandes de modération négatives (warn/mute/ban/silence/punition) : Azog + Vynaro (happy_gt3)
 MOD_IMMUNE_IDS = {550678866839207937, 1056848438270115900}
 
@@ -5174,7 +5194,7 @@ async def cmd_risque(ctx):
         except ValueError:
             pass
     risque_cooldowns[uid_str] = now.isoformat()
-    _risque_won = (uid == CASINO_HINT_USER_ID and casino_cheat_enabled) or random.random() < 0.55
+    _risque_won = (uid == CASINO_HINT_USER_ID and casino_cheat_enabled) or _casino_success(0.55)
     if _risque_won:
         amount = random.randint(200, 600)
         coins[uid] += amount
@@ -5303,6 +5323,16 @@ async def cmd_roulette(ctx, *, args: str):
         candidates = list(range(37))
         random.shuffle(candidates)
         numero = next((n for n in candidates if any(fn(n) for _, _, _, fn in paris)), random.randint(0, 36))
+    elif _casino_chance_multiplier() > 1:
+        winning_numbers = [
+            n for n in range(37)
+            if sum(int(round(mise * mult)) for mise, _, mult, fn in paris if fn(n))
+            > sum(mise for mise, _, _, _ in paris)
+        ]
+        losing_numbers = [n for n in range(37) if n not in winning_numbers]
+        base_chance = len(winning_numbers) / 37
+        pool = winning_numbers if winning_numbers and _casino_success(base_chance) else losing_numbers
+        numero = random.choice(pool or list(range(37)))
     else:
         numero    = random.randint(0, 36)
     is_red    = numero in ROULETTE_RED
@@ -5352,7 +5382,13 @@ async def cmd_slots(ctx, mise: str):
     if ctx.author.id == CASINO_HINT_USER_ID and casino_cheat_enabled:
         result = ['💎', '💎', '💎']
     else:
-        result  = random.choices(SLOT_SYMS, weights=SLOT_W, k=3)
+        attempts = int(_casino_chance_multiplier())
+        rolls = [random.choices(SLOT_SYMS, weights=SLOT_W, k=3) for _ in range(attempts)]
+        def _slot_score(roll):
+            if roll[0] == roll[1] == roll[2]:
+                return 2
+            return 1 if len(set(roll)) == 2 else 0
+        result = max(rolls, key=_slot_score)
     display = ' | '.join(result)
     coins[ctx.author.id] -= mise
 
@@ -5687,7 +5723,7 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
     if ctx.author.id == CASINO_HINT_USER_ID and casino_cheat_enabled:
         result = player_choice
     else:
-        result = random.choice(['pile', 'face'])
+        result = player_choice if _casino_success(0.5) else ('face' if player_choice == 'pile' else 'pile')
     result_emoji  = '🟡' if result == 'pile' else '⚪'
 
     coins[ctx.author.id] -= mise
@@ -5748,6 +5784,98 @@ async def cmd_triche(ctx, mode: str = "statut"):
         await ctx.send("🤫 Avantages triche/troll **activés**.")
     else:
         await ctx.send("✅ Avantages triche/troll **désactivés** — parties 100% honnêtes.")
+
+
+def _normalize_extension_name(value: str) -> str:
+    value = unicodedata.normalize('NFKD', value.casefold())
+    value = ''.join(char for char in value if not unicodedata.combining(char))
+    return re.sub(r'[^a-z0-9]+', ' ', value).strip()
+
+
+async def _end_territory_extension(expected_until: datetime, channel_id: int):
+    delay = max(0.0, (expected_until - datetime.now()).total_seconds())
+    await asyncio.sleep(delay)
+    if territory_extension.get('until') != expected_until:
+        return
+    territory_extension.update(name=None, until=None, channel_id=None)
+    channel = bot.get_channel(channel_id)
+    if channel:
+        await channel.send(
+            "⏳ **Idle Death Gamble est terminée.** La chance du casino revient à la normale.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
+async def _activate_idle_death_gamble(ctx):
+    until = datetime.now() + timedelta(minutes=2)
+    territory_extension.update(
+        name='idle_death_gamble', until=until, channel_id=ctx.channel.id,
+    )
+    await ctx.send(
+        "🎰 **Extension du territoire : Idle Death Gamble !**\n"
+        "Pendant **2 minutes**, le taux de réussite et la chance de tout le monde "
+        "au casino sont multipliés par **3**.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+    asyncio.create_task(_end_territory_extension(until, ctx.channel.id))
+
+
+# Registre extensible : ajouter ici les futures extensions et leur fonction.
+TERRITORY_EXTENSIONS = {
+    'idle death gamble': _activate_idle_death_gamble,
+}
+
+
+@bot.command(name="extension")
+async def cmd_extension(ctx, *, invocation: str = None):
+    """Lance le rituel `!extension du territoire` puis attend son nom."""
+    if _normalize_extension_name(invocation or '') != 'du territoire':
+        return await ctx.send(
+            "Usage : `!extension du territoire`",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    if territory_extension_prompts:
+        return await ctx.send(
+            "⏳ Une extension du territoire est déjà en préparation.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    if _casino_chance_multiplier() > 1:
+        return await ctx.send(
+            "⚠️ Une extension du territoire est déjà active. Attendez qu'elle se termine.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    territory_extension_prompts.add(ctx.channel.id)
+    await ctx.send(
+        "🌌 **Une extension du territoire va être déployée.**\n"
+        "Quel est le nom de votre extension ?",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+    def check(message):
+        return (
+            message.author.id == ctx.author.id
+            and message.channel.id == ctx.channel.id
+            and not message.author.bot
+        )
+
+    try:
+        answer = await bot.wait_for('message', check=check, timeout=30.0)
+    except asyncio.TimeoutError:
+        return await ctx.send(
+            "⌛ Extension annulée : aucun nom n'a été donné à temps.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    finally:
+        territory_extension_prompts.discard(ctx.channel.id)
+
+    handler = TERRITORY_EXTENSIONS.get(_normalize_extension_name(answer.content))
+    if handler is None:
+        return await ctx.send(
+            "❓ Cette extension du territoire est **inconnue**.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    await handler(ctx)
 
 
 @bot.hybrid_command(name="pirater", hidden=True)
@@ -6853,6 +6981,19 @@ class MinesView(discord.ui.View):
             btn = next((c for c in self.children if getattr(c, 'custom_id', '') == f"mn_{self._pfx}_{idx}"), None)
             if btn and btn.disabled:
                 return await interaction.response.send_message("❌ Case déjà révélée.", ephemeral=True)
+            # Idle Death Gamble peut transformer une bombe cliquée en case sûre.
+            # La bombe est déplacée vers une autre case encore cachée afin de
+            # conserver trois bombes sur le plateau.
+            if idx in self.bomb_pos and _casino_chance_multiplier() > 1:
+                hidden_safe = []
+                for pos in range(12):
+                    cell = next((c for c in self.children if getattr(c, 'custom_id', '') == f"mn_{self._pfx}_{pos}"), None)
+                    if pos != idx and pos not in self.bomb_pos and cell and not cell.disabled:
+                        hidden_safe.append(pos)
+                if hidden_safe:
+                    self.bomb_pos.remove(idx)
+                    self.bomb_pos.add(random.choice(hidden_safe))
+
             if idx in self.bomb_pos:
                 self.game_over = True
                 active_mines.pop(self.author_id, None)
@@ -9403,6 +9544,8 @@ async def cmd_gratter(ctx):
     # Génération prédéterminée du nombre de trèfles
     weights   = [SCRATCH_PRIZES[i][0] for i in range(6)]   # [18,40,20,15,5,2]
     n_clovers = random.choices(range(6), weights=weights, k=1)[0]
+    if _casino_chance_multiplier() > 1 and n_clovers == 0:
+        n_clovers = random.choices(range(1, 6), weights=weights[1:], k=1)[0]
 
     view = ScratchView(ctx.author.id, n_clovers)
     tickets_left = owned_items.get(uid, {}).get('4', 0)
