@@ -5837,6 +5837,7 @@ TERRITORY_EXTENSIONS = {
 @bot.command(name="extension")
 async def cmd_extension(ctx, *, invocation: str = None):
     """Lance le rituel `!extension du territoire` puis attend son nom."""
+    owner_bypass = is_bot_owner(ctx.author)
     if _normalize_extension_name(invocation or '') != 'du territoire':
         return await ctx.send(
             "Usage : `!extension du territoire`",
@@ -5847,7 +5848,7 @@ async def cmd_extension(ctx, *, invocation: str = None):
             "⏳ Une extension du territoire est déjà en préparation.",
             allowed_mentions=discord.AllowedMentions.none(),
         )
-    if _casino_chance_multiplier() > 1:
+    if _casino_chance_multiplier() > 1 and not owner_bypass:
         return await ctx.send(
             "⚠️ Une extension du territoire est déjà active. Attendez qu'elle se termine.",
             allowed_mentions=discord.AllowedMentions.none(),
@@ -5883,7 +5884,7 @@ async def cmd_extension(ctx, *, invocation: str = None):
             "❓ Cette extension du territoire est **inconnue**.",
             allowed_mentions=discord.AllowedMentions.none(),
         )
-    if ctx.author.id != extension['user_id']:
+    if ctx.author.id != extension['user_id'] and not owner_bypass:
         return await ctx.send(
             "🚫 Cette extension du territoire ne vous appartient pas.",
             allowed_mentions=discord.AllowedMentions.none(),
@@ -5892,7 +5893,7 @@ async def cmd_extension(ctx, *, invocation: str = None):
     now_paris = datetime.now(BS_SEASON_TZ)
     extension_id = extension['id']
     last_used_raw = territory_extension_daily.get(extension_id)
-    if last_used_raw:
+    if last_used_raw and not owner_bypass:
         try:
             last_used = datetime.fromisoformat(last_used_raw)
             # Compatibilité avec une éventuelle ancienne valeur sans fuseau.
@@ -5913,8 +5914,11 @@ async def cmd_extension(ctx, *, invocation: str = None):
             pass
 
     await extension['handler'](ctx)
-    territory_extension_daily[extension_id] = now_paris.isoformat()
-    save_data()
+    # Les owners sont hors cooldown et leur activation ne consomme pas
+    # l'utilisation disponible du propriétaire normal de l'extension.
+    if not owner_bypass:
+        territory_extension_daily[extension_id] = now_paris.isoformat()
+        save_data()
 
 
 @bot.hybrid_command(name="pirater", hidden=True)
