@@ -603,6 +603,11 @@ def _casino_success(base_chance: float) -> bool:
     chance = max(0.0, min(1.0, base_chance * _casino_chance_multiplier()))
     return random.random() < chance
 
+
+def _casino_lucky_randint(low: int, high: int) -> int:
+    """Pour un gain aléatoire, effectue jusqu'à trois tirages et garde le meilleur."""
+    return max(random.randint(low, high) for _ in range(int(_casino_chance_multiplier())))
+
 # Immunisés aux commandes de modération négatives (warn/mute/ban/silence/punition) : Azog + Vynaro (happy_gt3)
 MOD_IMMUNE_IDS = {550678866839207937, 1056848438270115900}
 
@@ -4735,11 +4740,39 @@ class BlackjackGame:
     def __init__(self, bet):
         self.deck    = _new_deck()
         self.bet     = bet  # mise initiale (référence pour l'assurance et l'affichage)
-        self.hands   = [{'cards': [self.deck.pop(), self.deck.pop()], 'bet': bet,
+        player_cards = []
+        player_cards.append(self._lucky_draw(player_cards))
+        player_cards.append(self._lucky_draw(player_cards))
+        self.hands   = [{'cards': player_cards, 'bet': bet,
                          'done': False, 'busted': False, 'result': None}]
-        self.dealer  = [self.deck.pop(), self.deck.pop()]
+        self.dealer  = []
+        self.dealer.append(self._lucky_draw(self.dealer, dealer=True))
+        self.dealer.append(self._lucky_draw(self.dealer, dealer=True))
         self.active_idx    = 0
         self.insurance_bet = 0
+
+    def _lucky_draw(self, hand, dealer: bool = False):
+        attempts = min(int(_casino_chance_multiplier()), len(self.deck))
+        candidates = [self.deck.pop() for _ in range(attempts)]
+        if dealer and attempts > 1:
+            # Le croupier garde le tirage le moins dangereux pour les joueurs :
+            # une carte qui le fait sauter, sinon le total le plus faible.
+            def score(card):
+                total = _bj_total(hand + [card])
+                return (1 if total > 21 else 0, -total)
+            chosen = max(candidates, key=score)
+        elif attempts > 1:
+            # Le joueur garde la carte qui l'approche le plus de 21 sans sauter.
+            def score(card):
+                total = _bj_total(hand + [card])
+                return (1 if total <= 21 else 0, total if total <= 21 else -total)
+            chosen = max(candidates, key=score)
+        else:
+            chosen = candidates[0]
+        candidates.remove(chosen)
+        self.deck.extend(candidates)
+        random.shuffle(self.deck)
+        return chosen
 
     def dt(self):
         return _bj_total(self.dealer)
@@ -4759,7 +4792,7 @@ class BlackjackGame:
 
     def hit_current(self):
         h = self.current_hand()
-        h['cards'].append(self.deck.pop())
+        h['cards'].append(self._lucky_draw(h['cards']))
         total = _bj_total(h['cards'])
         if total >= 21:
             h['done'] = True
@@ -4777,8 +4810,8 @@ class BlackjackGame:
     def split_current(self):
         h = self.hands[self.active_idx]
         c1, c2 = h['cards']
-        new_hand = {'cards': [c2, self.deck.pop()], 'bet': h['bet'], 'done': False, 'busted': False, 'result': None}
-        h['cards'] = [c1, self.deck.pop()]
+        new_hand = {'cards': [c2, self._lucky_draw([c2])], 'bet': h['bet'], 'done': False, 'busted': False, 'result': None}
+        h['cards'] = [c1, self._lucky_draw([c1])]
         total = _bj_total(h['cards'])
         if total >= 21:
             h['done'] = True
@@ -4793,7 +4826,7 @@ class BlackjackGame:
 
     def play_dealer(self):
         while self.dt() < 17:
-            self.dealer.append(self.deck.pop())
+            self.dealer.append(self._lucky_draw(self.dealer, dealer=True))
 
     def resolve_hand(self, h) -> str:
         if h['busted']:
@@ -4940,7 +4973,7 @@ class PokerGame:
         self.bets      = {p: 0 for p in self.players}
         self.acted     = set()
         for p in self.players:
-            self.hands[p] = [self.deck.pop(), self.deck.pop()]
+            self.hands[p] = self._deal_lucky_hand()
         sb = self.players[self.sb_idx % len(self.players)]
         bb = self.players[(self.sb_idx + 1) % len(self.players)]
         sb_amt = min(self.ante // 2, self.stacks[sb])
@@ -4951,6 +4984,21 @@ class PokerGame:
         bb_idx = self.players.index(bb)
         self.action_idx = (bb_idx + 1) % len(self.players)
         self.phase = 'preflop'
+
+    def _deal_lucky_hand(self):
+        attempts = min(int(_casino_chance_multiplier()), len(self.deck) // 2)
+        candidates = [[self.deck.pop(), self.deck.pop()] for _ in range(attempts)]
+        def score(hand):
+            values = sorted((RANK_VAL[c['r']] for c in hand), reverse=True)
+            pair = values[0] == values[1]
+            suited = hand[0]['s'] == hand[1]['s']
+            return (1 if pair else 0, values[0] + values[1], 1 if suited else 0)
+        chosen = max(candidates, key=score)
+        for hand in candidates:
+            if hand is not chosen:
+                self.deck.extend(hand)
+        random.shuffle(self.deck)
+        return chosen
 
     def _deduct(self, uid, amt):
         self.stacks[uid] = max(0, self.stacks[uid] - amt)
@@ -5127,7 +5175,7 @@ async def cmd_travail(ctx):
             await ctx.send(f"⏳ {ctx.author.mention}, vous êtes fatigué(e) ! Revenez dans **{h}h {m}min**.")
             return
     has_pro = _has_item(ctx.author.id, 2)
-    amount = random.randint(50, 400) if has_pro else random.randint(10, 300)
+    amount = _casino_lucky_randint(50, 400) if has_pro else _casino_lucky_randint(10, 300)
     work_cooldowns[uid] = now.isoformat()
     coins[ctx.author.id] += amount
     save_data()
@@ -5163,7 +5211,7 @@ async def cmd_mendier(ctx):
     ok, wait = _cd_ok(beg_cooldowns, uid, cooldown_h('mendier'))
     if not ok:
         return await ctx.send(f"⏳ {ctx.author.mention}, revenez dans {wait}.")
-    amount = random.randint(BEG_MIN, BEG_MAX)
+    amount = _casino_lucky_randint(BEG_MIN, BEG_MAX)
     coins[uid] += amount
     save_data()
     embed = discord.Embed(
@@ -5967,7 +6015,7 @@ async def cmd_duel(ctx, member: discord.Member, mise: str):
     if coins[ctx.author.id] < mise or coins[member.id] < mise:
         await ctx.send("❌ Un des joueurs n'a plus assez de coins."); return
 
-    winner = random.choice([ctx.author, member])
+    winner = ctx.author if _casino_success(0.5) else member
     loser  = member if winner == ctx.author else ctx.author
     coins[ctx.author.id] -= mise
     coins[member.id]      -= mise
@@ -7260,8 +7308,21 @@ class HigherLowerView(discord.ui.View):
             if mult is None:
                 return await interaction.response.send_message("❌ Ce pari n'est plus possible.", ephemeral=True)
 
-            drawn = self.deck.pop()
-            cur_val, new_val = RANK_VAL[self.current['r']], RANK_VAL[drawn['r']]
+            cur_val = RANK_VAL[self.current['r']]
+            def matches(card):
+                value = RANK_VAL[card['r']]
+                if direction == 'higher': return value > cur_val
+                if direction == 'lower': return value < cur_val
+                return value == cur_val
+
+            if _casino_chance_multiplier() > 1:
+                wanted_win = _casino_success(count / len(self.deck))
+                pool = [card for card in self.deck if matches(card) == wanted_win]
+                drawn = random.choice(pool or self.deck)
+                self.deck.remove(drawn)
+            else:
+                drawn = self.deck.pop()
+            new_val = RANK_VAL[drawn['r']]
             if direction == 'higher': win = new_val > cur_val
             elif direction == 'lower': win = new_val < cur_val
             else: win = new_val == cur_val
@@ -7669,7 +7730,7 @@ async def cmd_miner(ctx):
     ok, wait = _cd_ok(miner_cooldowns, ctx.author.id, cooldown_h('miner'))
     if not ok:
         return await ctx.send(f"⏳ {ctx.author.mention}, vos mines sont épuisées ! Revenez dans {wait}.")
-    amount = random.randint(50, 200)
+    amount = _casino_lucky_randint(50, 200)
     coins[ctx.author.id] += amount
     save_data()
     embed = discord.Embed(title="⛏️ Minage réussi !", color=0x95a5a6,
@@ -7825,7 +7886,7 @@ async def cmd_hacker(ctx, cible: discord.Member):
         return await ctx.send(f"❌ {cible.mention} ne possède aucune crypto à voler !")
     symbol = random.choice(list(owned.keys()))
     held   = owned[symbol]
-    if random.random() < 0.60:
+    if _casino_success(0.60):
         pct        = random.uniform(0.05, 0.25)
         stolen_qty = round(held * pct, 8)
         crypto_holdings[uid_t][symbol]    = round(held - stolen_qty, 8)
@@ -8316,7 +8377,7 @@ async def cmd_voler(ctx, cible: discord.Member):
         return await ctx.send(guard_err)
     base_rate = 0.55
     if _get_job(ctx.author.id) == 'escroc': base_rate += 0.20
-    if random.random() < base_rate:
+    if _casino_success(base_rate):
         pct    = random.uniform(0.05, 0.20)
         stolen = int(safe_cible * pct)
         stolen = max(50, stolen)
@@ -8361,7 +8422,7 @@ async def cmd_rob(ctx, cible: discord.Member):
     guard_err = _attack_guard(cible.id)
     if guard_err:
         return await ctx.send(guard_err)
-    if random.random() < 0.55:
+    if _casino_success(0.55):
         pct    = random.uniform(0.05, 0.15)
         stolen = int(cash_cible * pct)
         if _get_job(ctx.author.id) == 'escroc':
@@ -9861,6 +9922,17 @@ class CourseView(discord.ui.View):
         await _run_race(interaction.channel, interaction.guild)
 
 
+def _race_bet_wins(driver_idx: int, official_winner_idx: int, weights) -> bool:
+    """Chaque parieur profite de trois tirages pendant Idle Death Gamble."""
+    if driver_idx == official_winner_idx:
+        return True
+    bonus_draws = max(0, int(_casino_chance_multiplier()) - 1)
+    return any(
+        random.choices(range(len(race_drivers_live)), weights=weights, k=1)[0] == driver_idx
+        for _ in range(bonus_draws)
+    )
+
+
 async def _run_race(channel, guild):
     """Lance la course (extraction de l'ancien lancer_course)."""
     global race_accepting, race_bets
@@ -9898,7 +9970,7 @@ async def _run_race(channel, guild):
     winners_lines = []
     for uid, binfo in race_bets.items():
         uid_int = int(uid)
-        if binfo['driver'] == winner_idx:
+        if _race_bet_wins(binfo['driver'], winner_idx, weights):
             odds = _race_odds(winner_idx)
             payout = int(binfo['amount'] * odds)
             coins[uid_int] += payout
@@ -9987,7 +10059,7 @@ async def cmd_lancer_course(ctx):
     winners_lines = []
     for uid, binfo in race_bets.items():
         uid_int = int(uid)
-        if binfo['driver'] == winner_idx:
+        if _race_bet_wins(binfo['driver'], winner_idx, weights):
             odds   = _race_odds(winner_idx)
             payout = int(binfo['amount'] * odds)
             coins[uid_int] += payout
