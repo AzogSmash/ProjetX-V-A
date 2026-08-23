@@ -592,7 +592,7 @@ territory_extension_daily = {}  # extension_id -> timestamp ISO de la dernière 
 def _casino_chance_multiplier() -> float:
     until = territory_extension.get('until')
     if until and datetime.now() < until:
-        return 3.0 if territory_extension.get('name') == 'idle_death_gamble' else 1.0
+        return 7.77 if territory_extension.get('name') == 'idle_death_gamble' else 1.0
     if until:
         territory_extension.update(name=None, until=None, channel_id=None)
     return 1.0
@@ -605,8 +605,15 @@ def _casino_success(base_chance: float) -> bool:
 
 
 def _casino_lucky_randint(low: int, high: int) -> int:
-    """Pour un gain aléatoire, effectue jusqu'à trois tirages et garde le meilleur."""
-    return max(random.randint(low, high) for _ in range(int(_casino_chance_multiplier())))
+    """Effectue le nombre de tirages bonus actif et garde le meilleur gain."""
+    return max(random.randint(low, high) for _ in range(_casino_luck_attempts()))
+
+
+def _casino_luck_attempts() -> int:
+    """Convertit un multiplicateur décimal en nombre de tirages sans le tronquer."""
+    multiplier = _casino_chance_multiplier()
+    whole = math.floor(multiplier)
+    return max(1, whole + (1 if random.random() < multiplier - whole else 0))
 
 # Immunisés aux commandes de modération négatives (warn/mute/ban/silence/punition) : Azog + Vynaro (happy_gt3)
 MOD_IMMUNE_IDS = {550678866839207937, 1056848438270115900}
@@ -4752,7 +4759,7 @@ class BlackjackGame:
         self.insurance_bet = 0
 
     def _lucky_draw(self, hand, dealer: bool = False):
-        attempts = min(int(_casino_chance_multiplier()), len(self.deck))
+        attempts = min(_casino_luck_attempts(), len(self.deck))
         candidates = [self.deck.pop() for _ in range(attempts)]
         if dealer and attempts > 1:
             # Le croupier garde le tirage le moins dangereux pour les joueurs :
@@ -4986,7 +4993,7 @@ class PokerGame:
         self.phase = 'preflop'
 
     def _deal_lucky_hand(self):
-        attempts = min(int(_casino_chance_multiplier()), len(self.deck) // 2)
+        attempts = min(_casino_luck_attempts(), len(self.deck) // 2)
         candidates = [[self.deck.pop(), self.deck.pop()] for _ in range(attempts)]
         def score(hand):
             values = sorted((RANK_VAL[c['r']] for c in hand), reverse=True)
@@ -5434,7 +5441,7 @@ async def cmd_slots(ctx, mise: str):
     if ctx.author.id == CASINO_HINT_USER_ID and casino_cheat_enabled:
         result = ['💎', '💎', '💎']
     else:
-        attempts = int(_casino_chance_multiplier())
+        attempts = _casino_luck_attempts()
         rolls = [random.choices(SLOT_SYMS, weights=SLOT_W, k=3) for _ in range(attempts)]
         def _slot_score(roll):
             if roll[0] == roll[1] == roll[2]:
@@ -5866,7 +5873,7 @@ async def _activate_idle_death_gamble(ctx):
     await ctx.send(
         "🎰 **Extension du territoire : Idle Death Gamble !**\n"
         "Pendant **2 minutes**, le taux de réussite et la chance de tout le monde "
-        "au casino sont multipliés par **3**.",
+        "au casino sont multipliés par **7,77**.",
         allowed_mentions=discord.AllowedMentions.none(),
     )
     asyncio.create_task(_end_territory_extension(until, ctx.channel.id))
@@ -9926,7 +9933,7 @@ def _race_bet_wins(driver_idx: int, official_winner_idx: int, weights) -> bool:
     """Chaque parieur profite de trois tirages pendant Idle Death Gamble."""
     if driver_idx == official_winner_idx:
         return True
-    bonus_draws = max(0, int(_casino_chance_multiplier()) - 1)
+    bonus_draws = max(0, _casino_luck_attempts() - 1)
     return any(
         random.choices(range(len(race_drivers_live)), weights=weights, k=1)[0] == driver_idx
         for _ in range(bonus_draws)
