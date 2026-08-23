@@ -5,3 +5,5 @@ google-generativeai
 aiohttp
 Pillow
 staticmap
+flask
+supabase
