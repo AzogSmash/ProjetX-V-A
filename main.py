@@ -586,6 +586,7 @@ casino_cheat_enabled = True
 # volontairement pas persistées : un redémarrage du bot met fin à leur effet.
 territory_extension = {'name': None, 'until': None, 'channel_id': None}
 territory_extension_prompts = set()
+territory_extension_daily = {}  # extension_id -> timestamp ISO de la dernière activation
 
 
 def _casino_chance_multiplier() -> float:
@@ -1165,6 +1166,7 @@ def load_data():
     global shield_active, shield_cooldown, shield_break_streak
     global race_bets, race_drivers_live, race_accepting
     global teams, user_team, disabled_cmds, cmd_role_perms, tournaments, casino_banned_users, casino_cheat_enabled
+    global territory_extension_daily
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
     global CASINO_LOG_CHANNEL_ID, LOG_MODERATION_CHANNEL_ID, LOG_GIVEAWAY_CHANNEL_ID, LOG_GENERAL_CHANNEL_ID, LOG_TICKET_CHANNEL_ID
     global TICKET_CATEGORY_ID, TICKET_CATEGORY_IDS, TICKET_CATEGORIES
@@ -1255,6 +1257,7 @@ def load_data():
                 team_state['next_id'] = ts.get('next_id', 1)
                 disabled_cmds    = set(data.get('disabled_cmds', []))
                 casino_cheat_enabled = bool(data.get('casino_cheat_enabled', True))
+                territory_extension_daily = data.get('territory_extension_daily', {})
                 cmd_role_perms   = data.get('cmd_role_perms', {})
                 casino_banned_users = set(data.get('casino_banned_users', []))
                 daily_streaks    = data.get('daily_streaks', {})
@@ -1477,6 +1480,7 @@ def save_data(force: bool = False):
     data_to_save['team_state']       = dict(team_state)
     data_to_save['disabled_cmds']    = list(disabled_cmds)
     data_to_save['casino_cheat_enabled'] = casino_cheat_enabled
+    data_to_save['territory_extension_daily'] = territory_extension_daily
     data_to_save['cmd_role_perms']   = cmd_role_perms
     data_to_save['casino_banned_users'] = list(casino_banned_users)
     data_to_save['casino_config']    = casino_config
@@ -5822,7 +5826,11 @@ async def _activate_idle_death_gamble(ctx):
 
 # Registre extensible : ajouter ici les futures extensions et leur fonction.
 TERRITORY_EXTENSIONS = {
-    'idle death gamble': _activate_idle_death_gamble,
+    'idle death gamble': {
+        'id': 'idle_death_gamble',
+        'user_id': 730152107511906436,
+        'handler': _activate_idle_death_gamble,
+    },
 }
 
 
@@ -5869,13 +5877,44 @@ async def cmd_extension(ctx, *, invocation: str = None):
     finally:
         territory_extension_prompts.discard(ctx.channel.id)
 
-    handler = TERRITORY_EXTENSIONS.get(_normalize_extension_name(answer.content))
-    if handler is None:
+    extension = TERRITORY_EXTENSIONS.get(_normalize_extension_name(answer.content))
+    if extension is None:
         return await ctx.send(
             "❓ Cette extension du territoire est **inconnue**.",
             allowed_mentions=discord.AllowedMentions.none(),
         )
-    await handler(ctx)
+    if ctx.author.id != extension['user_id']:
+        return await ctx.send(
+            "🚫 Cette extension du territoire ne vous appartient pas.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    now_paris = datetime.now(BS_SEASON_TZ)
+    extension_id = extension['id']
+    last_used_raw = territory_extension_daily.get(extension_id)
+    if last_used_raw:
+        try:
+            last_used = datetime.fromisoformat(last_used_raw)
+            # Compatibilité avec une éventuelle ancienne valeur sans fuseau.
+            if last_used.tzinfo is None:
+                last_used = last_used.replace(tzinfo=BS_SEASON_TZ)
+            available_at = last_used + timedelta(hours=24)
+            if now_paris < available_at:
+                remaining = available_at - now_paris
+                total_minutes = max(1, math.ceil(remaining.total_seconds() / 60))
+                hours, minutes = divmod(total_minutes, 60)
+                wait_text = f"{hours}h {minutes}min" if hours else f"{minutes}min"
+                return await ctx.send(
+                    "⏳ Cette extension du territoire est encore en recharge pendant "
+                    f"**{wait_text}**.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        except (TypeError, ValueError):
+            pass
+
+    await extension['handler'](ctx)
+    territory_extension_daily[extension_id] = now_paris.isoformat()
+    save_data()
 
 
 @bot.hybrid_command(name="pirater", hidden=True)
