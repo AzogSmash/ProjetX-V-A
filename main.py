@@ -5954,7 +5954,7 @@ async def cmd_extension(ctx, *, invocation: str = None):
             # Compatibilité avec une éventuelle ancienne valeur sans fuseau.
             if last_used.tzinfo is None:
                 last_used = last_used.replace(tzinfo=BS_SEASON_TZ)
-            available_at = last_used + timedelta(hours=24)
+            available_at = last_used + timedelta(hours=10)
             if now_paris < available_at:
                 remaining = available_at - now_paris
                 total_minutes = max(1, math.ceil(remaining.total_seconds() / 60))
