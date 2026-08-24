@@ -54,3 +54,34 @@ class MineUpgradeResult:
     new_level: int
     cost: int
     balance: int
+
+
+@dataclass(frozen=True)
+class MarketOrder:
+    id: int
+    owner_discord_user_id: int
+    side: str
+    resource_type: str
+    original_quantity: int
+    remaining_quantity: int
+    unit_price: int
+    status: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class MarketOrderResult:
+    order: MarketOrder
+    filled_quantity: int
+    duplicate_request: bool = False
+
+
+@dataclass(frozen=True)
+class MarketSummary:
+    resource_type: str
+    average_price_24h: float | None
+    low_price_24h: int | None
+    high_price_24h: int | None
+    volume_24h: int
+    sell_orders: tuple[MarketOrder, ...]
+    buy_orders: tuple[MarketOrder, ...]

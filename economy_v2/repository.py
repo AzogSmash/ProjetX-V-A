@@ -9,6 +9,9 @@ from economy_v2.models import (
     Mine,
     MineCollectionResult,
     MineUpgradeResult,
+    MarketOrder,
+    MarketOrderResult,
+    MarketSummary,
 )
 
 
@@ -45,6 +48,28 @@ class IndustrialEconomyRepository(Protocol):
     def get_inventory(self, user_id: int) -> list[InventoryEntry]:
         ...
 
+    def create_market_order(
+        self,
+        user_id: int,
+        side: str,
+        resource_type: str,
+        quantity: int,
+        unit_price: int,
+        request_id: str,
+    ) -> tuple[str, MarketOrderResult | None, int | None]:
+        ...
+
+    def cancel_market_order(
+        self, user_id: int, order_id: int
+    ) -> tuple[str, MarketOrder | None]:
+        ...
+
+    def get_market_orders(self, user_id: int) -> list[MarketOrder]:
+        ...
+
+    def get_market_summary(self, resource_type: str, depth: int) -> MarketSummary:
+        ...
+
 
 def _user_from_row(row: dict) -> IndustrialUser:
     return IndustrialUser(
@@ -77,6 +102,17 @@ def _mine_from_row(row: dict) -> Mine:
         quality_level=int(row["quality_level"]),
         production_progress=int(row["production_progress"]),
         last_production_at=row["last_production_at"],
+    )
+
+
+def _market_order_from_row(row: dict) -> MarketOrder:
+    return MarketOrder(
+        id=int(row["id"]), owner_discord_user_id=int(row["owner_discord_user_id"]),
+        side=row["side"], resource_type=row["resource_type"],
+        original_quantity=int(row["original_quantity"]),
+        remaining_quantity=int(row["remaining_quantity"]),
+        unit_price=int(row["unit_price"]), status=row["status"],
+        created_at=str(row["created_at"]),
     )
 
 
@@ -225,3 +261,44 @@ class SupabaseIndustrialEconomyRepository:
             )
             for row in response.data
         ]
+
+    def create_market_order(self, user_id: int, side: str, resource_type: str,
+                            quantity: int, unit_price: int, request_id: str):
+        row = self._rpc_row("create_industrial_market_order", {
+            "p_owner_discord_user_id": user_id, "p_side": side,
+            "p_resource_type": resource_type, "p_quantity": quantity,
+            "p_unit_price": unit_price, "p_request_id": request_id,
+        })
+        status = row["result_status"]
+        if status not in {"ok", "duplicate"}:
+            return status, None, int(row["available_amount"]) if row.get("available_amount") is not None else None
+        order = _market_order_from_row(row)
+        return status, MarketOrderResult(order, int(row["filled_quantity"]), status == "duplicate"), None
+
+    def cancel_market_order(self, user_id: int, order_id: int):
+        row = self._rpc_row("cancel_industrial_market_order", {
+            "p_owner_discord_user_id": user_id, "p_order_id": order_id,
+        })
+        return row["result_status"], (_market_order_from_row(row) if row.get("id") is not None else None)
+
+    def get_market_orders(self, user_id: int) -> list[MarketOrder]:
+        response = (get_client().table("industrial_market_orders")
+                    .select("id,owner_discord_user_id,side,resource_type,original_quantity,remaining_quantity,unit_price,status,created_at")
+                    .eq("owner_discord_user_id", user_id).eq("status", "open")
+                    .order("created_at").execute())
+        return [_market_order_from_row(row) for row in response.data]
+
+    def get_market_summary(self, resource_type: str, depth: int) -> MarketSummary:
+        client = get_client()
+        stats = client.rpc("get_industrial_market_stats", {"p_resource_type": resource_type}).execute().data[0]
+        fields = "id,owner_discord_user_id,side,resource_type,original_quantity,remaining_quantity,unit_price,status,created_at"
+        sells = (client.table("industrial_market_orders").select(fields).eq("resource_type", resource_type)
+                 .eq("side", "sell").eq("status", "open").order("unit_price").order("created_at").limit(depth).execute())
+        buys = (client.table("industrial_market_orders").select(fields).eq("resource_type", resource_type)
+                .eq("side", "buy").eq("status", "open").order("unit_price", desc=True).order("created_at").limit(depth).execute())
+        return MarketSummary(resource_type,
+            float(stats["average_price_24h"]) if stats["average_price_24h"] is not None else None,
+            int(stats["low_price_24h"]) if stats["low_price_24h"] is not None else None,
+            int(stats["high_price_24h"]) if stats["high_price_24h"] is not None else None,
+            int(stats["volume_24h"]), tuple(map(_market_order_from_row, sells.data)),
+            tuple(map(_market_order_from_row, buys.data)))

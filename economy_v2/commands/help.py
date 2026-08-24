@@ -20,14 +20,16 @@ async def ecohelp_command(context: EconomyCommandContext) -> None:
             "`?company create <métier> <nom>` — Créer gratuitement sa première entreprise"
             "\n`?mine` — Afficher sa mine *(Mineurs)*\n"
             "`?mine collect` — Récolter le minerai\n"
-            "`?mine upgrade <type>` — Améliorer la mine"
+            "`?mine upgrade <type>` — Améliorer la mine\n"
+            "`?market` — Consulter le marché industriel\n"
+            "`?market <sell|buy> iron_ore <quantité> <prix>` — Échanger\n"
+            "`?market orders` / `?market cancel <id>` — Gérer ses ordres"
         ),
         inline=False,
     )
     embed.add_field(
         name="En développement",
         value=(
-            "📈 `?market` — Marché\n"
             "🔥 `?forge` — Forge\n"
             "🚚 `?delivery` — Livraisons\n"
             "🏦 `?bank` — Banque\n"
