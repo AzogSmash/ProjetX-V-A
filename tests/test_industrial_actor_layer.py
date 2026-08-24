@@ -16,7 +16,7 @@ class ActorLayerMigrationTests(unittest.TestCase):
         self.assertIn("actor inventory backfill incomplete", SQL)
         self.assertIn("actor inventory duplicates", SQL)
         self.assertIn("primary key(actor_id,resource_type)", SQL)
-        self.assertIn("industrial_inventory_owner_resource_key", SQL)
+        self.assertIn("industrial_inventory_actor_resource_pkey", SQL)
         self.assertIn("industrial_inventory_enforce_actor", SQL)
 
     def test_transport_backfill_and_compatibility(self):

@@ -261,7 +261,7 @@ class MiningMigrationTests(unittest.TestCase):
             "pg_advisory_xact_lock",
             "for update",
             "on conflict (owner_discord_user_id) do nothing",
-            "on conflict (owner_discord_user_id, resource_type) do update",
+            "on conflict on constraint industrial_inventory_pkey do update",
             "credits = credits - calculated_cost",
             "alter table industrial_mines enable row level security",
             "alter table industrial_inventory enable row level security",

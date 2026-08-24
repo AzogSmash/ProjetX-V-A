@@ -28,8 +28,9 @@ as $$ declare c public.industrial_contracts%rowtype;n integer:=0;begin
   for c in select x.* from public.industrial_contracts x where x.status='open' and x.expires_at<=clock_timestamp()
     order by x.id for update loop
     update public.industrial_users set credits=credits+c.escrow_credits where discord_user_id=c.creator_discord_user_id;
-    update public.industrial_contracts set status='expired',escrow_credits=0,cancelled_at=clock_timestamp()
-      where id=c.id and status='open';n:=n+1;
+    update public.industrial_contracts as target_contract
+      set status='expired',escrow_credits=0,cancelled_at=clock_timestamp()
+      where target_contract.id=c.id and target_contract.status='open';n:=n+1;
   end loop;return n;end;$$;
 
 create or replace function public.create_industrial_resource_contract(
@@ -76,12 +77,18 @@ as $$ declare c public.industrial_contracts%rowtype;available bigint;lock_id big
  if c.creator_discord_user_id=p_accepter_discord_user_id then return query select 'own_contract',null::bigint,null::bigint,null::bigint,null::bigint,null::text,null::bigint,null::bigint,null::text,null::timestamptz;return;end if;
  select i.quantity into available from public.industrial_inventory i where i.owner_discord_user_id=p_accepter_discord_user_id and i.resource_type=c.resource_type for update;available:=coalesce(available,0);
  if available<c.quantity then return query select 'insufficient_inventory',available,null::bigint,null::bigint,null::bigint,null::text,null::bigint,null::bigint,null::text,null::timestamptz;return;end if;
- update public.industrial_inventory set quantity=quantity-c.quantity where owner_discord_user_id=p_accepter_discord_user_id and resource_type=c.resource_type;
+ update public.industrial_inventory as target_inventory
+  set quantity=target_inventory.quantity-c.quantity
+  where target_inventory.owner_discord_user_id=p_accepter_discord_user_id
+    and target_inventory.resource_type=c.resource_type;
  insert into public.industrial_inventory(owner_discord_user_id,resource_type,quantity) values(c.creator_discord_user_id,c.resource_type,c.quantity)
-  on conflict(owner_discord_user_id,resource_type)do update set quantity=industrial_inventory.quantity+excluded.quantity;
+  on conflict on constraint industrial_inventory_pkey do update
+   set quantity=industrial_inventory.quantity+excluded.quantity;
  update public.industrial_users set credits=credits+c.escrow_credits where discord_user_id=p_accepter_discord_user_id;
- update public.industrial_contracts set status='completed',escrow_credits=0,accepter_discord_user_id=p_accepter_discord_user_id,
-  accept_request_id=p_request_id,completed_at=clock_timestamp() where id=c.id returning * into c;
+ update public.industrial_contracts as target_contract
+  set status='completed',escrow_credits=0,accepter_discord_user_id=p_accepter_discord_user_id,
+  accept_request_id=p_request_id,completed_at=clock_timestamp()
+  where target_contract.id=c.id returning * into c;
  return query select 'ok',available-c.quantity,c.id,c.creator_discord_user_id,c.accepter_discord_user_id,c.resource_type,c.quantity,c.total_price,c.status,c.expires_at;end;$$;
 
 create or replace function public.cancel_industrial_resource_contract(p_creator_discord_user_id bigint,p_contract_id bigint,p_request_id text)
@@ -95,7 +102,9 @@ as $$declare c public.industrial_contracts%rowtype;begin
  if c.cancel_request_id=p_request_id and c.status='cancelled' then return query select 'duplicate',c.id,c.creator_discord_user_id,c.accepter_discord_user_id,c.resource_type,c.quantity,c.total_price,c.status,c.expires_at;return;end if;
  if c.status<>'open' then return query select 'already_closed',null::bigint,null::bigint,null::bigint,null::text,null::bigint,null::bigint,null::text,null::timestamptz;return;end if;
  update public.industrial_users set credits=credits+c.escrow_credits where discord_user_id=p_creator_discord_user_id;
- update public.industrial_contracts set status='cancelled',escrow_credits=0,cancel_request_id=p_request_id,cancelled_at=clock_timestamp() where id=c.id returning * into c;
+ update public.industrial_contracts as target_contract
+  set status='cancelled',escrow_credits=0,cancel_request_id=p_request_id,cancelled_at=clock_timestamp()
+  where target_contract.id=c.id returning * into c;
  return query select 'ok',c.id,c.creator_discord_user_id,c.accepter_discord_user_id,c.resource_type,c.quantity,c.total_price,c.status,c.expires_at;end;$$;
 
 create or replace function public.get_industrial_resource_contracts(p_discord_user_id bigint,p_mine boolean)

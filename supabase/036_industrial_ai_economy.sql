@@ -83,9 +83,10 @@ as $$declare company public.industrial_ai_companies%rowtype;actor_id bigint;inse
  perform public.evaluate_industrial_ai_companies();
  for company in select c.* from public.industrial_ai_companies c where c.enabled order by c.id loop
   insert into public.industrial_actors(actor_type,ai_company_id)values('ai',company.id)
-   on conflict(ai_company_id)do nothing;
+   on conflict on constraint industrial_actors_ai_company_id_key do nothing;
   select a.id into actor_id from public.industrial_actors a where a.ai_company_id=company.id;
-  insert into public.industrial_ai_accounts(actor_id,credits)values(actor_id,25000)on conflict(actor_id)do nothing;
+  insert into public.industrial_ai_accounts(actor_id,credits)values(actor_id,25000)
+   on conflict on constraint industrial_ai_accounts_pkey do nothing;
   if found then
    insert into public.industrial_ai_cash_events(actor_id,event_type,amount,balance_after,reference_type,reference_id)
     values(actor_id,'bootstrap_source',25000,25000,'ai_company',company.id);inserted_count:=inserted_count+1;
@@ -93,7 +94,7 @@ as $$declare company public.industrial_ai_companies%rowtype;actor_id bigint;inse
   if company.job_type in('miner','blacksmith') then
    insert into public.industrial_ai_production(actor_id,resource_type)
     values(actor_id,case company.job_type when 'miner' then 'iron_ore' else 'iron_ingot' end)
-    on conflict(actor_id)do nothing;
+    on conflict on constraint industrial_ai_production_pkey do nothing;
   end if;
  end loop;return inserted_count;end;$$;
 
@@ -118,13 +119,15 @@ as $$declare state public.industrial_ai_production%rowtype;now_at timestamptz;el
    select coalesce(i.quantity,0) into input_available from public.industrial_inventory i
     where i.actor_id=input_actor and i.resource_type='iron_ore' for update;
    added:=least(produced,greatest(0,state.capacity-available),coalesce(input_available,0));
-   if added>0 then update public.industrial_inventory set quantity=quantity-added
-    where actor_id=input_actor and resource_type='iron_ore';end if;
+   if added>0 then update public.industrial_inventory as target_inventory
+    set quantity=target_inventory.quantity-added
+    where target_inventory.actor_id=input_actor and target_inventory.resource_type='iron_ore';end if;
   else added:=least(produced,greatest(0,state.capacity-available));end if;
   if added>0 then
    insert into public.industrial_inventory(actor_id,owner_discord_user_id,resource_type,quantity)
     values(state.actor_id,null,state.resource_type,added)
-    on conflict(actor_id,resource_type)do update set quantity=industrial_inventory.quantity+excluded.quantity;
+    on conflict on constraint industrial_inventory_actor_resource_pkey do update
+     set quantity=industrial_inventory.quantity+excluded.quantity;
   end if;
   update public.industrial_ai_production set total_produced=total_produced+added,
    production_progress=case when available+added>=state.capacity then 0 else (numerator%3600)::integer end,
@@ -182,7 +185,9 @@ as $$declare buyer_actor bigint;producer_actor bigint;operator_actor bigint;rece
  update public.industrial_ai_accounts set credits=credits-fee where actor_id=operator_actor returning credits into ai_balance;
  insert into public.industrial_ai_cash_events(actor_id,event_type,amount,balance_after,reference_type)
   values(operator_actor,'delivery_escrow',-fee,ai_balance,'ai_supply');
- update public.industrial_inventory set quantity=quantity-p_quantity where actor_id=producer_actor and resource_type=p_resource_type;
+ update public.industrial_inventory as target_inventory
+  set quantity=target_inventory.quantity-p_quantity
+  where target_inventory.actor_id=producer_actor and target_inventory.resource_type=p_resource_type;
  now_at:=clock_timestamp();
  insert into public.industrial_transports(sender_company_id,receiver_company_id,merchant_discord_user_id,
   sender_actor_id,receiver_actor_id,operator_actor_id,transport_type,resource_type,quantity,departure_at,arrival_at,

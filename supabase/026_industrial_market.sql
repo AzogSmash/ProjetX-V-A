@@ -131,8 +131,10 @@ begin
         null::text, null::text, null::bigint, null::bigint, null::bigint,
         null::text, null::timestamptz, null::bigint; return;
     end if;
-    update public.industrial_inventory set quantity = quantity - p_quantity
-    where owner_discord_user_id = p_owner_discord_user_id and resource_type = p_resource_type;
+    update public.industrial_inventory as target_inventory
+      set quantity = target_inventory.quantity - p_quantity
+    where target_inventory.owner_discord_user_id = p_owner_discord_user_id
+      and target_inventory.resource_type = p_resource_type;
   else
     select u.credits into available from public.industrial_users u
     where u.discord_user_id = p_owner_discord_user_id for update;
@@ -186,16 +188,16 @@ begin
     end if;
     insert into public.industrial_inventory(owner_discord_user_id, resource_type, quantity)
     values (buy_order.owner_discord_user_id, p_resource_type, fill_quantity)
-    on conflict (owner_discord_user_id, resource_type) do update
+    on conflict on constraint industrial_inventory_pkey do update
       set quantity = industrial_inventory.quantity + excluded.quantity;
 
-    update public.industrial_market_orders set
-      remaining_quantity = remaining_quantity - fill_quantity,
-      escrow_quantity = escrow_quantity - case when side = 'sell' then fill_quantity else 0 end,
-      escrow_credits = escrow_credits - case when side = 'buy' then fill_quantity * unit_price else 0 end,
-      status = case when remaining_quantity = fill_quantity then 'filled' else 'open' end,
-      closed_at = case when remaining_quantity = fill_quantity then clock_timestamp() else null end
-    where id in (buy_order.id, sell_order.id);
+    update public.industrial_market_orders as target_order set
+      remaining_quantity = target_order.remaining_quantity - fill_quantity,
+      escrow_quantity = target_order.escrow_quantity - case when target_order.side = 'sell' then fill_quantity else 0 end,
+      escrow_credits = target_order.escrow_credits - case when target_order.side = 'buy' then fill_quantity * target_order.unit_price else 0 end,
+      status = case when target_order.remaining_quantity = fill_quantity then 'filled' else 'open' end,
+      closed_at = case when target_order.remaining_quantity = fill_quantity then clock_timestamp() else null end
+    where target_order.id in (buy_order.id, sell_order.id);
 
     insert into public.industrial_market_trades(
       resource_type, quantity, unit_price, seller_discord_user_id,
@@ -242,7 +244,7 @@ begin
   if order_row.side = 'sell' then
     insert into public.industrial_inventory(owner_discord_user_id, resource_type, quantity)
     values (p_owner_discord_user_id, order_row.resource_type, order_row.escrow_quantity)
-    on conflict (owner_discord_user_id, resource_type) do update
+    on conflict on constraint industrial_inventory_pkey do update
       set quantity = industrial_inventory.quantity + excluded.quantity;
   else
     update public.industrial_users set credits = credits + order_row.escrow_credits

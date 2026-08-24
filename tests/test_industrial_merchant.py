@@ -247,7 +247,7 @@ class MerchantCommandAndSqlTests(unittest.IsolatedAsyncioTestCase):
             "from public, anon, authenticated", "to service_role",
             "pg_advisory_xact_lock", "for update", "request_id text not null unique",
             "industrial_transports_active_truck_idx", "where status = 'in_transit'",
-            "arrival_at <= current_time", "quantity = industrial_inventory.quantity + excluded.quantity",
+            "arrival_at <= v_current_time", "quantity = industrial_inventory.quantity + excluded.quantity",
         ):
             self.assertIn(fragment, sql)
         self.assertNotIn("security definer", sql)

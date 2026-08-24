@@ -139,7 +139,7 @@ declare
   current_job text;
   miner_company_id bigint;
   mine_row public.industrial_mines%rowtype;
-  current_time timestamptz;
+  v_current_time timestamptz;
   elapsed_seconds bigint;
   production_rate bigint;
   storage_capacity bigint;
@@ -176,10 +176,10 @@ begin
   where m.owner_discord_user_id = p_owner_discord_user_id
   for update;
 
-  current_time := clock_timestamp();
+  v_current_time := clock_timestamp();
   elapsed_seconds := greatest(
     0,
-    floor(extract(epoch from (current_time - mine_row.last_production_at)))::bigint
+    floor(extract(epoch from (v_current_time - mine_row.last_production_at)))::bigint
   );
   production_rate := public.industrial_mine_production_rate(mine_row.production_level);
   storage_capacity := public.industrial_mine_storage_capacity(mine_row.storage_level);
@@ -191,13 +191,13 @@ begin
     update public.industrial_mines
     set stock = storage_capacity,
         production_progress = 0,
-        last_production_at = current_time
+        last_production_at = v_current_time
     where owner_discord_user_id = p_owner_discord_user_id;
   else
     update public.industrial_mines
     set stock = stock + produced,
         production_progress = mod(progress_total, 3600),
-        last_production_at = current_time
+        last_production_at = v_current_time
     where owner_discord_user_id = p_owner_discord_user_id;
   end if;
 
@@ -302,13 +302,13 @@ begin
 
   insert into public.industrial_inventory (owner_discord_user_id, resource_type, quantity)
   values (p_owner_discord_user_id, mine_row.resource_type, mine_row.stock)
-  on conflict (owner_discord_user_id, resource_type) do update
+  on conflict on constraint industrial_inventory_pkey do update
     set quantity = industrial_inventory.quantity + excluded.quantity
   returning quantity into new_inventory_quantity;
 
-  update public.industrial_mines
+  update public.industrial_mines as target_mine
   set stock = 0
-  where owner_discord_user_id = p_owner_discord_user_id;
+  where target_mine.owner_discord_user_id = p_owner_discord_user_id;
 
   return query select 'ok'::text, user_job, mine_row.owner_discord_user_id,
     mine_row.company_id, company_title, mine_row.resource_type, 0::bigint,
@@ -414,11 +414,11 @@ begin
   set credits = credits - calculated_cost
   where discord_user_id = p_owner_discord_user_id;
 
-  update public.industrial_mines
+  update public.industrial_mines as target_mine
   set storage_level = case when p_upgrade_type = 'storage' then storage_level + 1 else storage_level end,
       production_level = case when p_upgrade_type = 'production' then production_level + 1 else production_level end,
       quality_level = case when p_upgrade_type = 'quality' then quality_level + 1 else quality_level end
-  where owner_discord_user_id = p_owner_discord_user_id
+  where target_mine.owner_discord_user_id = p_owner_discord_user_id
   returning * into mine_row;
 
   current_balance := current_balance - calculated_cost;

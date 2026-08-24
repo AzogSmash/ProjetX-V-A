@@ -34,7 +34,8 @@ as $$declare selected_job text;active_count bigint;ai_name text;begin
   ai_name:=case selected_job when 'miner' then 'Mines de Secours' when 'merchant' then 'Transit de Secours'
     else 'Forges de Secours' end;
   insert into public.industrial_ai_companies(name,job_type,enabled)
-   values(ai_name,selected_job,active_count<2) on conflict(job_type)do update
+   values(ai_name,selected_job,active_count<2)
+   on conflict on constraint industrial_ai_companies_job_type_key do update
    set enabled=excluded.enabled,updated_at=clock_timestamp();
  end loop;
  return query select a.id,a.name,a.job_type,a.enabled,a.efficiency_percent,

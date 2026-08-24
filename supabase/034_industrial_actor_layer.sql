@@ -11,24 +11,29 @@ create trigger industrial_actors_set_updated_at before update on public.industri
  for each row execute function public.set_industrial_updated_at();
 alter table public.industrial_actors enable row level security;
 insert into public.industrial_actors(actor_type,discord_user_id)
- select 'player',u.discord_user_id from public.industrial_users u on conflict(discord_user_id)do nothing;
+ select 'player',u.discord_user_id from public.industrial_users u
+ on conflict on constraint industrial_actors_discord_user_id_key do nothing;
 insert into public.industrial_actors(actor_type,ai_company_id)
- select 'ai',a.id from public.industrial_ai_companies a on conflict(ai_company_id)do nothing;
+ select 'ai',a.id from public.industrial_ai_companies a
+ on conflict on constraint industrial_actors_ai_company_id_key do nothing;
 
 create or replace function public.get_or_create_industrial_player_actor(p_discord_user_id bigint)
 returns table(id bigint,actor_type text,discord_user_id bigint,ai_company_id bigint)
 language plpgsql security invoker set search_path=''
 as $$begin
  perform pg_catalog.pg_advisory_xact_lock(p_discord_user_id);
- insert into public.industrial_users(discord_user_id)values(p_discord_user_id)on conflict(discord_user_id)do nothing;
- insert into public.industrial_actors(actor_type,discord_user_id)values('player',p_discord_user_id)on conflict(discord_user_id)do nothing;
+ insert into public.industrial_users(discord_user_id)values(p_discord_user_id)
+  on conflict on constraint industrial_users_pkey do nothing;
+ insert into public.industrial_actors(actor_type,discord_user_id)values('player',p_discord_user_id)
+  on conflict on constraint industrial_actors_discord_user_id_key do nothing;
  return query select a.id,a.actor_type,a.discord_user_id,a.ai_company_id from public.industrial_actors a where a.discord_user_id=p_discord_user_id;
 end;$$;
 create or replace function public.get_industrial_ai_actor(p_ai_company_id bigint)
 returns table(id bigint,actor_type text,discord_user_id bigint,ai_company_id bigint)
 language plpgsql security invoker set search_path=''
 as $$begin
- insert into public.industrial_actors(actor_type,ai_company_id)values('ai',p_ai_company_id)on conflict(ai_company_id)do nothing;
+ insert into public.industrial_actors(actor_type,ai_company_id)values('ai',p_ai_company_id)
+  on conflict on constraint industrial_actors_ai_company_id_key do nothing;
  return query select a.id,a.actor_type,a.discord_user_id,a.ai_company_id from public.industrial_actors a where a.ai_company_id=p_ai_company_id;
 end;$$;
 
@@ -40,8 +45,8 @@ do $$begin
  if exists(select 1 from public.industrial_inventory group by actor_id,resource_type having count(*)>1)then raise exception 'actor inventory duplicates';end if;
 end;$$;
 alter table public.industrial_inventory drop constraint industrial_inventory_pkey;
-alter table public.industrial_inventory add constraint industrial_inventory_owner_resource_key unique(owner_discord_user_id,resource_type);
-alter table public.industrial_inventory add constraint industrial_inventory_pkey primary key(actor_id,resource_type);
+alter table public.industrial_inventory add constraint industrial_inventory_pkey unique(owner_discord_user_id,resource_type);
+alter table public.industrial_inventory add constraint industrial_inventory_actor_resource_pkey primary key(actor_id,resource_type);
 alter table public.industrial_inventory alter column actor_id set not null;
 alter table public.industrial_inventory alter column owner_discord_user_id drop not null;
 
@@ -51,7 +56,8 @@ as $$declare selected_actor public.industrial_actors%rowtype;begin
  if new.actor_id is null and new.owner_discord_user_id is not null then
   select a.* into selected_actor from public.industrial_actors a where a.discord_user_id=new.owner_discord_user_id;
   if not found then insert into public.industrial_actors(actor_type,discord_user_id)values('player',new.owner_discord_user_id)
-   on conflict(discord_user_id)do update set discord_user_id=excluded.discord_user_id returning * into selected_actor;end if;
+   on conflict on constraint industrial_actors_discord_user_id_key do update
+   set discord_user_id=excluded.discord_user_id returning * into selected_actor;end if;
   new.actor_id:=selected_actor.id;
  else select a.* into selected_actor from public.industrial_actors a where a.id=new.actor_id;end if;
  if selected_actor.id is null then raise exception 'invalid inventory actor' using errcode='23514';end if;

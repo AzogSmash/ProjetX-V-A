@@ -17,8 +17,8 @@ class WorldPriceTests(unittest.TestCase):
 
 class BankingMigrationTests(unittest.TestCase):
     def test_lazy_delivery_and_atomic_sale(self):
-        for token in ("arrival_at <= current_time", "for update", "status = 'delivered'",
-                      "quantity=quantity-p_quantity", "credits=credits+total",
+        for token in ("arrival_at <= v_current_time", "for update", "status = 'delivered'",
+                      "quantity=target_inventory.quantity-p_quantity", "credits=credits+total",
                       "request_id text not null unique", "pg_advisory_xact_lock(9000000001)"):
             self.assertIn(token, SQL)
 

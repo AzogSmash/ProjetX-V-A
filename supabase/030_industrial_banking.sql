@@ -46,7 +46,7 @@ create trigger industrial_bankers_set_updated_at before update on public.industr
 create or replace function public.ensure_and_refresh_industrial_banker(p_owner_discord_user_id bigint)
 returns text language plpgsql security invoker set search_path = ''
 as $$
-declare user_job text; banker_company bigint; t public.industrial_transports%rowtype; current_time timestamptz;
+declare user_job text; banker_company bigint; t public.industrial_transports%rowtype; v_current_time timestamptz;
 begin
   select u.primary_job into user_job from public.industrial_users u where u.discord_user_id = p_owner_discord_user_id;
   if user_job is distinct from 'banker' then return 'not_banker'; end if;
@@ -57,17 +57,17 @@ begin
   insert into public.industrial_bankers(owner_discord_user_id, company_id)
     values (p_owner_discord_user_id, banker_company) on conflict (owner_discord_user_id) do nothing;
   perform 1 from public.industrial_bankers b where b.owner_discord_user_id = p_owner_discord_user_id for update;
-  current_time := clock_timestamp();
+  v_current_time := clock_timestamp();
   for t in select x.* from public.industrial_transports x
     where x.receiver_company_id = banker_company and x.transport_type = 'ingot_to_banker'
-      and x.status = 'in_transit' and x.arrival_at <= current_time order by x.id for update
+      and x.status = 'in_transit' and x.arrival_at <= v_current_time order by x.id for update
   loop
-    update public.industrial_transports set status = 'delivered', completed_at = current_time
+    update public.industrial_transports set status = 'delivered', completed_at = v_current_time
       where id = t.id and status = 'in_transit';
     if found then
       insert into public.industrial_inventory(owner_discord_user_id, resource_type, quantity)
         values (p_owner_discord_user_id, t.resource_type, t.quantity)
-        on conflict (owner_discord_user_id, resource_type) do update
+        on conflict on constraint industrial_inventory_pkey do update
           set quantity = industrial_inventory.quantity + excluded.quantity;
     end if;
   end loop;
@@ -135,8 +135,10 @@ begin
     return query select 'insufficient_inventory',user_job,available,null::bigint,null::bigint,
       null::bigint,null::bigint,null::bigint,null::timestamptz; return; end if;
   price := public.industrial_world_ingot_price(); total := price * p_quantity;
-  update public.industrial_inventory set quantity=quantity-p_quantity
-    where owner_discord_user_id=p_banker_discord_user_id and resource_type='iron_ingot';
+  update public.industrial_inventory as target_inventory
+    set quantity=target_inventory.quantity-p_quantity
+    where target_inventory.owner_discord_user_id=p_banker_discord_user_id
+      and target_inventory.resource_type='iron_ingot';
   update public.industrial_users set credits=credits+total
     where discord_user_id=p_banker_discord_user_id returning credits into available;
   insert into public.industrial_world_sales(banker_discord_user_id,banker_company_id,

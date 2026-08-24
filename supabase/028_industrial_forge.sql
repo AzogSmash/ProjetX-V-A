@@ -123,7 +123,7 @@ $$;
 create or replace function public.ensure_and_refresh_industrial_blacksmith(p_owner_discord_user_id bigint)
 returns text language plpgsql security invoker set search_path = ''
 as $$
-declare current_job text; blacksmith_company_id bigint; current_time timestamptz;
+declare current_job text; blacksmith_company_id bigint; v_current_time timestamptz;
   transport_row public.industrial_transports%rowtype;
 begin
   select u.primary_job into current_job from public.industrial_users u
@@ -141,25 +141,25 @@ begin
   perform 1 from public.industrial_blacksmiths b
   where b.owner_discord_user_id = p_owner_discord_user_id for update;
 
-  current_time := clock_timestamp();
+  v_current_time := clock_timestamp();
   for transport_row in
     select t.* from public.industrial_transports t
     where t.receiver_company_id = blacksmith_company_id and t.status = 'in_transit'
-      and t.arrival_at <= current_time order by t.id for update
+      and t.arrival_at <= v_current_time order by t.id for update
   loop
-    update public.industrial_transports set status = 'delivered', completed_at = current_time
+    update public.industrial_transports set status = 'delivered', completed_at = v_current_time
     where id = transport_row.id and status = 'in_transit';
     if found then
       insert into public.industrial_inventory(owner_discord_user_id, resource_type, quantity)
       values (p_owner_discord_user_id, transport_row.resource_type, transport_row.quantity)
-      on conflict (owner_discord_user_id, resource_type) do update
+      on conflict on constraint industrial_inventory_pkey do update
         set quantity = industrial_inventory.quantity + excluded.quantity;
     end if;
   end loop;
 
-  update public.industrial_forge_jobs set status = 'completed', completed_at = current_time
+  update public.industrial_forge_jobs set status = 'completed', completed_at = v_current_time
   where owner_discord_user_id = p_owner_discord_user_id and status = 'processing'
-    and finishes_at <= current_time;
+    and finishes_at <= v_current_time;
   return 'ok';
 end;
 $$;
@@ -209,7 +209,7 @@ language plpgsql security invoker set search_path = ''
 as $$
 declare operation_status text; user_job text; blacksmith_row public.industrial_blacksmiths%rowtype;
   job_row public.industrial_forge_jobs%rowtype; free_slot integer; available bigint;
-  reserved bigint; storage_capacity bigint; duration_seconds integer; current_time timestamptz;
+  reserved bigint; storage_capacity bigint; duration_seconds integer; v_current_time timestamptz;
 begin
   if p_resource_type <> 'iron_ore' or p_quantity not between 1 and 1000000
      or p_request_id is null or char_length(p_request_id) not between 1 and 80 then
@@ -264,18 +264,20 @@ begin
       null::bigint, null::bigint, null::bigint, null::integer, null::text, null::text,
       null::bigint, null::bigint, null::timestamptz, null::timestamptz, null::text; return;
   end if;
-  update public.industrial_inventory set quantity = quantity - p_quantity
-  where owner_discord_user_id = p_owner_discord_user_id and resource_type = p_resource_type;
+  update public.industrial_inventory as target_inventory
+  set quantity = target_inventory.quantity - p_quantity
+  where target_inventory.owner_discord_user_id = p_owner_discord_user_id
+    and target_inventory.resource_type = p_resource_type;
   duration_seconds := public.industrial_forge_duration_seconds(p_quantity, blacksmith_row.speed_level);
-  current_time := clock_timestamp();
+  v_current_time := clock_timestamp();
   insert into public.industrial_forge_jobs(
     owner_discord_user_id, company_id, forge_slot, resource_input, resource_output,
     input_quantity, output_quantity, speed_level_at_start, yield_level_at_start,
     started_at, finishes_at, request_id
   ) values (p_owner_discord_user_id, blacksmith_row.company_id, free_slot,
     'iron_ore', 'iron_ingot', p_quantity, p_quantity, blacksmith_row.speed_level,
-    blacksmith_row.yield_level, current_time,
-    current_time + pg_catalog.make_interval(secs => duration_seconds), p_request_id)
+    blacksmith_row.yield_level, v_current_time,
+    v_current_time + pg_catalog.make_interval(secs => duration_seconds), p_request_id)
   returning * into job_row;
   return query select 'ok', user_job, available - p_quantity, available - p_quantity,
     job_row.id, job_row.owner_discord_user_id, job_row.company_id, job_row.forge_slot,
@@ -293,7 +295,7 @@ returns table (
 language plpgsql security invoker set search_path = ''
 as $$
 declare operation_status text; user_job text; previous public.industrial_forge_collections%rowtype;
-  collected bigint; inventory_total bigint; current_time timestamptz;
+  collected bigint; inventory_total bigint; v_current_time timestamptz;
 begin
   if p_request_id is null or char_length(p_request_id) not between 1 and 80 then
     raise exception 'invalid forge collection request' using errcode = '22023';
@@ -317,14 +319,14 @@ begin
   select coalesce(sum(j.output_quantity), 0)::bigint into collected
   from public.industrial_forge_jobs j
   where j.owner_discord_user_id = p_owner_discord_user_id and j.status = 'completed';
-  current_time := clock_timestamp();
+  v_current_time := clock_timestamp();
   if collected > 0 then
     insert into public.industrial_inventory(owner_discord_user_id, resource_type, quantity)
     values (p_owner_discord_user_id, 'iron_ingot', collected)
-    on conflict (owner_discord_user_id, resource_type) do update
+    on conflict on constraint industrial_inventory_pkey do update
       set quantity = industrial_inventory.quantity + excluded.quantity
     returning quantity into inventory_total;
-    update public.industrial_forge_jobs set status = 'collected', collected_at = current_time
+    update public.industrial_forge_jobs set status = 'collected', collected_at = v_current_time
     where owner_discord_user_id = p_owner_discord_user_id and status = 'completed';
   else
     select i.quantity into inventory_total from public.industrial_inventory i
@@ -407,12 +409,12 @@ begin
   end if;
   update public.industrial_users set credits = credits - cost_value
   where discord_user_id = p_owner_discord_user_id;
-  update public.industrial_blacksmiths set
+  update public.industrial_blacksmiths as target_blacksmith set
     forge_level = forge_level + case when p_upgrade_type = 'forges' then 1 else 0 end,
     speed_level = speed_level + case when p_upgrade_type = 'speed' then 1 else 0 end,
     storage_level = storage_level + case when p_upgrade_type = 'storage' then 1 else 0 end,
     yield_level = yield_level + case when p_upgrade_type = 'yield' then 1 else 0 end
-  where owner_discord_user_id = p_owner_discord_user_id returning * into blacksmith_row;
+  where target_blacksmith.owner_discord_user_id = p_owner_discord_user_id returning * into blacksmith_row;
   balance_value := balance_value - cost_value;
   insert into public.industrial_forge_upgrades(
     owner_discord_user_id, upgrade_type, previous_level, new_level, cost, balance_after, request_id

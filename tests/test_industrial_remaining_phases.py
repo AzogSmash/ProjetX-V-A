@@ -18,7 +18,7 @@ class ContractTests(unittest.TestCase):
         sql = (ROOT / "supabase/032_industrial_contracts.sql").read_text(encoding="utf-8")
         for token in ("escrow_credits", "for update", "accept_request_id",
                       "cancel_request_id", "credits=credits-p_total_price",
-                      "quantity=quantity-c.quantity", "refresh_industrial_contracts"):
+                      "quantity=target_inventory.quantity-c.quantity", "refresh_industrial_contracts"):
             self.assertIn(token, sql)
         self.assertIn("enable row level security", sql)
         self.assertNotIn("security definer", sql.casefold())

@@ -124,7 +124,7 @@ create or replace function public.ensure_and_refresh_industrial_merchant(
 returns text language plpgsql security invoker set search_path = ''
 as $$
 declare current_job text; merchant_company_id bigint; transport_row record;
-  receiver_owner bigint; current_time timestamptz;
+  receiver_owner bigint; v_current_time timestamptz;
 begin
   select u.primary_job into current_job from public.industrial_users u
   where u.discord_user_id = p_owner_discord_user_id;
@@ -142,20 +142,20 @@ begin
   perform 1 from public.industrial_merchants m
   where m.owner_discord_user_id = p_owner_discord_user_id for update;
 
-  current_time := clock_timestamp();
+  v_current_time := clock_timestamp();
   for transport_row in
     select t.* from public.industrial_transports t
     where t.merchant_discord_user_id = p_owner_discord_user_id
-      and t.status = 'in_transit' and t.arrival_at <= current_time
+      and t.status = 'in_transit' and t.arrival_at <= v_current_time
     order by t.id for update
   loop
     select c.owner_discord_user_id into receiver_owner
     from public.industrial_companies c where c.id = transport_row.receiver_company_id;
     insert into public.industrial_inventory(owner_discord_user_id, resource_type, quantity)
     values (receiver_owner, transport_row.resource_type, transport_row.quantity)
-    on conflict (owner_discord_user_id, resource_type) do update
+    on conflict on constraint industrial_inventory_pkey do update
       set quantity = industrial_inventory.quantity + excluded.quantity;
-    update public.industrial_transports set status = 'delivered', completed_at = current_time
+    update public.industrial_transports set status = 'delivered', completed_at = v_current_time
     where id = transport_row.id and status = 'in_transit';
   end loop;
   return 'ok';
@@ -267,12 +267,12 @@ begin
   end if;
   update public.industrial_users set credits = credits - calculated_cost
   where discord_user_id = p_owner_discord_user_id;
-  update public.industrial_merchants set
+  update public.industrial_merchants as target_merchant set
     truck_count = truck_count + case when p_upgrade_type = 'trucks' then 1 else 0 end,
     truck_capacity_level = truck_capacity_level + case when p_upgrade_type = 'capacity' then 1 else 0 end,
     truck_speed_level = truck_speed_level + case when p_upgrade_type = 'speed' then 1 else 0 end,
     warehouse_level = warehouse_level + case when p_upgrade_type = 'warehouse' then 1 else 0 end
-  where owner_discord_user_id = p_owner_discord_user_id returning * into merchant_row;
+  where target_merchant.owner_discord_user_id = p_owner_discord_user_id returning * into merchant_row;
   current_balance := current_balance - calculated_cost;
   insert into public.industrial_merchant_upgrades(
     owner_discord_user_id, upgrade_type, previous_level, new_level, cost, balance_after, request_id
@@ -300,7 +300,7 @@ language plpgsql security invoker set search_path = ''
 as $$
 declare operation_status text; user_job text; merchant_row public.industrial_merchants%rowtype;
   receiver_company bigint; receiver_name text; free_slot integer; available bigint;
-  capacity bigint; duration_seconds integer; current_time timestamptz;
+  capacity bigint; duration_seconds integer; v_current_time timestamptz;
   transport_row public.industrial_transports%rowtype; existing_receiver_owner bigint;
 begin
   if p_resource_type <> 'iron_ore' or p_quantity not between 1 and 1000000
@@ -370,17 +370,19 @@ begin
       null::bigint, null::bigint, null::text, null::bigint, null::text,
       null::bigint, null::timestamptz, null::timestamptz, null::text, null::integer; return;
   end if;
-  update public.industrial_inventory set quantity = quantity - p_quantity
-  where owner_discord_user_id = p_merchant_discord_user_id and resource_type = p_resource_type;
+  update public.industrial_inventory as target_inventory
+  set quantity = target_inventory.quantity - p_quantity
+  where target_inventory.owner_discord_user_id = p_merchant_discord_user_id
+    and target_inventory.resource_type = p_resource_type;
   duration_seconds := public.industrial_trip_duration_seconds(merchant_row.truck_speed_level);
-  current_time := clock_timestamp();
+  v_current_time := clock_timestamp();
   insert into public.industrial_transports(
     sender_company_id, receiver_company_id, merchant_discord_user_id,
     resource_type, quantity, departure_at, arrival_at,
     original_duration_seconds, current_duration_seconds, truck_slot, request_id
   ) values (merchant_row.company_id, receiver_company, p_merchant_discord_user_id,
-    p_resource_type, p_quantity, current_time,
-    current_time + pg_catalog.make_interval(secs => duration_seconds),
+    p_resource_type, p_quantity, v_current_time,
+    v_current_time + pg_catalog.make_interval(secs => duration_seconds),
     duration_seconds, duration_seconds, free_slot, p_request_id)
   returning * into transport_row;
   return query select 'ok', user_job, available - p_quantity, transport_row.id,

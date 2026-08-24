@@ -258,7 +258,7 @@ class ForgeCommandAndSqlTests(unittest.IsolatedAsyncioTestCase):
             "security invoker", "set search_path = ''", "enable row level security",
             "from public, anon, authenticated", "to service_role", "pg_advisory_xact_lock",
             "for update", "request_id text not null unique", "industrial_forge_jobs_active_slot_idx",
-            "receiver_company_id = blacksmith_company_id", "arrival_at <= current_time",
+            "receiver_company_id = blacksmith_company_id", "arrival_at <= v_current_time",
             "status = 'collected'", "quantity = industrial_inventory.quantity + excluded.quantity",
             "credits = credits - cost_value",
         ):

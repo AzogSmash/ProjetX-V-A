@@ -123,8 +123,10 @@ begin
       null::bigint, null::text, null::bigint, null::text, null::timestamptz,
       null::timestamptz, null::timestamptz; return;
   end if;
-  update public.industrial_inventory set quantity = quantity - p_quantity
-    where owner_discord_user_id = p_blacksmith_discord_user_id and resource_type = 'iron_ingot';
+  update public.industrial_inventory as target_inventory
+    set quantity = target_inventory.quantity - p_quantity
+    where target_inventory.owner_discord_user_id = p_blacksmith_discord_user_id
+      and target_inventory.resource_type = 'iron_ingot';
   insert into public.industrial_ingot_shipments(
     blacksmith_company_id, blacksmith_discord_user_id, merchant_company_id,
     merchant_discord_user_id, banker_company_id, banker_discord_user_id, quantity, request_id
@@ -151,7 +153,7 @@ returns table (
 )
 language plpgsql security invoker set search_path = ''
 as $$
-declare s public.industrial_ingot_shipments%rowtype; user_job text; current_time timestamptz;
+declare s public.industrial_ingot_shipments%rowtype; user_job text; v_current_time timestamptz;
 begin
   if p_shipment_id < 1 or p_request_id is null or char_length(p_request_id) not between 1 and 80 then
     raise exception 'invalid cancellation' using errcode = '22023'; end if;
@@ -184,11 +186,12 @@ begin
       null::text, null::timestamptz, null::timestamptz, null::timestamptz; return; end if;
   insert into public.industrial_inventory(owner_discord_user_id, resource_type, quantity)
     values (p_blacksmith_discord_user_id, 'iron_ingot', s.quantity)
-    on conflict (owner_discord_user_id, resource_type) do update
+    on conflict on constraint industrial_inventory_pkey do update
       set quantity = industrial_inventory.quantity + excluded.quantity;
-  current_time := clock_timestamp();
-  update public.industrial_ingot_shipments set status = 'cancelled',
-    cancelled_at = current_time, cancel_request_id = p_request_id where id = s.id returning * into s;
+  v_current_time := clock_timestamp();
+  update public.industrial_ingot_shipments as target_shipment set status = 'cancelled',
+    cancelled_at = v_current_time, cancel_request_id = p_request_id
+    where target_shipment.id = s.id returning * into s;
   return query select 'ok', user_job, s.id, s.blacksmith_company_id,
     s.blacksmith_discord_user_id, s.merchant_company_id, s.merchant_discord_user_id,
     s.banker_company_id, s.banker_discord_user_id, s.resource_type, s.quantity,
@@ -213,7 +216,7 @@ language plpgsql security invoker set search_path = ''
 as $$
 declare s public.industrial_ingot_shipments%rowtype; m public.industrial_merchants%rowtype;
   t public.industrial_transports%rowtype; user_job text; free_slot integer;
-  capacity bigint; duration_seconds integer; current_time timestamptz; banker_name text;
+  capacity bigint; duration_seconds integer; v_current_time timestamptz; banker_name text;
   lock_id bigint;
 begin
   if p_shipment_id < 1 or p_request_id is null or char_length(p_request_id) not between 1 and 80 then
@@ -289,16 +292,18 @@ begin
       null::timestamptz, null::bigint, null::bigint, null::bigint, null::text,
       null::timestamptz, null::timestamptz, null::integer; return; end if;
   duration_seconds := public.industrial_trip_duration_seconds(m.truck_speed_level);
-  current_time := clock_timestamp();
+  v_current_time := clock_timestamp();
   insert into public.industrial_transports(sender_company_id, receiver_company_id,
     merchant_discord_user_id, transport_type, resource_type, quantity, departure_at,
     arrival_at, original_duration_seconds, current_duration_seconds, truck_slot, request_id)
   values (s.blacksmith_company_id, s.banker_company_id, p_merchant_discord_user_id,
-    'ingot_to_banker', 'iron_ingot', s.quantity, current_time,
-    current_time + pg_catalog.make_interval(secs => duration_seconds),
+    'ingot_to_banker', 'iron_ingot', s.quantity, v_current_time,
+    v_current_time + pg_catalog.make_interval(secs => duration_seconds),
     duration_seconds, duration_seconds, free_slot, p_request_id) returning * into t;
-  update public.industrial_ingot_shipments set status = 'accepted', accepted_at = current_time,
-    accept_request_id = p_request_id, transport_id = t.id where id = s.id returning * into s;
+  update public.industrial_ingot_shipments as target_shipment
+    set status = 'accepted', accepted_at = v_current_time,
+      accept_request_id = p_request_id, transport_id = t.id
+    where target_shipment.id = s.id returning * into s;
   select c.name into banker_name from public.industrial_companies c where c.id = s.banker_company_id;
   return query select 'ok', user_job, null::bigint, s.id, s.blacksmith_company_id,
     s.blacksmith_discord_user_id, s.merchant_company_id, s.merchant_discord_user_id,
