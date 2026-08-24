@@ -11,7 +11,7 @@ from economy_v2.models import MarketOrder, MarketOrderResult, MarketSummary
 from economy_v2.resources import RESOURCES, get_resource
 from economy_v2.services import (
     MarketAccessDeniedError, MarketInsufficientAssetsError, MarketOrderClosedError,
-    MarketOrderLimitError, SupabaseIndustrialEconomyService,
+    MarketOrderLimitError, SQLiteIndustrialEconomyService,
 )
 
 
@@ -132,7 +132,7 @@ class MarketConfigTests(unittest.TestCase):
 class MarketServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.repo = MarketRepository()
-        self.service = SupabaseIndustrialEconomyService(self.repo)
+        self.service = SQLiteIndustrialEconomyService(self.repo)
 
     async def test_wrong_jobs_are_refused_without_escrow(self):
         with self.assertRaises(MarketAccessDeniedError):
@@ -194,7 +194,7 @@ class MarketServiceTests(unittest.IsolatedAsyncioTestCase):
 
 class MarketCommandAndSqlTests(unittest.IsolatedAsyncioTestCase):
     async def test_command_parsing_and_registry(self):
-        repo = MarketRepository(); router = build_economy_router(SupabaseIndustrialEconomyService(repo))
+        repo = MarketRepository(); router = build_economy_router(SQLiteIndustrialEconomyService(repo))
         self.assertIn("market", router.command_names)
         message = FakeMessage("?market sell iron_ore 10 8")
         self.assertTrue(await router.handle(message))
@@ -204,7 +204,7 @@ class MarketCommandAndSqlTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("entiers", invalid.channel.sent[0][0])
 
     async def test_market_display_and_orders(self):
-        repo = MarketRepository(); router = build_economy_router(SupabaseIndustrialEconomyService(repo))
+        repo = MarketRepository(); router = build_economy_router(SQLiteIndustrialEconomyService(repo))
         for content in ("?market", "?market orders"):
             message = FakeMessage(content)
             await router.handle(message)

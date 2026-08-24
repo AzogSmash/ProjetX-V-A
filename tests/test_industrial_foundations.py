@@ -10,7 +10,7 @@ from economy_v2.jobs import resolve_job
 from economy_v2.models import IndustrialCompany, IndustrialUser
 from economy_v2.services import (
     CompanyAlreadyExistsError,
-    SupabaseIndustrialEconomyService,
+    SQLiteIndustrialEconomyService,
 )
 
 
@@ -82,7 +82,7 @@ class JobAndNameTests(unittest.TestCase):
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.repository = InMemoryRepository()
-        self.service = SupabaseIndustrialEconomyService(self.repository)
+        self.service = SQLiteIndustrialEconomyService(self.repository)
 
     async def test_wallet_auto_creates_zero_credit_profile(self) -> None:
         self.assertEqual(await self.service.get_balance(123), 0)
@@ -112,7 +112,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 class CompanyCommandTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.repository = InMemoryRepository()
-        self.service = SupabaseIndustrialEconomyService(self.repository)
+        self.service = SQLiteIndustrialEconomyService(self.repository)
         self.router = build_economy_router(self.service)
 
     async def test_company_without_company(self) -> None:

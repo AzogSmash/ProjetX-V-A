@@ -31,7 +31,7 @@ from economy_v2.models import (
 )
 from economy_v2.repository import (
     IndustrialEconomyRepository,
-    SupabaseIndustrialEconomyRepository,
+    SQLiteIndustrialEconomyRepository,
 )
 
 
@@ -230,9 +230,9 @@ class IndustrialEconomyService(IndustrialWalletService, Protocol):
     async def get_economy_stats(self) -> dict: ...
 
 
-class SupabaseIndustrialEconomyService:
+class SQLiteIndustrialEconomyService:
     def __init__(self, repository: IndustrialEconomyRepository | None = None) -> None:
-        self._repository = repository or SupabaseIndustrialEconomyRepository()
+        self._repository = repository or SQLiteIndustrialEconomyRepository()
 
     async def _run(self, operation: str, user_id: int, function, *args):
         try:
