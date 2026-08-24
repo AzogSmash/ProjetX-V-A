@@ -24,6 +24,10 @@ async def ecohelp_command(context: EconomyCommandContext) -> None:
             "`?market` — Consulter le marché industriel\n"
             "`?market <sell|buy> iron_ore <quantité> <prix>` — Échanger\n"
             "`?market orders` / `?market cancel <id>` — Gérer ses ordres"
+            "\n`?merchant` — Gérer son entreprise Marchand\n"
+            "`?merchant inventory` / `?merchant transports` — Logistique\n"
+            "`?merchant transport <forgeron> iron_ore <quantité>` — Expédier\n"
+            "`?merchant upgrade <type>` — Améliorer les camions"
         ),
         inline=False,
     )

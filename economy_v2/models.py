@@ -85,3 +85,47 @@ class MarketSummary:
     volume_24h: int
     sell_orders: tuple[MarketOrder, ...]
     buy_orders: tuple[MarketOrder, ...]
+
+
+@dataclass(frozen=True)
+class Merchant:
+    owner_discord_user_id: int
+    company_id: int
+    company_name: str
+    truck_count: int
+    truck_capacity_level: int
+    truck_speed_level: int
+    warehouse_level: int
+    active_transports: int
+
+
+@dataclass(frozen=True)
+class IndustrialTransport:
+    id: int
+    sender_company_id: int
+    receiver_company_id: int
+    receiver_company_name: str
+    merchant_discord_user_id: int
+    resource_type: str
+    quantity: int
+    departure_at: str
+    arrival_at: str
+    status: str
+    truck_slot: int
+
+
+@dataclass(frozen=True)
+class MerchantUpgradeResult:
+    merchant: Merchant
+    upgrade_type: str
+    previous_level: int
+    new_level: int
+    cost: int
+    balance: int
+    duplicate_request: bool = False
+
+
+@dataclass(frozen=True)
+class MerchantTransportResult:
+    transport: IndustrialTransport
+    duplicate_request: bool = False

@@ -12,6 +12,10 @@ from economy_v2.models import (
     MarketOrder,
     MarketOrderResult,
     MarketSummary,
+    Merchant,
+    MerchantTransportResult,
+    MerchantUpgradeResult,
+    IndustrialTransport,
 )
 
 
@@ -70,6 +74,19 @@ class IndustrialEconomyRepository(Protocol):
     def get_market_summary(self, resource_type: str, depth: int) -> MarketSummary:
         ...
 
+    def get_or_create_merchant(self, user_id: int) -> tuple[str, str | None, Merchant | None]:
+        ...
+
+    def upgrade_merchant(self, user_id: int, upgrade_type: str, request_id: str):
+        ...
+
+    def start_transport(self, user_id: int, receiver_user_id: int, resource_type: str,
+                        quantity: int, request_id: str):
+        ...
+
+    def get_merchant_transports(self, user_id: int) -> tuple[str, str | None, list[IndustrialTransport]]:
+        ...
+
 
 def _user_from_row(row: dict) -> IndustrialUser:
     return IndustrialUser(
@@ -113,6 +130,30 @@ def _market_order_from_row(row: dict) -> MarketOrder:
         remaining_quantity=int(row["remaining_quantity"]),
         unit_price=int(row["unit_price"]), status=row["status"],
         created_at=str(row["created_at"]),
+    )
+
+
+def _merchant_from_row(row: dict) -> Merchant:
+    return Merchant(
+        owner_discord_user_id=int(row["owner_discord_user_id"]),
+        company_id=int(row["company_id"]), company_name=row["company_name"],
+        truck_count=int(row["truck_count"]),
+        truck_capacity_level=int(row["truck_capacity_level"]),
+        truck_speed_level=int(row["truck_speed_level"]),
+        warehouse_level=int(row["warehouse_level"]),
+        active_transports=int(row["active_transports"]),
+    )
+
+
+def _transport_from_row(row: dict) -> IndustrialTransport:
+    return IndustrialTransport(
+        id=int(row["id"]), sender_company_id=int(row["sender_company_id"]),
+        receiver_company_id=int(row["receiver_company_id"]),
+        receiver_company_name=row["receiver_company_name"],
+        merchant_discord_user_id=int(row["merchant_discord_user_id"]),
+        resource_type=row["resource_type"], quantity=int(row["quantity"]),
+        departure_at=str(row["departure_at"]), arrival_at=str(row["arrival_at"]),
+        status=row["status"], truck_slot=int(row["truck_slot"]),
     )
 
 
@@ -302,3 +343,59 @@ class SupabaseIndustrialEconomyRepository:
             int(stats["high_price_24h"]) if stats["high_price_24h"] is not None else None,
             int(stats["volume_24h"]), tuple(map(_market_order_from_row, sells.data)),
             tuple(map(_market_order_from_row, buys.data)))
+
+    def get_or_create_merchant(self, user_id: int):
+        row = self._rpc_row("get_or_create_and_refresh_industrial_merchant", {
+            "p_owner_discord_user_id": user_id,
+        })
+        status = row["result_status"]
+        return status, row.get("current_job"), (_merchant_from_row(row) if status == "ok" else None)
+
+    def upgrade_merchant(self, user_id: int, upgrade_type: str, request_id: str):
+        row = self._rpc_row("upgrade_industrial_merchant", {
+            "p_owner_discord_user_id": user_id,
+            "p_upgrade_type": upgrade_type,
+            "p_request_id": request_id,
+        })
+        status = row["result_status"]
+        if status not in {"ok", "duplicate"}:
+            cost = int(row["upgrade_cost"]) if row.get("upgrade_cost") is not None else None
+            balance = int(row["wallet_balance"]) if row.get("wallet_balance") is not None else None
+            return status, row.get("current_job"), cost, balance, None
+        merchant = _merchant_from_row(row)
+        result = MerchantUpgradeResult(
+            merchant, row["upgrade_type"], int(row["previous_level"]),
+            int(row["new_level"]), int(row["upgrade_cost"]),
+            int(row["wallet_balance"]), status == "duplicate",
+        )
+        return status, row.get("current_job"), result.cost, result.balance, result
+
+    def start_transport(self, user_id: int, receiver_user_id: int, resource_type: str,
+                        quantity: int, request_id: str):
+        row = self._rpc_row("start_industrial_merchant_transport", {
+            "p_merchant_discord_user_id": user_id,
+            "p_receiver_discord_user_id": receiver_user_id,
+            "p_resource_type": resource_type,
+            "p_quantity": quantity,
+            "p_request_id": request_id,
+        })
+        status = row["result_status"]
+        available = int(row["available_amount"]) if row.get("available_amount") is not None else None
+        if status not in {"ok", "duplicate"}:
+            return status, row.get("current_job"), available, None
+        return status, row.get("current_job"), available, MerchantTransportResult(
+            _transport_from_row(row), status == "duplicate"
+        )
+
+    def get_merchant_transports(self, user_id: int):
+        status, current_job, merchant = self.get_or_create_merchant(user_id)
+        if status != "ok" or merchant is None:
+            return status, current_job, []
+        response = (get_client().table("industrial_transports")
+                    .select("id,sender_company_id,receiver_company_id,merchant_discord_user_id,resource_type,quantity,departure_at,arrival_at,status,truck_slot,industrial_companies!industrial_transports_receiver_company_id_fkey(name)")
+                    .eq("merchant_discord_user_id", user_id).order("created_at", desc=True).limit(20).execute())
+        rows = []
+        for row in response.data:
+            row["receiver_company_name"] = row.pop("industrial_companies")["name"]
+            rows.append(_transport_from_row(row))
+        return status, current_job, rows

@@ -12,6 +12,10 @@ from economy_v2.models import (
     MarketOrder,
     MarketOrderResult,
     MarketSummary,
+    Merchant,
+    MerchantTransportResult,
+    MerchantUpgradeResult,
+    IndustrialTransport,
 )
 from economy_v2.repository import (
     IndustrialEconomyRepository,
@@ -73,6 +77,24 @@ class MarketOrderClosedError(IndustrialEconomyError):
     pass
 
 
+class MerchantAccessDeniedError(IndustrialEconomyError):
+    def __init__(self, current_job: str | None) -> None:
+        self.current_job = current_job
+
+
+class MerchantCompanyRequiredError(IndustrialEconomyError):
+    pass
+
+
+class MerchantUpgradeMaxLevelError(IndustrialEconomyError):
+    pass
+
+
+class MerchantTransportError(IndustrialEconomyError):
+    def __init__(self, reason: str, available: int | None = None) -> None:
+        self.reason, self.available = reason, available
+
+
 class IndustrialWalletService(Protocol):
     async def get_balance(self, user_id: int) -> int:
         ...
@@ -124,6 +146,12 @@ class IndustrialEconomyService(IndustrialWalletService, Protocol):
         self, resource_type: str, depth: int
     ) -> MarketSummary:
         ...
+
+    async def get_or_create_merchant(self, user_id: int) -> Merchant: ...
+    async def upgrade_merchant(self, user_id: int, upgrade_type: str, request_id: str) -> MerchantUpgradeResult: ...
+    async def start_transport(self, user_id: int, receiver_user_id: int, resource_type: str,
+                              quantity: int, request_id: str) -> MerchantTransportResult: ...
+    async def get_merchant_transports(self, user_id: int) -> list[IndustrialTransport]: ...
 
 
 class SupabaseIndustrialEconomyService:
@@ -266,3 +294,47 @@ class SupabaseIndustrialEconomyService:
 
     async def get_market_summary(self, resource_type: str, depth: int) -> MarketSummary:
         return await self._run("get_market_summary", 0, self._repository.get_market_summary, resource_type, depth)
+
+    @staticmethod
+    def _raise_merchant_status(status: str, current_job: str | None) -> None:
+        if status == "not_merchant": raise MerchantAccessDeniedError(current_job)
+        if status == "no_merchant_company": raise MerchantCompanyRequiredError
+        raise IndustrialEconomyError(f"unexpected merchant status: {status}")
+
+    async def get_or_create_merchant(self, user_id: int) -> Merchant:
+        status, current_job, merchant = await self._run(
+            "get_or_create_merchant", user_id, self._repository.get_or_create_merchant, user_id)
+        if status != "ok" or merchant is None:
+            self._raise_merchant_status(status, current_job)
+        return merchant
+
+    async def upgrade_merchant(self, user_id: int, upgrade_type: str,
+                               request_id: str) -> MerchantUpgradeResult:
+        status, current_job, cost, balance, result = await self._run(
+            "upgrade_merchant", user_id, self._repository.upgrade_merchant,
+            user_id, upgrade_type, request_id)
+        if status == "insufficient_funds":
+            raise InsufficientIndustrialFundsError(cost or 0, balance or 0)
+        if status == "max_level": raise MerchantUpgradeMaxLevelError
+        if status not in {"ok", "duplicate"} or result is None:
+            self._raise_merchant_status(status, current_job)
+        return result
+
+    async def start_transport(self, user_id: int, receiver_user_id: int,
+                              resource_type: str, quantity: int,
+                              request_id: str) -> MerchantTransportResult:
+        status, current_job, available, result = await self._run(
+            "start_transport", user_id, self._repository.start_transport,
+            user_id, receiver_user_id, resource_type, quantity, request_id)
+        if status in {"not_merchant", "no_merchant_company"}:
+            self._raise_merchant_status(status, current_job)
+        if status not in {"ok", "duplicate"} or result is None:
+            raise MerchantTransportError(status, available)
+        return result
+
+    async def get_merchant_transports(self, user_id: int) -> list[IndustrialTransport]:
+        status, current_job, transports = await self._run(
+            "get_merchant_transports", user_id,
+            self._repository.get_merchant_transports, user_id)
+        if status != "ok": self._raise_merchant_status(status, current_job)
+        return transports
