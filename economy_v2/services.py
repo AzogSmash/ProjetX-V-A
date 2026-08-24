@@ -16,6 +16,11 @@ from economy_v2.models import (
     MerchantTransportResult,
     MerchantUpgradeResult,
     IndustrialTransport,
+    Blacksmith,
+    ForgeCollectionResult,
+    ForgeJob,
+    ForgeProcessResult,
+    ForgeUpgradeResult,
 )
 from economy_v2.repository import (
     IndustrialEconomyRepository,
@@ -95,6 +100,24 @@ class MerchantTransportError(IndustrialEconomyError):
         self.reason, self.available = reason, available
 
 
+class BlacksmithAccessDeniedError(IndustrialEconomyError):
+    def __init__(self, current_job: str | None) -> None:
+        self.current_job = current_job
+
+
+class BlacksmithCompanyRequiredError(IndustrialEconomyError):
+    pass
+
+
+class ForgeUpgradeMaxLevelError(IndustrialEconomyError):
+    pass
+
+
+class ForgeProcessError(IndustrialEconomyError):
+    def __init__(self, reason: str, available: int | None = None) -> None:
+        self.reason, self.available = reason, available
+
+
 class IndustrialWalletService(Protocol):
     async def get_balance(self, user_id: int) -> int:
         ...
@@ -152,6 +175,11 @@ class IndustrialEconomyService(IndustrialWalletService, Protocol):
     async def start_transport(self, user_id: int, receiver_user_id: int, resource_type: str,
                               quantity: int, request_id: str) -> MerchantTransportResult: ...
     async def get_merchant_transports(self, user_id: int) -> list[IndustrialTransport]: ...
+    async def get_or_create_blacksmith(self, user_id: int) -> Blacksmith: ...
+    async def start_forge_job(self, user_id: int, resource_type: str, quantity: int, request_id: str) -> ForgeProcessResult: ...
+    async def collect_forge_jobs(self, user_id: int, request_id: str) -> ForgeCollectionResult: ...
+    async def upgrade_forge(self, user_id: int, upgrade_type: str, request_id: str) -> ForgeUpgradeResult: ...
+    async def get_forge_jobs(self, user_id: int) -> list[ForgeJob]: ...
 
 
 class SupabaseIndustrialEconomyService:
@@ -338,3 +366,57 @@ class SupabaseIndustrialEconomyService:
             self._repository.get_merchant_transports, user_id)
         if status != "ok": self._raise_merchant_status(status, current_job)
         return transports
+
+    @staticmethod
+    def _raise_blacksmith_status(status: str, current_job: str | None) -> None:
+        if status == "not_blacksmith": raise BlacksmithAccessDeniedError(current_job)
+        if status == "no_blacksmith_company": raise BlacksmithCompanyRequiredError
+        raise IndustrialEconomyError(f"unexpected blacksmith status: {status}")
+
+    async def get_or_create_blacksmith(self, user_id: int) -> Blacksmith:
+        status, current_job, blacksmith = await self._run(
+            "get_or_create_blacksmith", user_id,
+            self._repository.get_or_create_blacksmith, user_id)
+        if status != "ok" or blacksmith is None:
+            self._raise_blacksmith_status(status, current_job)
+        return blacksmith
+
+    async def start_forge_job(self, user_id: int, resource_type: str,
+                              quantity: int, request_id: str) -> ForgeProcessResult:
+        status, current_job, available, result = await self._run(
+            "start_forge_job", user_id, self._repository.start_forge_job,
+            user_id, resource_type, quantity, request_id)
+        if status in {"not_blacksmith", "no_blacksmith_company"}:
+            self._raise_blacksmith_status(status, current_job)
+        if status not in {"ok", "duplicate"} or result is None:
+            raise ForgeProcessError(status, available)
+        return result
+
+    async def collect_forge_jobs(self, user_id: int,
+                                 request_id: str) -> ForgeCollectionResult:
+        status, current_job, result = await self._run(
+            "collect_forge_jobs", user_id, self._repository.collect_forge_jobs,
+            user_id, request_id)
+        if status in {"not_blacksmith", "no_blacksmith_company"}:
+            self._raise_blacksmith_status(status, current_job)
+        if status not in {"ok", "duplicate"} or result is None:
+            raise IndustrialEconomyError(f"unexpected forge collection status: {status}")
+        return result
+
+    async def upgrade_forge(self, user_id: int, upgrade_type: str,
+                            request_id: str) -> ForgeUpgradeResult:
+        status, current_job, cost, balance, result = await self._run(
+            "upgrade_forge", user_id, self._repository.upgrade_forge,
+            user_id, upgrade_type, request_id)
+        if status == "insufficient_funds":
+            raise InsufficientIndustrialFundsError(cost or 0, balance or 0)
+        if status == "max_level": raise ForgeUpgradeMaxLevelError
+        if status not in {"ok", "duplicate"} or result is None:
+            self._raise_blacksmith_status(status, current_job)
+        return result
+
+    async def get_forge_jobs(self, user_id: int) -> list[ForgeJob]:
+        status, current_job, jobs = await self._run(
+            "get_forge_jobs", user_id, self._repository.get_forge_jobs, user_id)
+        if status != "ok": self._raise_blacksmith_status(status, current_job)
+        return jobs

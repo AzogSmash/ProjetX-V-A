@@ -28,13 +28,16 @@ async def ecohelp_command(context: EconomyCommandContext) -> None:
             "`?merchant inventory` / `?merchant transports` — Logistique\n"
             "`?merchant transport <forgeron> iron_ore <quantité>` — Expédier\n"
             "`?merchant upgrade <type>` — Améliorer les camions"
+            "\n`?forge` / `?forge inventory` — Gérer sa forge\n"
+            "`?forge process iron_ore <quantité>` — Transformer le minerai\n"
+            "`?forge collect` / `?forge jobs` — Suivre la production\n"
+            "`?forge upgrade <type>` — Améliorer la forge"
         ),
         inline=False,
     )
     embed.add_field(
         name="En développement",
         value=(
-            "🔥 `?forge` — Forge\n"
             "🚚 `?delivery` — Livraisons\n"
             "🏦 `?bank` — Banque\n"
             "📜 `?contracts` — Contrats"

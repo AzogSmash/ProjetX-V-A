@@ -129,3 +129,57 @@ class MerchantUpgradeResult:
 class MerchantTransportResult:
     transport: IndustrialTransport
     duplicate_request: bool = False
+
+
+@dataclass(frozen=True)
+class Blacksmith:
+    owner_discord_user_id: int
+    company_id: int
+    company_name: str
+    forge_level: int
+    speed_level: int
+    storage_level: int
+    yield_level: int
+    active_jobs: int
+    completed_jobs: int
+    reserved_output: int
+
+
+@dataclass(frozen=True)
+class ForgeJob:
+    id: int
+    owner_discord_user_id: int
+    company_id: int
+    forge_slot: int
+    resource_input: str
+    resource_output: str
+    input_quantity: int
+    output_quantity: int
+    started_at: str
+    finishes_at: str
+    status: str
+
+
+@dataclass(frozen=True)
+class ForgeProcessResult:
+    job: ForgeJob
+    remaining_input: int
+    duplicate_request: bool = False
+
+
+@dataclass(frozen=True)
+class ForgeCollectionResult:
+    collected_quantity: int
+    inventory_quantity: int
+    duplicate_request: bool = False
+
+
+@dataclass(frozen=True)
+class ForgeUpgradeResult:
+    blacksmith: Blacksmith
+    upgrade_type: str
+    previous_level: int
+    new_level: int
+    cost: int
+    balance: int
+    duplicate_request: bool = False

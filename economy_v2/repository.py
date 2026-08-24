@@ -16,6 +16,11 @@ from economy_v2.models import (
     MerchantTransportResult,
     MerchantUpgradeResult,
     IndustrialTransport,
+    Blacksmith,
+    ForgeCollectionResult,
+    ForgeJob,
+    ForgeProcessResult,
+    ForgeUpgradeResult,
 )
 
 
@@ -87,6 +92,12 @@ class IndustrialEconomyRepository(Protocol):
     def get_merchant_transports(self, user_id: int) -> tuple[str, str | None, list[IndustrialTransport]]:
         ...
 
+    def get_or_create_blacksmith(self, user_id: int): ...
+    def start_forge_job(self, user_id: int, resource_type: str, quantity: int, request_id: str): ...
+    def collect_forge_jobs(self, user_id: int, request_id: str): ...
+    def upgrade_forge(self, user_id: int, upgrade_type: str, request_id: str): ...
+    def get_forge_jobs(self, user_id: int): ...
+
 
 def _user_from_row(row: dict) -> IndustrialUser:
     return IndustrialUser(
@@ -154,6 +165,28 @@ def _transport_from_row(row: dict) -> IndustrialTransport:
         resource_type=row["resource_type"], quantity=int(row["quantity"]),
         departure_at=str(row["departure_at"]), arrival_at=str(row["arrival_at"]),
         status=row["status"], truck_slot=int(row["truck_slot"]),
+    )
+
+
+def _blacksmith_from_row(row: dict) -> Blacksmith:
+    return Blacksmith(
+        owner_discord_user_id=int(row["owner_discord_user_id"]),
+        company_id=int(row["company_id"]), company_name=row["company_name"],
+        forge_level=int(row["forge_level"]), speed_level=int(row["speed_level"]),
+        storage_level=int(row["storage_level"]), yield_level=int(row["yield_level"]),
+        active_jobs=int(row["active_jobs"]), completed_jobs=int(row["completed_jobs"]),
+        reserved_output=int(row["reserved_output"]),
+    )
+
+
+def _forge_job_from_row(row: dict) -> ForgeJob:
+    return ForgeJob(
+        id=int(row["id"]), owner_discord_user_id=int(row["owner_discord_user_id"]),
+        company_id=int(row["company_id"]), forge_slot=int(row["forge_slot"]),
+        resource_input=row["resource_input"], resource_output=row["resource_output"],
+        input_quantity=int(row["input_quantity"]), output_quantity=int(row["output_quantity"]),
+        started_at=str(row["started_at"]), finishes_at=str(row["finishes_at"]),
+        status=row["status"],
     )
 
 
@@ -399,3 +432,61 @@ class SupabaseIndustrialEconomyRepository:
             row["receiver_company_name"] = row.pop("industrial_companies")["name"]
             rows.append(_transport_from_row(row))
         return status, current_job, rows
+
+    def get_or_create_blacksmith(self, user_id: int):
+        row = self._rpc_row("get_or_create_and_refresh_industrial_blacksmith", {
+            "p_owner_discord_user_id": user_id,
+        })
+        status = row["result_status"]
+        return status, row.get("current_job"), (_blacksmith_from_row(row) if status == "ok" else None)
+
+    def start_forge_job(self, user_id: int, resource_type: str,
+                        quantity: int, request_id: str):
+        row = self._rpc_row("start_industrial_forge_job", {
+            "p_owner_discord_user_id": user_id, "p_resource_type": resource_type,
+            "p_quantity": quantity, "p_request_id": request_id,
+        })
+        status = row["result_status"]
+        available = int(row["available_amount"]) if row.get("available_amount") is not None else None
+        if status not in {"ok", "duplicate"}:
+            return status, row.get("current_job"), available, None
+        return status, row.get("current_job"), available, ForgeProcessResult(
+            _forge_job_from_row(row), int(row["remaining_input"]), status == "duplicate")
+
+    def collect_forge_jobs(self, user_id: int, request_id: str):
+        row = self._rpc_row("collect_industrial_forge_jobs", {
+            "p_owner_discord_user_id": user_id, "p_request_id": request_id,
+        })
+        status = row["result_status"]
+        if status not in {"ok", "duplicate"}:
+            return status, row.get("current_job"), None
+        return status, row.get("current_job"), ForgeCollectionResult(
+            int(row["collected_quantity"]), int(row["inventory_quantity"]),
+            status == "duplicate")
+
+    def upgrade_forge(self, user_id: int, upgrade_type: str, request_id: str):
+        row = self._rpc_row("upgrade_industrial_forge", {
+            "p_owner_discord_user_id": user_id, "p_upgrade_type": upgrade_type,
+            "p_request_id": request_id,
+        })
+        status = row["result_status"]
+        cost = int(row["upgrade_cost"]) if row.get("upgrade_cost") is not None else None
+        balance = int(row["wallet_balance"]) if row.get("wallet_balance") is not None else None
+        if status not in {"ok", "duplicate"}:
+            return status, row.get("current_job"), cost, balance, None
+        result = ForgeUpgradeResult(
+            _blacksmith_from_row(row), row["upgrade_type"],
+            int(row["previous_level"]), int(row["new_level"]),
+            int(row["upgrade_cost"]), int(row["wallet_balance"]),
+            status == "duplicate",
+        )
+        return status, row.get("current_job"), result.cost, result.balance, result
+
+    def get_forge_jobs(self, user_id: int):
+        status, current_job, blacksmith = self.get_or_create_blacksmith(user_id)
+        if status != "ok" or blacksmith is None:
+            return status, current_job, []
+        response = (get_client().table("industrial_forge_jobs")
+                    .select("id,owner_discord_user_id,company_id,forge_slot,resource_input,resource_output,input_quantity,output_quantity,started_at,finishes_at,status")
+                    .eq("owner_discord_user_id", user_id).order("started_at", desc=True).limit(20).execute())
+        return status, current_job, [_forge_job_from_row(row) for row in response.data]
