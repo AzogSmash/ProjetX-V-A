@@ -4,12 +4,14 @@ from economy_v2.router import (
     find_command_name_collisions,
     validate_command_names,
 )
-from economy_v2.services import PlaceholderIndustrialWalletService
+from economy_v2.services import IndustrialEconomyService, SupabaseIndustrialEconomyService
 
 
-def build_economy_router() -> EconomyRouter:
+def build_economy_router(
+    service: IndustrialEconomyService | None = None,
+) -> EconomyRouter:
     router = EconomyRouter()
-    register_economy_commands(router, PlaceholderIndustrialWalletService())
+    register_economy_commands(router, service or SupabaseIndustrialEconomyService())
     return router
 
 

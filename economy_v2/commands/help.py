@@ -14,13 +14,16 @@ async def ecohelp_command(context: EconomyCommandContext) -> None:
     )
     embed.add_field(
         name="Commandes disponibles",
-        value="`?wallet` — Consulter son compte économique industriel",
+        value=(
+            "`?wallet` — Consulter son compte économique industriel\n"
+            "`?company` — Afficher son entreprise\n"
+            "`?company create <métier> <nom>` — Créer gratuitement sa première entreprise"
+        ),
         inline=False,
     )
     embed.add_field(
         name="En développement",
         value=(
-            "🏢 `?company` — Entreprises\n"
             "⛏️ `?mine` — Mine\n"
             "📈 `?market` — Marché\n"
             "🔥 `?forge` — Forge\n"

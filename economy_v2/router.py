@@ -78,7 +78,10 @@ class EconomyRouter:
                 command_name,
                 message.author.id,
             )
-            await message.channel.send("Une erreur est survenue pendant la commande économique.")
+            await message.channel.send(
+                "Une erreur est survenue lors de l'accès à l'économie industrielle.\n"
+                "Réessaie dans quelques instants."
+            )
         return True
 
 

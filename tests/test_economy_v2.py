@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 from economy_v2 import build_economy_router
+from economy_v2.models import IndustrialCompany, IndustrialUser
 from economy_v2.router import (
     find_command_name_collisions,
     parse_economy_message,
@@ -20,8 +21,30 @@ class FakeChannel:
 class FakeMessage:
     def __init__(self, content: str) -> None:
         self.content = content
-        self.author = SimpleNamespace(id=123)
+        self.author = SimpleNamespace(id=123, mention="<@123>")
         self.channel = FakeChannel()
+
+
+class FakeEconomyService:
+    def __init__(self) -> None:
+        self.users = {}
+        self.companies = {}
+
+    async def get_or_create_user(self, user_id: int) -> IndustrialUser:
+        return self.users.setdefault(user_id, IndustrialUser(user_id, 0, None))
+
+    async def get_balance(self, user_id: int) -> int:
+        return (await self.get_or_create_user(user_id)).credits
+
+    async def get_primary_company(self, user_id: int):
+        await self.get_or_create_user(user_id)
+        return self.companies.get(user_id)
+
+    async def create_first_company(self, user_id: int, name: str, job_type: str):
+        company = IndustrialCompany(1, user_id, name, job_type, 1, True)
+        self.companies[user_id] = company
+        self.users[user_id] = IndustrialUser(user_id, 0, job_type)
+        return company
 
 
 class FakeCommand:
@@ -61,23 +84,23 @@ class ParsingTests(unittest.TestCase):
 class RouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_help_is_case_insensitive(self) -> None:
         message = FakeMessage("?ECOHELP")
-        handled = await build_economy_router().handle(message)
+        handled = await build_economy_router(FakeEconomyService()).handle(message)
         self.assertTrue(handled)
         self.assertIn("embed", message.channel.sent[0][1])
 
     async def test_wallet_uses_industrial_placeholder(self) -> None:
         message = FakeMessage("?wallet")
-        await build_economy_router().handle(message)
-        self.assertIn("0 CR", message.channel.sent[0][0])
+        await build_economy_router(FakeEconomyService()).handle(message)
+        self.assertIn("0 CR", message.channel.sent[0][1]["embed"].description)
 
     async def test_unknown_command_has_clean_response(self) -> None:
         message = FakeMessage("?azerty")
-        await build_economy_router().handle(message)
+        await build_economy_router(FakeEconomyService()).handle(message)
         self.assertIn("Commande économique inconnue", message.channel.sent[0][0])
 
     async def test_ordinary_message_is_not_handled(self) -> None:
         message = FakeMessage("bonjour ?")
-        self.assertFalse(await build_economy_router().handle(message))
+        self.assertFalse(await build_economy_router(FakeEconomyService()).handle(message))
         self.assertEqual(message.channel.sent, [])
 
 
