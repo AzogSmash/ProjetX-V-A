@@ -4633,6 +4633,23 @@ async def unban(ctx, *, member_id: int):
         ]
         await send_log_message(ctx.guild, LOG_MODERATION_CHANNEL_ID, "⚠️ Échec Débannissement", f"{ctx.author.mention} a tenté de débannir l'ID {member_id} qui n'est pas banni.", discord.Color.orange(), fields)
 
+
+@bot.command()
+@commands.has_permissions(kick_members=True)
+async def kick(ctx, member: discord.Member, *, reason: str = None):
+    """N'existait pas dans ce bot avant le 11/08/2026 — ajoutée en même temps
+    que !jugement, qui en a besoin comme verdict possible. S'appuie sur
+    _apply_kick (déjà loggée dans le salon unifié)."""
+    if await _check_protected_target(ctx, member):
+        return
+    data, err = await _apply_kick(ctx.guild, member.id, ctx.author.id, reason)
+    if err:
+        return await ctx.send(f"❌ {err}")
+    await ctx.send(f"👢 {member.mention} a été expulsé du serveur." + (f" Raison : {reason}" if reason else ""))
+    if not data["dm_sent"]:
+        await ctx.send(f"⚠️ Je n'ai pas pu envoyer de message privé à {member.mention}.")
+
+
 # =======================================================================
 # ============================= CASINO ==================================
 # =======================================================================
@@ -12306,6 +12323,11 @@ async def cmd_jugement(ctx, membre: discord.Member):
     if membre.id == bot.user.id:
         return await ctx.send("❌ On ne juge pas le juge.")
 
+    await send_log_message(
+        ctx.guild, LOG_MODERATION_CHANNEL_ID, "⚖️ Jugement lancé",
+        f"{ctx.author.mention} a lancé un jugement contre {membre.mention}.",
+        discord.Color.blurple(),
+    )
     view = JugementView(membre, ctx.author.id)
     await ctx.send(embed=view._build_embed(), view=view)
 
