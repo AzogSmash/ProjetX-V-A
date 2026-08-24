@@ -18,6 +18,10 @@ from PIL import Image, ImageDraw, ImageFont
 from keep_alive import keep_alive
 import db_bs
 import db_members
+from economy_v2 import (
+    economy_router,
+    validate_command_names,
+)
 
 load_dotenv()
 
@@ -1700,7 +1704,7 @@ async def on_ready():
     # redémarrage, donc on les réenregistre systématiquement ici. bs_family_clubs
     # vit maintenant dans Supabase (voir db_bs.py), plus dans data.json.
     for entry in db_bs.list_family_clubs():
-        _bs_register_club_command(entry)
+        _bs_register_club_command(entry, fail_on_economy_conflict=True)
 
     # Re-enregistre les views de tournoi pour que les boutons fonctionnent après restart
     _registered_join_ids = set()
@@ -12572,6 +12576,9 @@ async def on_message(message):
         await _maybe_azog_ping_reaction(message)
         await _maybe_dev_ping_reaction(message)
 
+    if await economy_router.handle(message):
+        return
+
     await bot.process_commands(message)
 
 
@@ -14383,6 +14390,17 @@ async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
         alias = _bs_alias(slug, reserved)
 
         entry = {'tag': clean, 'name': data['name'], 'slug': slug, 'alias': alias}
+        economy_conflicts = economy_router.command_names & {slug.casefold(), alias.casefold()}
+        if economy_conflicts:
+            conflict = sorted(economy_conflicts)[0]
+            logging.error(
+                '[ECONOMY] Dynamic command registration refused: "%s" conflicts with a ? command',
+                conflict,
+            )
+            return await ctx.send(
+                f'❌ La commande dynamique `!{conflict}` entre en conflit avec `?{conflict}`. '
+                "Le clan n'a pas été ajouté."
+            )
         db_bs.add_family_club(clean, data['name'], slug, alias)
         _bs_register_club_command(entry)
         if ctx.guild:
@@ -14425,6 +14443,17 @@ async def _apply_bs_famille_add(tag: str) -> tuple[dict | None, str | None]:
     alias = _bs_alias(slug, reserved)
 
     entry = {'tag': clean, 'name': data['name'], 'slug': slug, 'alias': alias}
+    economy_conflicts = economy_router.command_names & {slug.casefold(), alias.casefold()}
+    if economy_conflicts:
+        conflict = sorted(economy_conflicts)[0]
+        logging.error(
+            '[ECONOMY] Dynamic command registration refused: "%s" conflicts with a ? command',
+            conflict,
+        )
+        return None, (
+            f'La commande dynamique !{conflict} entre en conflit avec ?{conflict}. '
+            "Le clan n'a pas été ajouté."
+        )
     db_bs.add_family_club(clean, data['name'], slug, alias)
     _bs_register_club_command(entry)
     guild = bot.get_guild(BS_FAMILY_GUILD_ID)
@@ -14811,11 +14840,22 @@ async def _bs_club_command_callback(ctx, club_tag: str):
     await ctx.send(embed=view.build_embed(), view=view)
 
 
-def _bs_register_club_command(entry: dict):
+def _bs_register_club_command(entry: dict, *, fail_on_economy_conflict: bool = False) -> bool:
     """(Ré)enregistre la commande dédiée d'un clan (ex: !projetx / !px) auprès du bot.
     Appelé au démarrage pour chaque clan déjà configuré, et à chaque !bs_famille ajouter."""
+    dynamic_names = {entry['slug']}
+    if entry.get('alias'):
+        dynamic_names.add(entry['alias'])
+    collisions = {name.casefold() for name in dynamic_names} & economy_router.command_names
+    if collisions:
+        names = ", ".join(f'"{name}"' for name in sorted(collisions))
+        error_message = f"Conflit détecté entre une commande ! dynamique et ?: {names}"
+        if fail_on_economy_conflict:
+            raise RuntimeError(error_message)
+        logging.error("[ECONOMY] %s — enregistrement dynamique refusé", error_message)
+        return False
     if bot.get_command(entry['slug']) is not None:
-        return
+        return False
     club_tag = entry['tag']
 
     async def _cb(ctx):
@@ -14824,6 +14864,7 @@ def _bs_register_club_command(entry: dict):
     cmd = commands.HybridCommand(_cb, name=entry['slug'], aliases=[entry['alias']] if entry.get('alias') else [])
     cmd.help = f"Classement trophées du clan {entry['name']}"
     bot.add_command(cmd)
+    return True
 
 
 def _bs_unregister_club_command(entry: dict):
@@ -16972,6 +17013,8 @@ async def cmd_help_staff(ctx):
         if embed:
             await ctx.send(embed=embed)
 
+
+validate_command_names(bot, economy_router.command_names)
 
 token = os.getenv("TOKEN")
 if token is not None:
