@@ -3,6 +3,7 @@ from typing import Protocol
 from db_bs import get_client
 
 from economy_v2.models import (
+    IndustrialActor,
     IndustrialCompany,
     IndustrialUser,
     InventoryEntry,
@@ -21,10 +22,19 @@ from economy_v2.models import (
     ForgeJob,
     ForgeProcessResult,
     ForgeUpgradeResult,
+    IngotShipment,
+    ShipmentResult,
+    Banker,
+    WorldSale,
+    DeliveryMission,
+    DeliveryProfile,
+    IndustrialContract,
 )
 
 
 class IndustrialEconomyRepository(Protocol):
+    def get_or_create_player_actor(self, user_id: int) -> IndustrialActor: ...
+
     def get_or_create_user(self, user_id: int) -> IndustrialUser:
         ...
 
@@ -50,7 +60,7 @@ class IndustrialEconomyRepository(Protocol):
         ...
 
     def upgrade_mine(
-        self, user_id: int, upgrade_type: str
+        self, user_id: int, upgrade_type: str, request_id: str | None = None
     ) -> tuple[str, str | None, int | None, int | None, MineUpgradeResult | None]:
         ...
 
@@ -97,6 +107,26 @@ class IndustrialEconomyRepository(Protocol):
     def collect_forge_jobs(self, user_id: int, request_id: str): ...
     def upgrade_forge(self, user_id: int, upgrade_type: str, request_id: str): ...
     def get_forge_jobs(self, user_id: int): ...
+    def create_ingot_shipment(self, user_id: int, merchant_id: int, banker_id: int,
+                              quantity: int, request_id: str): ...
+    def cancel_ingot_shipment(self, user_id: int, shipment_id: int, request_id: str): ...
+    def accept_ingot_shipment(self, user_id: int, shipment_id: int, request_id: str): ...
+    def get_or_create_banker(self, user_id: int): ...
+    def sell_world_ingots(self, user_id: int, quantity: int, request_id: str): ...
+    def get_world_market(self): ...
+    def get_world_sales(self, user_id: int): ...
+    def get_delivery_missions(self): ...
+    def get_delivery_profile(self, user_id: int): ...
+    def accept_delivery(self, user_id: int, mission_id: int, request_id: str): ...
+    def create_contract(self, user_id: int, resource: str, quantity: int, total: int, request_id: str): ...
+    def accept_contract(self, user_id: int, contract_id: int, request_id: str): ...
+    def cancel_contract(self, user_id: int, contract_id: int, request_id: str): ...
+    def get_contracts(self, user_id: int, mine: bool): ...
+    def record_activity(self, user_id: int): ...
+    def evaluate_ai_companies(self): ...
+    def purchase_ai_supply(self, user_id: int, resource_type: str,
+                           quantity: int, request_id: str): ...
+    def get_economy_stats(self): ...
 
 
 def _user_from_row(row: dict) -> IndustrialUser:
@@ -190,8 +220,30 @@ def _forge_job_from_row(row: dict) -> ForgeJob:
     )
 
 
+def _shipment_from_row(row: dict) -> IngotShipment:
+    return IngotShipment(
+        id=int(row["shipment_id"]),
+        blacksmith_company_id=int(row["blacksmith_company_id"]),
+        blacksmith_discord_user_id=int(row["blacksmith_discord_user_id"]),
+        merchant_company_id=int(row["merchant_company_id"]),
+        merchant_discord_user_id=int(row["merchant_discord_user_id"]),
+        banker_company_id=int(row["banker_company_id"]),
+        banker_discord_user_id=int(row["banker_discord_user_id"]),
+        resource_type=row["resource_type"], quantity=int(row["quantity"]),
+        status=row["status"], created_at=str(row["created_at"]),
+        accepted_at=str(row["accepted_at"]) if row.get("accepted_at") else None,
+        cancelled_at=str(row["cancelled_at"]) if row.get("cancelled_at") else None,
+    )
+
+
 class SupabaseIndustrialEconomyRepository:
     """Accès Supabase synchrone, exécuté hors event loop par le service async."""
+
+    def get_or_create_player_actor(self, user_id: int) -> IndustrialActor:
+        row = self._rpc_row("get_or_create_industrial_player_actor", {
+            "p_discord_user_id": user_id})
+        return IndustrialActor(int(row["id"]), row["actor_type"],
+                               int(row["discord_user_id"]), None)
 
     def get_or_create_user(self, user_id: int) -> IndustrialUser:
         response = get_client().rpc(
@@ -292,15 +344,12 @@ class SupabaseIndustrialEconomyRepository:
         return status, row.get("current_job"), result
 
     def upgrade_mine(
-        self, user_id: int, upgrade_type: str
+        self, user_id: int, upgrade_type: str, request_id: str | None = None
     ) -> tuple[str, str | None, int | None, int | None, MineUpgradeResult | None]:
-        row = self._rpc_row(
-            "upgrade_industrial_mine",
-            {
-                "p_owner_discord_user_id": user_id,
-                "p_upgrade_type": upgrade_type,
-            },
-        )
+        function_name = "upgrade_industrial_mine_idempotent" if request_id else "upgrade_industrial_mine"
+        parameters = {"p_owner_discord_user_id": user_id, "p_upgrade_type": upgrade_type}
+        if request_id: parameters["p_request_id"] = request_id
+        row = self._rpc_row(function_name, parameters)
         status = row["result_status"]
         cost = int(row["upgrade_cost"]) if row.get("upgrade_cost") is not None else None
         balance = int(row["wallet_balance"]) if row.get("wallet_balance") is not None else None
@@ -405,7 +454,7 @@ class SupabaseIndustrialEconomyRepository:
 
     def start_transport(self, user_id: int, receiver_user_id: int, resource_type: str,
                         quantity: int, request_id: str):
-        row = self._rpc_row("start_industrial_merchant_transport", {
+        row = self._rpc_row("start_industrial_merchant_transport_with_delivery", {
             "p_merchant_discord_user_id": user_id,
             "p_receiver_discord_user_id": receiver_user_id,
             "p_resource_type": resource_type,
@@ -490,3 +539,151 @@ class SupabaseIndustrialEconomyRepository:
                     .select("id,owner_discord_user_id,company_id,forge_slot,resource_input,resource_output,input_quantity,output_quantity,started_at,finishes_at,status")
                     .eq("owner_discord_user_id", user_id).order("started_at", desc=True).limit(20).execute())
         return status, current_job, [_forge_job_from_row(row) for row in response.data]
+
+    def create_ingot_shipment(self, user_id: int, merchant_id: int, banker_id: int,
+                              quantity: int, request_id: str):
+        row = self._rpc_row("create_industrial_ingot_shipment", {
+            "p_blacksmith_discord_user_id": user_id,
+            "p_merchant_discord_user_id": merchant_id,
+            "p_banker_discord_user_id": banker_id,
+            "p_quantity": quantity, "p_request_id": request_id,
+        })
+        status = row["result_status"]
+        available = int(row["available_amount"]) if row.get("available_amount") is not None else None
+        result = ShipmentResult(_shipment_from_row(row), duplicate_request=status == "duplicate") \
+            if status in {"ok", "duplicate"} else None
+        return status, row.get("current_job"), available, result
+
+    def cancel_ingot_shipment(self, user_id: int, shipment_id: int, request_id: str):
+        row = self._rpc_row("cancel_industrial_ingot_shipment", {
+            "p_blacksmith_discord_user_id": user_id,
+            "p_shipment_id": shipment_id, "p_request_id": request_id,
+        })
+        status = row["result_status"]
+        result = ShipmentResult(_shipment_from_row(row), duplicate_request=status == "duplicate") \
+            if status in {"ok", "duplicate"} else None
+        return status, row.get("current_job"), result
+
+    def accept_ingot_shipment(self, user_id: int, shipment_id: int, request_id: str):
+        row = self._rpc_row("accept_industrial_ingot_shipment_with_delivery", {
+            "p_merchant_discord_user_id": user_id,
+            "p_shipment_id": shipment_id, "p_request_id": request_id,
+        })
+        status = row["result_status"]
+        available = int(row["available_amount"]) if row.get("available_amount") is not None else None
+        if status not in {"ok", "duplicate"}:
+            return status, row.get("current_job"), available, None
+        transport = None
+        if row.get("id") is not None:
+            transport_row = dict(row)
+            transport_row.update({
+                "merchant_discord_user_id": user_id,
+                "resource_type": row["resource_type"],
+                "quantity": row["quantity"],
+                "status": "in_transit",
+            })
+            transport = _transport_from_row(transport_row)
+        return status, row.get("current_job"), available, ShipmentResult(
+            _shipment_from_row(row), transport, status == "duplicate")
+
+    def get_or_create_banker(self, user_id: int):
+        row = self._rpc_row("get_or_create_and_refresh_industrial_banker", {
+            "p_owner_discord_user_id": user_id})
+        if row["result_status"] != "ok":
+            return row["result_status"], row.get("current_job"), None
+        return "ok", row.get("current_job"), Banker(
+            user_id, int(row["company_id"]), row["company_name"], int(row["credits"]))
+
+    def sell_world_ingots(self, user_id: int, quantity: int, request_id: str):
+        row = self._rpc_row("sell_industrial_ingots_to_world", {
+            "p_banker_discord_user_id": user_id, "p_quantity": quantity,
+            "p_request_id": request_id})
+        status = row["result_status"]
+        available = int(row["available_amount"]) if row.get("available_amount") is not None else None
+        if status not in {"ok", "duplicate"}:
+            return status, row.get("current_job"), available, None
+        return status, row.get("current_job"), available, WorldSale(
+            int(row["sale_id"]), int(row["quantity"]), int(row["unit_price"]),
+            int(row["total_credits"]), int(row["balance_after"]), str(row["created_at"]),
+            status == "duplicate")
+
+    def get_world_market(self):
+        return self._rpc_row("get_industrial_world_market", {"p_resource_type": "iron_ingot"})
+
+    def get_world_sales(self, user_id: int):
+        response = (get_client().table("industrial_world_sales")
+                    .select("id,quantity,unit_price,total_credits,balance_after,created_at")
+                    .eq("banker_discord_user_id", user_id).order("created_at", desc=True)
+                    .limit(20).execute())
+        return [WorldSale(int(r["id"]), int(r["quantity"]), int(r["unit_price"]),
+                          int(r["total_credits"]), int(r["balance_after"]), str(r["created_at"]))
+                for r in response.data]
+
+    def get_delivery_missions(self):
+        response = (get_client().table("industrial_delivery_missions")
+                    .select("id,transport_id,merchant_discord_user_id,merchant_actor_id,resource_type,quantity,status,commission_max,industrial_transports!industrial_delivery_missions_transport_id_fkey(arrival_at)")
+                    .eq("status", "open").order("created_at").limit(20).execute())
+        return [DeliveryMission(int(r["id"]), int(r["transport_id"]),
+            int(r["merchant_discord_user_id"]) if r.get("merchant_discord_user_id") else None,
+            int(r["merchant_actor_id"]), r["resource_type"], int(r["quantity"]),
+            r["status"], int(r["commission_max"]), str(r["industrial_transports"]["arrival_at"]))
+            for r in response.data]
+
+    def get_delivery_profile(self, user_id: int):
+        row = self._rpc_row("get_industrial_delivery_profile", {"p_discord_user_id": user_id})
+        return DeliveryProfile(user_id, int(row["delivery_level"]), int(row["delivery_xp"]),
+                               int(row["completed_deliveries"]), row.get("delivery_cooldown_until"))
+
+    def accept_delivery(self, user_id: int, mission_id: int, request_id: str):
+        return self._rpc_row("accept_industrial_delivery", {
+            "p_courier_discord_user_id": user_id, "p_mission_id": mission_id,
+            "p_request_id": request_id})
+
+    @staticmethod
+    def _contract_from_row(row: dict) -> IndustrialContract:
+        return IndustrialContract(int(row["id"]), int(row["creator_discord_user_id"]),
+            int(row["accepter_discord_user_id"]) if row.get("accepter_discord_user_id") else None,
+            row["resource_type"], int(row["quantity"]), int(row["total_price"]),
+            row["status"], str(row["expires_at"]))
+
+    def create_contract(self, user_id: int, resource: str, quantity: int, total: int, request_id: str):
+        row = self._rpc_row("create_industrial_resource_contract", {
+            "p_creator_discord_user_id": user_id, "p_resource_type": resource,
+            "p_quantity": quantity, "p_total_price": total, "p_request_id": request_id})
+        return row["result_status"], row.get("available_amount"), \
+            (self._contract_from_row(row) if row.get("id") else None)
+
+    def accept_contract(self, user_id: int, contract_id: int, request_id: str):
+        row = self._rpc_row("accept_industrial_resource_contract", {
+            "p_accepter_discord_user_id": user_id, "p_contract_id": contract_id,
+            "p_request_id": request_id})
+        return row["result_status"], row.get("available_amount"), \
+            (self._contract_from_row(row) if row.get("id") else None)
+
+    def cancel_contract(self, user_id: int, contract_id: int, request_id: str):
+        row = self._rpc_row("cancel_industrial_resource_contract", {
+            "p_creator_discord_user_id": user_id, "p_contract_id": contract_id,
+            "p_request_id": request_id})
+        return row["result_status"], (self._contract_from_row(row) if row.get("id") else None)
+
+    def get_contracts(self, user_id: int, mine: bool):
+        response = get_client().rpc("get_industrial_resource_contracts", {
+            "p_discord_user_id": user_id, "p_mine": mine}).execute()
+        return [self._contract_from_row(r) for r in response.data]
+
+    def record_activity(self, user_id: int):
+        self._rpc_row("record_industrial_activity", {"p_discord_user_id": user_id})
+
+    def evaluate_ai_companies(self):
+        response = get_client().rpc("evaluate_industrial_ai_companies", {}).execute()
+        return response.data
+
+    def purchase_ai_supply(self, user_id: int, resource_type: str,
+                           quantity: int, request_id: str):
+        return self._rpc_row("purchase_industrial_ai_supply", {
+            "p_buyer_discord_user_id": user_id, "p_resource_type": resource_type,
+            "p_quantity": quantity, "p_request_id": request_id})
+
+    def get_economy_stats(self):
+        get_client().rpc("ensure_industrial_ai_economy", {}).execute()
+        return self._rpc_row("get_industrial_actor_economy_stats", {})

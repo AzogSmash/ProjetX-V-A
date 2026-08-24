@@ -3,6 +3,7 @@ from datetime import datetime
 
 import discord
 
+from economy_v2.commands.merchant import parse_discord_user_id
 from economy_v2.forge_config import (
     FORGE_INPUT_RESOURCE, FORGE_OUTPUT_RESOURCE, FORGE_UPGRADE_LABELS,
     MAX_FORGE_PROCESS_QUANTITY, MAX_FORGE_UPGRADE_LEVEL,
@@ -15,7 +16,7 @@ from economy_v2.router import EconomyCommandContext, EconomyCommandHandler
 from economy_v2.services import (
     BlacksmithAccessDeniedError, BlacksmithCompanyRequiredError,
     ForgeProcessError, ForgeUpgradeMaxLevelError, IndustrialEconomyError,
-    IndustrialEconomyService, InsufficientIndustrialFundsError,
+    IndustrialEconomyService, InsufficientIndustrialFundsError, ShipmentError,
 )
 
 
@@ -23,7 +24,8 @@ logger = logging.getLogger(__name__)
 USAGE = (
     "`?forge`, `?forge inventory`, `?forge process iron_ore <quantité>`, "
     "`?forge collect`, `?forge jobs`, "
-    "`?forge upgrade <forges|speed|storage|yield>`."
+    "`?forge upgrade <forges|speed|storage|yield>`, "
+    "`?forge ai-supply iron_ore <quantité>`."
 )
 
 
@@ -43,6 +45,10 @@ def build_forge_command(service: IndustrialEconomyService) -> EconomyCommandHand
                 await _jobs(context, service)
             elif context.args[0].casefold() == "upgrade" and len(context.args) == 2:
                 await _upgrade(context, service, context.args[1])
+            elif context.args[0].casefold() == "shipment":
+                await _shipment(context, service)
+            elif context.args[0].casefold() == "ai-supply" and len(context.args) == 3:
+                await _ai_supply(context, service)
             else:
                 await context.message.channel.send(f"Syntaxe invalide.\n{USAGE}")
         except BlacksmithAccessDeniedError as error:
@@ -62,6 +68,90 @@ def build_forge_command(service: IndustrialEconomyService) -> EconomyCommandHand
                 "Une erreur est survenue avec ta forge.\nRéessaie dans quelques instants."
             )
     return forge_command
+
+
+async def _ai_supply(context, service) -> None:
+    if context.args[1].casefold() != "iron_ore":
+        await context.message.channel.send("L'IA de secours fournit uniquement `iron_ore`."); return
+    try: quantity = int(context.args[2])
+    except ValueError: quantity = 0
+    if not 1 <= quantity <= 1_000:
+        await context.message.channel.send("Quantité invalide (1 à 1 000)."); return
+    try:
+        row = await service.purchase_ai_supply(context.message.author.id, "iron_ore", quantity,
+                                               f"discord:{context.message.id}")
+    except ShipmentError as error:
+        messages = {"ai_unavailable": "Aucun fournisseur IA n'est actuellement nécessaire.",
+                    "insufficient_funds": f"Fonds insuffisants : **{error.available or 0:,} CR**.",
+                    "insufficient_ai_stock": f"Stock IA insuffisant : **{error.available or 0:,}**.",
+                    "ai_truck_busy": "Le camion IA de secours est déjà occupé."}
+        await context.message.channel.send(messages.get(error.reason, "Approvisionnement IA impossible.")); return
+    await context.message.channel.send(
+        f"🤖 **Approvisionnement IA lancé**\n{int(row['quantity']):,} Minerai de fer\n"
+        f"Coût : **{int(row['total_price']):,} CR**\nArrivée <t:{_discord_timestamp(row['arrival_at'])}:R>.")
+
+
+async def _shipment(context, service) -> None:
+    action = context.args[1].casefold() if len(context.args) > 1 else ""
+    if action == "create" and len(context.args) == 5:
+        merchant_id = parse_discord_user_id(context.args[2])
+        banker_id = parse_discord_user_id(context.args[3])
+        try:
+            quantity = int(context.args[4])
+        except ValueError:
+            quantity = 0
+        if merchant_id is None or banker_id is None or not 1 <= quantity <= 1_000_000:
+            await context.message.channel.send(
+                "Syntaxe : `?forge shipment create <marchand> <banquier> <quantité>`."
+            )
+            return
+        try:
+            result = await service.create_ingot_shipment(
+                context.message.author.id, merchant_id, banker_id, quantity,
+                f"discord:{context.message.id}")
+        except ShipmentError as error:
+            messages = {
+                "invalid_merchant": "Le Marchand désigné n'est pas valide.",
+                "invalid_banker": "Le Banquier désigné n'est pas valide.",
+                "insufficient_inventory": f"Lingots insuffisants. Disponible : **{error.available or 0:,}**.",
+            }
+            await context.message.channel.send(messages.get(error.reason, "Impossible de préparer cette expédition."))
+            return
+        shipment = result.shipment
+        await context.message.channel.send(
+            f"📦 **Expédition #{shipment.id} préparée**\n"
+            f"{shipment.quantity:,} Lingot de fer placés en escrow.\n"
+            f"Le Marchand désigné peut utiliser `?merchant transport-ingots {shipment.id}`."
+        )
+        return
+    if action == "cancel" and len(context.args) == 3:
+        try:
+            shipment_id = int(context.args[2])
+        except ValueError:
+            shipment_id = 0
+        if shipment_id < 1:
+            await context.message.channel.send("Syntaxe : `?forge shipment cancel <id>`." )
+            return
+        try:
+            result = await service.cancel_ingot_shipment(
+                context.message.author.id, shipment_id, f"discord:{context.message.id}")
+        except ShipmentError as error:
+            messages = {
+                "not_found": "Expédition introuvable.",
+                "not_owner": "Cette expédition ne t'appartient pas.",
+                "already_accepted": "Une expédition acceptée ne peut plus être annulée.",
+            }
+            await context.message.channel.send(messages.get(error.reason, "Impossible d'annuler cette expédition."))
+            return
+        await context.message.channel.send(
+            f"✅ Expédition **#{result.shipment.id}** annulée. "
+            f"**{result.shipment.quantity:,}** lingots ont été remis dans ton inventaire."
+        )
+        return
+    await context.message.channel.send(
+        "Syntaxe : `?forge shipment create <marchand> <banquier> <quantité>` "
+        "ou `?forge shipment cancel <id>`."
+    )
 
 
 def _discord_timestamp(value: str) -> int:

@@ -31,16 +31,22 @@ async def ecohelp_command(context: EconomyCommandContext) -> None:
             "\n`?forge` / `?forge inventory` — Gérer sa forge\n"
             "`?forge process iron_ore <quantité>` — Transformer le minerai\n"
             "`?forge collect` / `?forge jobs` — Suivre la production\n"
-            "`?forge upgrade <type>` — Améliorer la forge"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="En développement",
-        value=(
-            "🚚 `?delivery` — Livraisons\n"
-            "🏦 `?bank` — Banque\n"
-            "📜 `?contracts` — Contrats"
+            "`?forge upgrade <type>` — Améliorer la forge\n"
+            "`?forge ai-supply iron_ore <quantité>` — Fournisseur IA de secours\n"
+            "`?forge shipment create <marchand> <banquier> <quantité>` — Préparer des lingots\n"
+            "`?forge shipment cancel <id>` — Annuler une expédition\n"
+            "`?merchant transport-ingots <id>` — Charger les lingots"
+            "\n`?bank` / `?bank inventory` — Gérer sa banque\n"
+            "`?bank market` — Consulter le marché mondial\n"
+            "`?bank sell iron_ingot <quantité>` — Vendre des lingots\n"
+            "`?bank ai-order iron_ingot <quantité>` — Forgeron IA de secours\n"
+            "`?bank history` — Historique des ventes\n"
+            "`?delivery list|stats` — Missions accessibles à tous\n"
+            "`?delivery accept <id>` — Accélérer un transport\n"
+            "`?contracts` / `?contracts mine` — Contrats de ressources\n"
+            "`?contracts create <ressource> <quantité> <prix>` — Publier\n"
+            "`?contracts accept|cancel <id>` — Gérer un contrat\n"
+            "`?economy` — Activité joueurs, IA et indicateurs globaux"
         ),
         inline=False,
     )

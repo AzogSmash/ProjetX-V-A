@@ -3,6 +3,7 @@ import logging
 from typing import Protocol
 
 from economy_v2.models import (
+    IndustrialActor,
     IndustrialCompany,
     IndustrialUser,
     InventoryEntry,
@@ -21,6 +22,12 @@ from economy_v2.models import (
     ForgeJob,
     ForgeProcessResult,
     ForgeUpgradeResult,
+    ShipmentResult,
+    Banker,
+    WorldSale,
+    DeliveryMission,
+    DeliveryProfile,
+    IndustrialContract,
 )
 from economy_v2.repository import (
     IndustrialEconomyRepository,
@@ -118,12 +125,29 @@ class ForgeProcessError(IndustrialEconomyError):
         self.reason, self.available = reason, available
 
 
+class ShipmentError(IndustrialEconomyError):
+    def __init__(self, reason: str, available: int | None = None) -> None:
+        self.reason, self.available = reason, available
+
+
+class BankerAccessDeniedError(IndustrialEconomyError):
+    def __init__(self, current_job: str | None) -> None:
+        self.current_job = current_job
+
+
+class WorldSaleError(IndustrialEconomyError):
+    def __init__(self, reason: str, available: int | None = None) -> None:
+        self.reason, self.available = reason, available
+
+
 class IndustrialWalletService(Protocol):
     async def get_balance(self, user_id: int) -> int:
         ...
 
 
 class IndustrialEconomyService(IndustrialWalletService, Protocol):
+    async def get_player_actor(self, user_id: int) -> IndustrialActor: ...
+
     async def get_or_create_user(self, user_id: int) -> IndustrialUser:
         ...
 
@@ -147,7 +171,8 @@ class IndustrialEconomyService(IndustrialWalletService, Protocol):
     async def collect_mine(self, user_id: int) -> MineCollectionResult:
         ...
 
-    async def upgrade_mine(self, user_id: int, upgrade_type: str) -> MineUpgradeResult:
+    async def upgrade_mine(self, user_id: int, upgrade_type: str,
+                           request_id: str | None = None) -> MineUpgradeResult:
         ...
 
     async def get_inventory(self, user_id: int) -> list[InventoryEntry]:
@@ -180,6 +205,29 @@ class IndustrialEconomyService(IndustrialWalletService, Protocol):
     async def collect_forge_jobs(self, user_id: int, request_id: str) -> ForgeCollectionResult: ...
     async def upgrade_forge(self, user_id: int, upgrade_type: str, request_id: str) -> ForgeUpgradeResult: ...
     async def get_forge_jobs(self, user_id: int) -> list[ForgeJob]: ...
+    async def create_ingot_shipment(self, user_id: int, merchant_id: int, banker_id: int,
+                                    quantity: int, request_id: str) -> ShipmentResult: ...
+    async def cancel_ingot_shipment(self, user_id: int, shipment_id: int,
+                                    request_id: str) -> ShipmentResult: ...
+    async def accept_ingot_shipment(self, user_id: int, shipment_id: int,
+                                    request_id: str) -> ShipmentResult: ...
+    async def get_or_create_banker(self, user_id: int) -> Banker: ...
+    async def sell_world_ingots(self, user_id: int, quantity: int, request_id: str) -> WorldSale: ...
+    async def get_world_market(self) -> dict: ...
+    async def get_world_sales(self, user_id: int) -> list[WorldSale]: ...
+    async def get_delivery_missions(self) -> list[DeliveryMission]: ...
+    async def get_delivery_profile(self, user_id: int) -> DeliveryProfile: ...
+    async def accept_delivery(self, user_id: int, mission_id: int, request_id: str) -> dict: ...
+    async def create_contract(self, user_id: int, resource: str, quantity: int,
+                              total: int, request_id: str) -> IndustrialContract: ...
+    async def accept_contract(self, user_id: int, contract_id: int, request_id: str) -> IndustrialContract: ...
+    async def cancel_contract(self, user_id: int, contract_id: int, request_id: str) -> IndustrialContract: ...
+    async def get_contracts(self, user_id: int, mine: bool = False) -> list[IndustrialContract]: ...
+    async def record_activity(self, user_id: int) -> None: ...
+    async def evaluate_ai_companies(self) -> list[dict]: ...
+    async def purchase_ai_supply(self, user_id: int, resource_type: str,
+                                 quantity: int, request_id: str) -> dict: ...
+    async def get_economy_stats(self) -> dict: ...
 
 
 class SupabaseIndustrialEconomyService:
@@ -206,6 +254,10 @@ class SupabaseIndustrialEconomyService:
             self._repository.get_or_create_user,
             user_id,
         )
+
+    async def get_player_actor(self, user_id: int) -> IndustrialActor:
+        return await self._run("get_player_actor", user_id,
+                               self._repository.get_or_create_player_actor, user_id)
 
     async def get_balance(self, user_id: int) -> int:
         user = await self.get_or_create_user(user_id)
@@ -273,13 +325,15 @@ class SupabaseIndustrialEconomyService:
             self._raise_mine_status(status, current_job)
         return result
 
-    async def upgrade_mine(self, user_id: int, upgrade_type: str) -> MineUpgradeResult:
+    async def upgrade_mine(self, user_id: int, upgrade_type: str,
+                           request_id: str | None = None) -> MineUpgradeResult:
         status, current_job, cost, balance, result = await self._run(
             "upgrade_mine",
             user_id,
             self._repository.upgrade_mine,
             user_id,
             upgrade_type,
+            *([request_id] if request_id else []),
         )
         if status == "insufficient_funds":
             raise InsufficientIndustrialFundsError(cost or 0, balance or 0)
@@ -420,3 +474,125 @@ class SupabaseIndustrialEconomyService:
             "get_forge_jobs", user_id, self._repository.get_forge_jobs, user_id)
         if status != "ok": self._raise_blacksmith_status(status, current_job)
         return jobs
+
+    async def create_ingot_shipment(self, user_id: int, merchant_id: int, banker_id: int,
+                                    quantity: int, request_id: str) -> ShipmentResult:
+        status, current_job, available, result = await self._run(
+            "create_ingot_shipment", user_id, self._repository.create_ingot_shipment,
+            user_id, merchant_id, banker_id, quantity, request_id)
+        if status in {"not_blacksmith", "no_blacksmith_company"}:
+            self._raise_blacksmith_status(status, current_job)
+        if status not in {"ok", "duplicate"} or result is None:
+            raise ShipmentError(status, available)
+        return result
+
+    async def cancel_ingot_shipment(self, user_id: int, shipment_id: int,
+                                    request_id: str) -> ShipmentResult:
+        status, current_job, result = await self._run(
+            "cancel_ingot_shipment", user_id, self._repository.cancel_ingot_shipment,
+            user_id, shipment_id, request_id)
+        if status in {"not_blacksmith", "no_blacksmith_company"}:
+            self._raise_blacksmith_status(status, current_job)
+        if status not in {"ok", "duplicate"} or result is None:
+            raise ShipmentError(status)
+        return result
+
+    async def accept_ingot_shipment(self, user_id: int, shipment_id: int,
+                                    request_id: str) -> ShipmentResult:
+        status, current_job, available, result = await self._run(
+            "accept_ingot_shipment", user_id, self._repository.accept_ingot_shipment,
+            user_id, shipment_id, request_id)
+        if status in {"not_merchant", "no_merchant_company"}:
+            self._raise_merchant_status(status, current_job)
+        if status not in {"ok", "duplicate"} or result is None:
+            raise ShipmentError(status, available)
+        return result
+
+    @staticmethod
+    def _raise_banker_status(status: str, current_job: str | None) -> None:
+        if status == "not_banker": raise BankerAccessDeniedError(current_job)
+        raise IndustrialEconomyError(f"unexpected banker status: {status}")
+
+    async def get_or_create_banker(self, user_id: int) -> Banker:
+        status, current_job, banker = await self._run(
+            "get_or_create_banker", user_id, self._repository.get_or_create_banker, user_id)
+        if status != "ok" or banker is None: self._raise_banker_status(status, current_job)
+        return banker
+
+    async def sell_world_ingots(self, user_id: int, quantity: int,
+                                request_id: str) -> WorldSale:
+        status, current_job, available, sale = await self._run(
+            "sell_world_ingots", user_id, self._repository.sell_world_ingots,
+            user_id, quantity, request_id)
+        if status == "not_banker": self._raise_banker_status(status, current_job)
+        if status not in {"ok", "duplicate"} or sale is None:
+            raise WorldSaleError(status, available)
+        return sale
+
+    async def get_world_market(self) -> dict:
+        return await self._run("get_world_market", 0, self._repository.get_world_market)
+
+    async def get_world_sales(self, user_id: int) -> list[WorldSale]:
+        await self.get_or_create_banker(user_id)
+        return await self._run("get_world_sales", user_id, self._repository.get_world_sales, user_id)
+
+    async def get_delivery_missions(self) -> list[DeliveryMission]:
+        return await self._run("get_delivery_missions", 0, self._repository.get_delivery_missions)
+
+    async def get_delivery_profile(self, user_id: int) -> DeliveryProfile:
+        await self.get_or_create_user(user_id)
+        return await self._run("get_delivery_profile", user_id,
+                               self._repository.get_delivery_profile, user_id)
+
+    async def accept_delivery(self, user_id: int, mission_id: int, request_id: str) -> dict:
+        row = await self._run("accept_delivery", user_id, self._repository.accept_delivery,
+                              user_id, mission_id, request_id)
+        if row["result_status"] not in {"ok", "duplicate"}:
+            raise ShipmentError(row["result_status"])
+        return row
+
+    async def create_contract(self, user_id: int, resource: str, quantity: int,
+                              total: int, request_id: str) -> IndustrialContract:
+        status, available, contract = await self._run("create_contract", user_id,
+            self._repository.create_contract, user_id, resource, quantity, total, request_id)
+        if status not in {"ok", "duplicate"} or contract is None:
+            raise ShipmentError(status, int(available or 0))
+        return contract
+
+    async def accept_contract(self, user_id: int, contract_id: int,
+                              request_id: str) -> IndustrialContract:
+        status, available, contract = await self._run("accept_contract", user_id,
+            self._repository.accept_contract, user_id, contract_id, request_id)
+        if status not in {"ok", "duplicate"} or contract is None:
+            raise ShipmentError(status, int(available or 0))
+        return contract
+
+    async def cancel_contract(self, user_id: int, contract_id: int,
+                              request_id: str) -> IndustrialContract:
+        status, contract = await self._run("cancel_contract", user_id,
+            self._repository.cancel_contract, user_id, contract_id, request_id)
+        if status not in {"ok", "duplicate"} or contract is None: raise ShipmentError(status)
+        return contract
+
+    async def get_contracts(self, user_id: int, mine: bool = False) -> list[IndustrialContract]:
+        await self.get_or_create_user(user_id)
+        return await self._run("get_contracts", user_id, self._repository.get_contracts, user_id, mine)
+
+    async def record_activity(self, user_id: int) -> None:
+        if not hasattr(self._repository, "record_activity"):
+            return
+        await self._run("record_activity", user_id, self._repository.record_activity, user_id)
+
+    async def evaluate_ai_companies(self) -> list[dict]:
+        return await self._run("evaluate_ai_companies", 0, self._repository.evaluate_ai_companies)
+
+    async def purchase_ai_supply(self, user_id: int, resource_type: str,
+                                 quantity: int, request_id: str) -> dict:
+        row = await self._run("purchase_ai_supply", user_id,
+            self._repository.purchase_ai_supply, user_id, resource_type, quantity, request_id)
+        if row["result_status"] not in {"ok", "duplicate"}:
+            raise ShipmentError(row["result_status"], int(row.get("available_amount") or 0))
+        return row
+
+    async def get_economy_stats(self) -> dict:
+        return await self._run("get_economy_stats",0,self._repository.get_economy_stats)

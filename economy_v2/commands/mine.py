@@ -138,7 +138,8 @@ async def _upgrade(
         return
 
     try:
-        result = await service.upgrade_mine(context.message.author.id, upgrade_type)
+        result = await service.upgrade_mine(
+            context.message.author.id, upgrade_type, f"discord:{context.message.id}")
     except InsufficientIndustrialFundsError as error:
         await context.message.channel.send(
             f"❌ **Fonds insuffisants**\n\n"

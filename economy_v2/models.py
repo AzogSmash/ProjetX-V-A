@@ -2,6 +2,14 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class IndustrialActor:
+    id: int
+    actor_type: str
+    discord_user_id: int | None
+    ai_company_id: int | None
+
+
+@dataclass(frozen=True)
 class IndustrialUser:
     discord_user_id: int
     credits: int
@@ -183,3 +191,81 @@ class ForgeUpgradeResult:
     cost: int
     balance: int
     duplicate_request: bool = False
+
+
+@dataclass(frozen=True)
+class IngotShipment:
+    id: int
+    blacksmith_company_id: int
+    blacksmith_discord_user_id: int
+    merchant_company_id: int
+    merchant_discord_user_id: int
+    banker_company_id: int
+    banker_discord_user_id: int
+    resource_type: str
+    quantity: int
+    status: str
+    created_at: str
+    accepted_at: str | None = None
+    cancelled_at: str | None = None
+
+
+@dataclass(frozen=True)
+class ShipmentResult:
+    shipment: IngotShipment
+    transport: IndustrialTransport | None = None
+    duplicate_request: bool = False
+
+
+@dataclass(frozen=True)
+class Banker:
+    owner_discord_user_id: int
+    company_id: int
+    company_name: str
+    credits: int
+
+
+@dataclass(frozen=True)
+class WorldSale:
+    id: int
+    quantity: int
+    unit_price: int
+    total_credits: int
+    balance_after: int
+    created_at: str
+    duplicate_request: bool = False
+
+
+@dataclass(frozen=True)
+class DeliveryMission:
+    id: int
+    transport_id: int
+    merchant_discord_user_id: int | None
+    merchant_actor_id: int
+    resource_type: str
+    quantity: int
+    status: str
+    commission_max: int
+    arrival_at: str
+    courier_discord_user_id: int | None = None
+
+
+@dataclass(frozen=True)
+class DeliveryProfile:
+    discord_user_id: int
+    delivery_level: int
+    delivery_xp: int
+    completed_deliveries: int
+    cooldown_until: str | None
+
+
+@dataclass(frozen=True)
+class IndustrialContract:
+    id: int
+    creator_discord_user_id: int
+    accepter_discord_user_id: int | None
+    resource_type: str
+    quantity: int
+    total_price: int
+    status: str
+    expires_at: str

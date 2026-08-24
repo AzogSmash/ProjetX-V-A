@@ -39,8 +39,9 @@ def parse_economy_message(content: str) -> ParsedEconomyCommand | None:
 
 
 class EconomyRouter:
-    def __init__(self) -> None:
+    def __init__(self, activity_recorder=None) -> None:
         self._commands: dict[str, EconomyCommandHandler] = {}
+        self._activity_recorder = activity_recorder
 
     @property
     def command_names(self) -> frozenset[str]:
@@ -69,6 +70,11 @@ class EconomyRouter:
             return True
 
         logger.info("[ECONOMY] Command: %s | User: %s", command_name, message.author.id)
+        if self._activity_recorder is not None:
+            try:
+                await self._activity_recorder(message.author.id)
+            except Exception:
+                logger.exception("[ECONOMY] Activity recording failed | User: %s", message.author.id)
         context = EconomyCommandContext(message=message, args=parsed.args, router=self)
         try:
             await handler(context)

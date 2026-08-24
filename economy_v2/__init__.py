@@ -10,8 +10,9 @@ from economy_v2.services import IndustrialEconomyService, SupabaseIndustrialEcon
 def build_economy_router(
     service: IndustrialEconomyService | None = None,
 ) -> EconomyRouter:
-    router = EconomyRouter()
-    register_economy_commands(router, service or SupabaseIndustrialEconomyService())
+    economy_service = service or SupabaseIndustrialEconomyService()
+    router = EconomyRouter(getattr(economy_service, "record_activity", None))
+    register_economy_commands(router, economy_service)
     return router
 
 

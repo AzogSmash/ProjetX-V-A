@@ -16,7 +16,7 @@ from economy_v2.services import (
     IndustrialEconomyError, IndustrialEconomyService,
     InsufficientIndustrialFundsError, MerchantAccessDeniedError,
     MerchantCompanyRequiredError, MerchantTransportError,
-    MerchantUpgradeMaxLevelError,
+    MerchantUpgradeMaxLevelError, ShipmentError,
 )
 
 
@@ -42,6 +42,8 @@ def build_merchant_command(service: IndustrialEconomyService) -> EconomyCommandH
                 await _upgrade(context, service, context.args[1])
             elif context.args[0].casefold() == "transport" and len(context.args) == 4:
                 await _start_transport(context, service)
+            elif context.args[0].casefold() == "transport-ingots" and len(context.args) == 2:
+                await _accept_ingot_shipment(context, service)
             else:
                 await context.message.channel.send(f"Syntaxe invalide.\n{USAGE}")
         except MerchantAccessDeniedError as error:
@@ -62,6 +64,40 @@ def build_merchant_command(service: IndustrialEconomyService) -> EconomyCommandH
                 "Réessaie dans quelques instants."
             )
     return merchant_command
+
+
+async def _accept_ingot_shipment(context, service) -> None:
+    try:
+        shipment_id = int(context.args[1])
+    except ValueError:
+        shipment_id = 0
+    if shipment_id < 1:
+        await context.message.channel.send("Syntaxe : `?merchant transport-ingots <shipment_id>`." )
+        return
+    try:
+        result = await service.accept_ingot_shipment(
+            context.message.author.id, shipment_id, f"discord:{context.message.id}")
+    except ShipmentError as error:
+        messages = {
+            "not_found": "Expédition introuvable.",
+            "not_designated_merchant": "Cette expédition est réservée à un autre Marchand.",
+            "already_cancelled": "Cette expédition a été annulée.",
+            "already_accepted": "Cette expédition a déjà été acceptée.",
+            "capacity_exceeded": f"Le chargement dépasse la capacité du camion : **{error.available or 0:,}**.",
+            "no_truck_available": "Aucun camion n'est actuellement disponible.",
+            "insufficient_commission_funds": (
+                f"CR insuffisants pour réserver la commission de livraison : "
+                f"solde **{error.available or 0:,} CR**."
+            ),
+        }
+        await context.message.channel.send(messages.get(error.reason, "Impossible d'accepter cette expédition."))
+        return
+    transport = result.transport
+    await context.message.channel.send(
+        f"🚚 **Expédition #{result.shipment.id} chargée**\n"
+        f"{result.shipment.quantity:,} Lingot de fer vers le Banquier désigné.\n"
+        f"Arrivée <t:{_discord_timestamp(transport.arrival_at)}:R>."
+    )
 
 
 def parse_discord_user_id(value: str) -> int | None:
@@ -182,6 +218,10 @@ async def _start_transport(context, service) -> None:
             "insufficient_inventory": f"Stock insuffisant. Disponible : **{error.available or 0:,}**.",
             "capacity_exceeded": f"Ce chargement dépasse la capacité du camion : **{error.available or 0:,}**.",
             "no_truck_available": "Aucun camion n'est actuellement disponible.",
+            "insufficient_commission_funds": (
+                f"CR insuffisants pour réserver la commission de livraison : "
+                f"solde **{error.available or 0:,} CR**."
+            ),
         }
         await context.message.channel.send(messages.get(error.reason, "Impossible de démarrer ce transport."))
         return
