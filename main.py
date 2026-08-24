@@ -67,6 +67,18 @@ ROLE_PRESIDENT_ID = 1513110804621430889
 ROLE_VICE_PRESIDENT_ID = 1513110804621430887
 ROLE_CONSEILLER_ID = 1513110804621430886
 
+DISCORD_MOD_STAFF_ROLE_IDS = {ROLE_FONDA_ID, ROLE_ADMIN_ID, ROLE_MODERATEUR_ID}
+
+
+def _is_discord_mod_staff(member: discord.Member) -> bool:
+    """Ligne Fonda/Admin/Modérateur uniquement — pas le staff club (Recruteur/
+    Président/Vice-président/Conseiller). Utilisé pour !lock(_serveur) :
+    demande du 21/08/2026, seuls ces 3 rôles gardent l'écriture pendant un
+    verrouillage."""
+    return is_bot_owner(member) or member.guild_permissions.administrator or any(
+        r.id in DISCORD_MOD_STAFF_ROLE_IDS for r in member.roles
+    )
+
 # Qui voit le salon d'un ticket, par motif (clé de TICKET_CATEGORIES) — les
 # incidents serveur, les candidatures générales et "autre" ne concernent que
 # la ligne Fonda/Admin/Modérateur, pas le staff de club (confirmé par les
@@ -391,6 +403,11 @@ casino_banned_users = set()  # uid (int) bannis de toutes les commandes casino
 casino_paused    = False  # pause volontaire de tout le casino (!casino_pause), PAS persistée entre redémarrages
 
 # ── Nouvelles fonctionnalités ─────────────────────────────────────────────
+# str(channel_id) -> {str(target_id): true|false|null} — valeur de send_messages
+# AVANT verrouillage, pour chaque cible (rôle @everyone ou rôle staff) touchée par
+# !lock/!lock_serveur, afin que !unlock(_serveur) restaure l'état exact plutôt que
+# de rouvrir en aveugle un salon qui était peut-être déjà restreint avant.
+lock_overwrite_backup = {}
 daily_streaks     = {}   # str(uid) -> {'streak': int, 'last_day': 'YYYY-MM-DD'}
 ticket_purchases  = {}   # str(uid) -> {'count': int, 'day': 'YYYY-MM-DD'}
 birthdays        = {}   # str(uid) -> {'day': int, 'month': int, 'guild_id': int}
@@ -1151,6 +1168,7 @@ def load_data():
     global LEAVE_LOG_CHANNEL_ID
     global bs_accounts, bs_role_config
     global FAMILY_CLUBS_PANEL_CHANNEL_ID, FAMILY_CLUBS_PANEL_MESSAGE_IDS
+    global lock_overwrite_backup
     global crypto_buy_cooldowns, crypto_sell_cooldowns, crypto_hold_since, cold_wallets, theft_stats, daily_sell_volume, crypto_market_frozen
     global ranked_1v1, ranked_challenges, ranked_pending, ranked_pair_daily, ranked_reports, ranked_report_cooldowns
     global ranked_season_month, slash_global_purged, casino_season_month
@@ -1276,6 +1294,7 @@ def load_data():
                 LEAVE_LOG_CHANNEL_ID      = data.get('leave_log_channel_id', LEAVE_LOG_CHANNEL_ID)
                 FAMILY_CLUBS_PANEL_CHANNEL_ID = data.get('family_clubs_panel_channel_id', FAMILY_CLUBS_PANEL_CHANNEL_ID)
                 FAMILY_CLUBS_PANEL_MESSAGE_IDS = data.get('family_clubs_panel_message_ids', FAMILY_CLUBS_PANEL_MESSAGE_IDS)
+                lock_overwrite_backup = data.get('lock_overwrite_backup', {})
                 # punitions : voir incident du 21/07/2026, un redémarrage en pleine punition
                 # laissait le membre bloqué dans tous les salons (les restrictions Discord
                 # survivent au redémarrage, mais plus le dict en mémoire qui permet à
@@ -1487,6 +1506,7 @@ def save_data(force: bool = False):
     data_to_save['leave_log_channel_id']      = LEAVE_LOG_CHANNEL_ID
     data_to_save['family_clubs_panel_channel_id']  = FAMILY_CLUBS_PANEL_CHANNEL_ID
     data_to_save['family_clubs_panel_message_ids'] = FAMILY_CLUBS_PANEL_MESSAGE_IDS
+    data_to_save['lock_overwrite_backup'] = lock_overwrite_backup
     data_to_save['punitions']       = punitions
     data_to_save['moderation_log']  = moderation_log
     data_to_save['ranked_1v1']        = ranked_1v1
@@ -2159,7 +2179,10 @@ def _build_help_categories(ctx):
                      "`!set_admin_log #salon` (`!admin_log`) — Logs admin\n"
                      "`!set_logs <catégorie> [#salon]` (`!logs_config`) — Choisir le salon par type de log "
                      "(`admin`/`moderation`/`casino`/`general`/`giveaway`/`ticket`) · `!set_logs liste` pour voir la config\n"
-                     "`!lock` / `!unlock` — Verrouiller un salon\n"
+                     "`!lock` / `!unlock` *(Fonda/Admin/Modérateur)* — Verrouiller/déverrouiller le salon courant "
+                     "(@everyone perd l'écriture, Fonda/Admin/Modérateur la gardent)\n"
+                     "`!lock_serveur` / `!unlock_serveur` *(Fonda/Admin/Modérateur)* — Même chose sur tous les salons "
+                     "d'un coup (logs exclus), avec confirmation demandée avant d'agir\n"
                      "`!commandes_admin` — Index complet des commandes admin/modération\n"
                      "`!annonce_site [message_id]` — Poste l'annonce du site par le bot (et supprime l'ancien message si un ID est donné)\n"
                      "\n**Ranked 1v1 :**\n"
@@ -12258,8 +12281,10 @@ async def on_message(message):
             "giverole": "**!giverole @membre @role**\nDonne un rôle spécifique à un membre.",
             "construction": "**!construction**\nCrée une architecture complète de serveur communautaire (créateur du bot uniquement).",
             "nuke": "**!nuke**\n⚠️ DANGER : Supprime TOUS les salons du serveur (créateur du bot uniquement).",
-            "lock": "**!lock**\nVerrouille le salon actuel (empêche d'écrire).",
+            "lock": "**!lock**\nVerrouille le salon actuel (empêche d'écrire, sauf Fonda/Admin/Modérateur).",
             "unlock": "**!unlock**\nDéverrouille le salon actuel.",
+            "lock_serveur": "**!lock_serveur**\nVerrouille tous les salons du serveur (sauf logs), sauf Fonda/Admin/Modérateur. Demande confirmation.",
+            "unlock_serveur": "**!unlock_serveur**\nDéverrouille tous les salons actuellement verrouillés.",
             "rename": "**!rename @membre nouveau_pseudo**\nChange le pseudo d'un membre sur le serveur.",
             "say": "**!say message**\nFait dire quelque chose au bot (créateur du bot uniquement).",
             "dm": "**!dm @membre message**\nEnvoie un message privé à un membre (créateur du bot uniquement).",
@@ -16088,6 +16113,156 @@ async def _confirm_action(ctx, warning: str) -> bool:
         except discord.HTTPException:
             pass
     return True
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# ── Verrouillage de salon(s) (!lock, !lock_serveur) ────────────────────────
+# ═════════════════════════════════════════════════════════════════════════
+# @everyone perd send_messages ; Fonda/Admin/Modérateur reçoivent un overwrite
+# explicite send_messages=True pour continuer à écrire (résolution Discord :
+# l'overwrite de rôle spécifique l'emporte sur celui de @everyone). L'état
+# PRÉCÉDENT de chaque cible touchée est sauvegardé dans lock_overwrite_backup
+# avant modification, pour que le déverrouillage restaure exactement ce qui
+# existait avant plutôt que d'ouvrir en aveugle un salon déjà restreint.
+
+async def _lock_channel(channel: discord.TextChannel, guild: discord.Guild):
+    everyone = guild.default_role
+    backup = lock_overwrite_backup.setdefault(str(channel.id), {})
+
+    ov_everyone = channel.overwrites_for(everyone)
+    backup.setdefault(str(everyone.id), ov_everyone.send_messages)
+    ov_everyone.send_messages = False
+    await channel.set_permissions(everyone, overwrite=ov_everyone, reason="Verrouillage")
+
+    for role_id in DISCORD_MOD_STAFF_ROLE_IDS:
+        role = guild.get_role(role_id)
+        if not role:
+            continue
+        ov_role = channel.overwrites_for(role)
+        backup.setdefault(str(role.id), ov_role.send_messages)
+        ov_role.send_messages = True
+        await channel.set_permissions(role, overwrite=ov_role, reason="Verrouillage — exception staff Discord")
+
+
+async def _unlock_channel(channel: discord.TextChannel, guild: discord.Guild) -> bool:
+    """Retourne False si ce salon n'était pas suivi comme verrouillé (rien à faire)."""
+    backup = lock_overwrite_backup.pop(str(channel.id), None)
+    if not backup:
+        return False
+    for target_id_str, prev_value in backup.items():
+        target = guild.get_role(int(target_id_str))
+        if not target:
+            continue
+        overwrite = channel.overwrites_for(target)
+        overwrite.send_messages = prev_value
+        if overwrite.is_empty():
+            await channel.set_permissions(target, overwrite=None, reason="Déverrouillage")
+        else:
+            await channel.set_permissions(target, overwrite=overwrite, reason="Déverrouillage")
+    return True
+
+
+def _log_channel_ids() -> set[int]:
+    ids = set()
+    for varname in LOG_CATEGORY_VARS.values():
+        cid = globals().get(varname)
+        if cid:
+            ids.add(cid)
+    return ids
+
+
+@bot.command(name="lock")
+async def cmd_lock(ctx):
+    """Verrouille le salon courant : @everyone perd le droit d'écrire, seuls
+    Fonda/Admin/Modérateur le gardent. Restaure l'état exact d'avant via !unlock."""
+    if not _is_discord_mod_staff(ctx.author):
+        return await ctx.send("❌ Réservé au staff Discord (Fonda/Admin/Modérateur).")
+    if not ctx.guild:
+        return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
+    try:
+        await _lock_channel(ctx.channel, ctx.guild)
+    except discord.Forbidden:
+        return await ctx.send("❌ Permissions insuffisantes pour modifier ce salon.")
+    save_data()
+    await ctx.send(f"🔒 {ctx.channel.mention} verrouillé — seuls Fonda/Admin/Modérateur peuvent encore écrire.")
+
+
+@bot.command(name="unlock")
+async def cmd_unlock(ctx):
+    """Déverrouille le salon courant — restaure l'état d'avant !lock."""
+    if not _is_discord_mod_staff(ctx.author):
+        return await ctx.send("❌ Réservé au staff Discord (Fonda/Admin/Modérateur).")
+    if not ctx.guild:
+        return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
+    try:
+        restored = await _unlock_channel(ctx.channel, ctx.guild)
+    except discord.Forbidden:
+        return await ctx.send("❌ Permissions insuffisantes pour modifier ce salon.")
+    if not restored:
+        return await ctx.send("ℹ️ Ce salon n'est pas verrouillé.")
+    save_data()
+    await ctx.send(f"🔓 {ctx.channel.mention} déverrouillé.")
+
+
+@bot.command(name="lock_serveur", aliases=["lockserveur", "lock_server"])
+async def cmd_lock_serveur(ctx):
+    """Verrouille TOUS les salons textuels du serveur sauf les salons de logs
+    configurés (!set_logs) — mêmes règles que !lock (Fonda/Admin/Modérateur
+    gardent l'écriture). Demande confirmation avant d'agir : action à fort
+    impact, touche tout le monde d'un coup."""
+    if not _is_discord_mod_staff(ctx.author):
+        return await ctx.send("❌ Réservé au staff Discord (Fonda/Admin/Modérateur).")
+    if not ctx.guild:
+        return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
+
+    excluded = _log_channel_ids()
+    targets = [c for c in ctx.guild.text_channels if c.id not in excluded]
+    if not await _confirm_action(
+        ctx,
+        f"⚠️ **Verrouiller {len(targets)} salon(s)** du serveur (logs exclus) ? "
+        f"Seuls Fonda/Admin/Modérateur pourront encore écrire."
+    ):
+        return
+
+    locked = 0
+    async with ctx.typing():
+        for channel in targets:
+            try:
+                await _lock_channel(channel, ctx.guild)
+                locked += 1
+            except discord.Forbidden:
+                pass
+            await asyncio.sleep(0.5)
+    save_data()
+    await ctx.send(f"🔒 Serveur verrouillé — {locked}/{len(targets)} salon(s) verrouillé(s) (logs exclus).")
+
+
+@bot.command(name="unlock_serveur", aliases=["unlockserveur", "unlock_server"])
+async def cmd_unlock_serveur(ctx):
+    """Déverrouille tous les salons actuellement suivis comme verrouillés sur
+    ce serveur (par !lock ou !lock_serveur) — restaure l'état d'avant pour
+    chacun."""
+    if not _is_discord_mod_staff(ctx.author):
+        return await ctx.send("❌ Réservé au staff Discord (Fonda/Admin/Modérateur).")
+    if not ctx.guild:
+        return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
+
+    channel_ids = [int(cid) for cid in list(lock_overwrite_backup.keys())]
+    unlocked = 0
+    async with ctx.typing():
+        for cid in channel_ids:
+            channel = ctx.guild.get_channel(cid)
+            if not channel:
+                lock_overwrite_backup.pop(str(cid), None)
+                continue
+            try:
+                if await _unlock_channel(channel, ctx.guild):
+                    unlocked += 1
+            except discord.Forbidden:
+                pass
+            await asyncio.sleep(0.5)
+    save_data()
+    await ctx.send(f"🔓 Serveur déverrouillé — {unlocked} salon(s) restauré(s).")
 
 
 def _reset_casino_state():
