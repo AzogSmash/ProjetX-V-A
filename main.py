@@ -18,6 +18,10 @@ from PIL import Image, ImageDraw, ImageFont
 from keep_alive import keep_alive
 import db_bs
 import db_members
+from economy_v2 import (
+    economy_router,
+    validate_command_names,
+)
 
 load_dotenv()
 
@@ -599,6 +603,39 @@ CASINO_HINT_USER_ID = 1056848438270115900  # happy_gt3
 # pour CASINO_HINT_USER_ID — toggle via !triche, utilisable en MP au bot.
 casino_cheat_enabled = True
 
+# Extension du territoire active. Les extensions sont temporaires et ne sont
+# volontairement pas persistées : un redémarrage du bot met fin à leur effet.
+territory_extension = {'name': None, 'until': None, 'channel_id': None}
+territory_extension_prompts = set()
+territory_extension_daily = {}  # extension_id -> timestamp ISO de la dernière activation
+
+
+def _casino_chance_multiplier() -> float:
+    until = territory_extension.get('until')
+    if until and datetime.now() < until:
+        return 7.77 if territory_extension.get('name') == 'idle_death_gamble' else 1.0
+    if until:
+        territory_extension.update(name=None, until=None, channel_id=None)
+    return 1.0
+
+
+def _casino_success(base_chance: float) -> bool:
+    """Jet de chance casino affecté par l'extension du territoire active."""
+    chance = max(0.0, min(1.0, base_chance * _casino_chance_multiplier()))
+    return random.random() < chance
+
+
+def _casino_lucky_randint(low: int, high: int) -> int:
+    """Effectue le nombre de tirages bonus actif et garde le meilleur gain."""
+    return max(random.randint(low, high) for _ in range(_casino_luck_attempts()))
+
+
+def _casino_luck_attempts() -> int:
+    """Convertit un multiplicateur décimal en nombre de tirages sans le tronquer."""
+    multiplier = _casino_chance_multiplier()
+    whole = math.floor(multiplier)
+    return max(1, whole + (1 if random.random() < multiplier - whole else 0))
+
 # Immunisés aux commandes de modération négatives (warn/mute/ban/silence/punition) : Azog + Vynaro (happy_gt3)
 MOD_IMMUNE_IDS = {550678866839207937, 1056848438270115900}
 
@@ -1161,7 +1198,8 @@ def load_data():
     global theft_cooldowns, miner_cooldowns, hacker_cooldowns, risque_cooldowns, rob_cooldowns, steal_immunity
     global shield_active, shield_cooldown, shield_break_streak
     global race_bets, race_drivers_live, race_accepting
-    global teams, user_team, disabled_cmds, cmd_role_perms, tournaments, casino_banned_users
+    global teams, user_team, disabled_cmds, cmd_role_perms, tournaments, casino_banned_users, casino_cheat_enabled
+    global territory_extension_daily
     global daily_streaks, ticket_purchases, birthdays, crypto_alerts, tournament_elo, ADMIN_LOG_CHANNEL_ID, locations, businesses
     global CASINO_LOG_CHANNEL_ID, LOG_MODERATION_CHANNEL_ID, LOG_GIVEAWAY_CHANNEL_ID, LOG_GENERAL_CHANNEL_ID, LOG_TICKET_CHANNEL_ID
     global TICKET_CATEGORY_ID, TICKET_CATEGORY_IDS, TICKET_CATEGORIES
@@ -1252,6 +1290,8 @@ def load_data():
                 team_state['competition_open'] = ts.get('competition_open', False)
                 team_state['next_id'] = ts.get('next_id', 1)
                 disabled_cmds    = set(data.get('disabled_cmds', []))
+                casino_cheat_enabled = bool(data.get('casino_cheat_enabled', True))
+                territory_extension_daily = data.get('territory_extension_daily', {})
                 cmd_role_perms   = data.get('cmd_role_perms', {})
                 casino_banned_users = set(data.get('casino_banned_users', []))
                 daily_streaks    = data.get('daily_streaks', {})
@@ -1474,6 +1514,8 @@ def save_data(force: bool = False):
     data_to_save['user_team']        = user_team
     data_to_save['team_state']       = dict(team_state)
     data_to_save['disabled_cmds']    = list(disabled_cmds)
+    data_to_save['casino_cheat_enabled'] = casino_cheat_enabled
+    data_to_save['territory_extension_daily'] = territory_extension_daily
     data_to_save['cmd_role_perms']   = cmd_role_perms
     data_to_save['casino_banned_users'] = list(casino_banned_users)
     data_to_save['casino_config']    = casino_config
@@ -1682,7 +1724,7 @@ async def on_ready():
     # redémarrage, donc on les réenregistre systématiquement ici. bs_family_clubs
     # vit maintenant dans Supabase (voir db_bs.py), plus dans data.json.
     for entry in db_bs.list_family_clubs():
-        _bs_register_club_command(entry)
+        _bs_register_club_command(entry, fail_on_economy_conflict=True)
 
     # Re-enregistre les views de tournoi pour que les boutons fonctionnent après restart
     _registered_join_ids = set()
@@ -4732,11 +4774,39 @@ class BlackjackGame:
     def __init__(self, bet):
         self.deck    = _new_deck()
         self.bet     = bet  # mise initiale (référence pour l'assurance et l'affichage)
-        self.hands   = [{'cards': [self.deck.pop(), self.deck.pop()], 'bet': bet,
+        player_cards = []
+        player_cards.append(self._lucky_draw(player_cards))
+        player_cards.append(self._lucky_draw(player_cards))
+        self.hands   = [{'cards': player_cards, 'bet': bet,
                          'done': False, 'busted': False, 'result': None}]
-        self.dealer  = [self.deck.pop(), self.deck.pop()]
+        self.dealer  = []
+        self.dealer.append(self._lucky_draw(self.dealer, dealer=True))
+        self.dealer.append(self._lucky_draw(self.dealer, dealer=True))
         self.active_idx    = 0
         self.insurance_bet = 0
+
+    def _lucky_draw(self, hand, dealer: bool = False):
+        attempts = min(_casino_luck_attempts(), len(self.deck))
+        candidates = [self.deck.pop() for _ in range(attempts)]
+        if dealer and attempts > 1:
+            # Le croupier garde le tirage le moins dangereux pour les joueurs :
+            # une carte qui le fait sauter, sinon le total le plus faible.
+            def score(card):
+                total = _bj_total(hand + [card])
+                return (1 if total > 21 else 0, -total)
+            chosen = max(candidates, key=score)
+        elif attempts > 1:
+            # Le joueur garde la carte qui l'approche le plus de 21 sans sauter.
+            def score(card):
+                total = _bj_total(hand + [card])
+                return (1 if total <= 21 else 0, total if total <= 21 else -total)
+            chosen = max(candidates, key=score)
+        else:
+            chosen = candidates[0]
+        candidates.remove(chosen)
+        self.deck.extend(candidates)
+        random.shuffle(self.deck)
+        return chosen
 
     def dt(self):
         return _bj_total(self.dealer)
@@ -4756,7 +4826,7 @@ class BlackjackGame:
 
     def hit_current(self):
         h = self.current_hand()
-        h['cards'].append(self.deck.pop())
+        h['cards'].append(self._lucky_draw(h['cards']))
         total = _bj_total(h['cards'])
         if total >= 21:
             h['done'] = True
@@ -4774,8 +4844,8 @@ class BlackjackGame:
     def split_current(self):
         h = self.hands[self.active_idx]
         c1, c2 = h['cards']
-        new_hand = {'cards': [c2, self.deck.pop()], 'bet': h['bet'], 'done': False, 'busted': False, 'result': None}
-        h['cards'] = [c1, self.deck.pop()]
+        new_hand = {'cards': [c2, self._lucky_draw([c2])], 'bet': h['bet'], 'done': False, 'busted': False, 'result': None}
+        h['cards'] = [c1, self._lucky_draw([c1])]
         total = _bj_total(h['cards'])
         if total >= 21:
             h['done'] = True
@@ -4790,7 +4860,7 @@ class BlackjackGame:
 
     def play_dealer(self):
         while self.dt() < 17:
-            self.dealer.append(self.deck.pop())
+            self.dealer.append(self._lucky_draw(self.dealer, dealer=True))
 
     def resolve_hand(self, h) -> str:
         if h['busted']:
@@ -4937,7 +5007,7 @@ class PokerGame:
         self.bets      = {p: 0 for p in self.players}
         self.acted     = set()
         for p in self.players:
-            self.hands[p] = [self.deck.pop(), self.deck.pop()]
+            self.hands[p] = self._deal_lucky_hand()
         sb = self.players[self.sb_idx % len(self.players)]
         bb = self.players[(self.sb_idx + 1) % len(self.players)]
         sb_amt = min(self.ante // 2, self.stacks[sb])
@@ -4948,6 +5018,21 @@ class PokerGame:
         bb_idx = self.players.index(bb)
         self.action_idx = (bb_idx + 1) % len(self.players)
         self.phase = 'preflop'
+
+    def _deal_lucky_hand(self):
+        attempts = min(_casino_luck_attempts(), len(self.deck) // 2)
+        candidates = [[self.deck.pop(), self.deck.pop()] for _ in range(attempts)]
+        def score(hand):
+            values = sorted((RANK_VAL[c['r']] for c in hand), reverse=True)
+            pair = values[0] == values[1]
+            suited = hand[0]['s'] == hand[1]['s']
+            return (1 if pair else 0, values[0] + values[1], 1 if suited else 0)
+        chosen = max(candidates, key=score)
+        for hand in candidates:
+            if hand is not chosen:
+                self.deck.extend(hand)
+        random.shuffle(self.deck)
+        return chosen
 
     def _deduct(self, uid, amt):
         self.stacks[uid] = max(0, self.stacks[uid] - amt)
@@ -5124,7 +5209,7 @@ async def cmd_travail(ctx):
             await ctx.send(f"⏳ {ctx.author.mention}, vous êtes fatigué(e) ! Revenez dans **{h}h {m}min**.")
             return
     has_pro = _has_item(ctx.author.id, 2)
-    amount = random.randint(50, 400) if has_pro else random.randint(10, 300)
+    amount = _casino_lucky_randint(50, 400) if has_pro else _casino_lucky_randint(10, 300)
     work_cooldowns[uid] = now.isoformat()
     coins[ctx.author.id] += amount
     save_data()
@@ -5160,7 +5245,7 @@ async def cmd_mendier(ctx):
     ok, wait = _cd_ok(beg_cooldowns, uid, cooldown_h('mendier'))
     if not ok:
         return await ctx.send(f"⏳ {ctx.author.mention}, revenez dans {wait}.")
-    amount = random.randint(BEG_MIN, BEG_MAX)
+    amount = _casino_lucky_randint(BEG_MIN, BEG_MAX)
     coins[uid] += amount
     save_data()
     embed = discord.Embed(
@@ -5195,7 +5280,7 @@ async def cmd_risque(ctx):
         except ValueError:
             pass
     risque_cooldowns[uid_str] = now.isoformat()
-    _risque_won = (uid == CASINO_HINT_USER_ID and casino_cheat_enabled) or random.random() < 0.55
+    _risque_won = (uid == CASINO_HINT_USER_ID and casino_cheat_enabled) or _casino_success(0.55)
     if _risque_won:
         amount = random.randint(200, 600)
         coins[uid] += amount
@@ -5324,6 +5409,16 @@ async def cmd_roulette(ctx, *, args: str):
         candidates = list(range(37))
         random.shuffle(candidates)
         numero = next((n for n in candidates if any(fn(n) for _, _, _, fn in paris)), random.randint(0, 36))
+    elif _casino_chance_multiplier() > 1:
+        winning_numbers = [
+            n for n in range(37)
+            if sum(int(round(mise * mult)) for mise, _, mult, fn in paris if fn(n))
+            > sum(mise for mise, _, _, _ in paris)
+        ]
+        losing_numbers = [n for n in range(37) if n not in winning_numbers]
+        base_chance = len(winning_numbers) / 37
+        pool = winning_numbers if winning_numbers and _casino_success(base_chance) else losing_numbers
+        numero = random.choice(pool or list(range(37)))
     else:
         numero    = random.randint(0, 36)
     is_red    = numero in ROULETTE_RED
@@ -5373,7 +5468,13 @@ async def cmd_slots(ctx, mise: str):
     if ctx.author.id == CASINO_HINT_USER_ID and casino_cheat_enabled:
         result = ['💎', '💎', '💎']
     else:
-        result  = random.choices(SLOT_SYMS, weights=SLOT_W, k=3)
+        attempts = _casino_luck_attempts()
+        rolls = [random.choices(SLOT_SYMS, weights=SLOT_W, k=3) for _ in range(attempts)]
+        def _slot_score(roll):
+            if roll[0] == roll[1] == roll[2]:
+                return 2
+            return 1 if len(set(roll)) == 2 else 0
+        result = max(rolls, key=_slot_score)
     display = ' | '.join(result)
     coins[ctx.author.id] -= mise
 
@@ -5708,7 +5809,7 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
     if ctx.author.id == CASINO_HINT_USER_ID and casino_cheat_enabled:
         result = player_choice
     else:
-        result = random.choice(['pile', 'face'])
+        result = player_choice if _casino_success(0.5) else ('face' if player_choice == 'pile' else 'pile')
     result_emoji  = '🟡' if result == 'pile' else '⚪'
 
     coins[ctx.author.id] -= mise
@@ -5736,17 +5837,170 @@ async def cmd_coinflip(ctx, mise: str, choix: str):
             except Exception: pass
 
 
-@bot.hybrid_command(name="triche", hidden=True)
-async def cmd_triche(ctx):
-    """Active/désactive les avantages casino (résultats truqués + hints) — utilisable en MP."""
+@bot.command(name="triche", hidden=True)
+async def cmd_triche(ctx, mode: str = "statut"):
+    """Gère en MP les avantages casino (résultats truqués + hints)."""
     global casino_cheat_enabled
     if ctx.author.id != CASINO_HINT_USER_ID:
         return
-    casino_cheat_enabled = not casino_cheat_enabled
-    if casino_cheat_enabled:
-        await ctx.author.send("🤫 Avantages casino **activés**.")
+    if ctx.guild is not None:
+        return await ctx.author.send(
+            "🔒 Cette commande fonctionne uniquement ici, en message privé avec le bot."
+        )
+
+    mode = mode.strip().lower()
+    if mode in {"on", "oui", "activer", "active", "activé"}:
+        new_state = True
+    elif mode in {"off", "non", "desactiver", "désactiver", "desactive", "désactivé"}:
+        new_state = False
+    elif mode in {"toggle", "switch", "basculer"}:
+        new_state = not casino_cheat_enabled
+    elif mode in {"statut", "status", "etat", "état"}:
+        state = "activés" if casino_cheat_enabled else "désactivés"
+        return await ctx.send(
+            f"🤫 Les avantages triche/troll sont actuellement **{state}**.\n"
+            "Utilise `!triche on` ou `!triche off`."
+        )
     else:
-        await ctx.author.send("✅ Avantages casino **désactivés** — parties 100% honnêtes.")
+        return await ctx.send("Usage : `!triche on`, `!triche off` ou `!triche statut`.")
+
+    casino_cheat_enabled = new_state
+    save_data()
+    if casino_cheat_enabled:
+        await ctx.send("🤫 Avantages triche/troll **activés**.")
+    else:
+        await ctx.send("✅ Avantages triche/troll **désactivés** — parties 100% honnêtes.")
+
+
+def _normalize_extension_name(value: str) -> str:
+    value = unicodedata.normalize('NFKD', value.casefold())
+    value = ''.join(char for char in value if not unicodedata.combining(char))
+    return re.sub(r'[^a-z0-9]+', ' ', value).strip()
+
+
+async def _end_territory_extension(expected_until: datetime, channel_id: int):
+    delay = max(0.0, (expected_until - datetime.now()).total_seconds())
+    await asyncio.sleep(delay)
+    if territory_extension.get('until') != expected_until:
+        return
+    territory_extension.update(name=None, until=None, channel_id=None)
+    channel = bot.get_channel(channel_id)
+    if channel:
+        await channel.send(
+            "⏳ **Idle Death Gamble est terminée.** La chance du casino revient à la normale.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
+async def _activate_idle_death_gamble(ctx):
+    until = datetime.now() + timedelta(minutes=2)
+    territory_extension.update(
+        name='idle_death_gamble', until=until, channel_id=ctx.channel.id,
+    )
+    await ctx.send(
+        "🎰 **Extension du territoire : Idle Death Gamble !**\n"
+        "Pendant **2 minutes**, le taux de réussite et la chance de tout le monde "
+        "au casino sont multipliés par **7,77**.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+    asyncio.create_task(_end_territory_extension(until, ctx.channel.id))
+
+
+# Registre extensible : ajouter ici les futures extensions et leur fonction.
+TERRITORY_EXTENSIONS = {
+    'idle death gamble': {
+        'id': 'idle_death_gamble',
+        'user_id': 730152107511906436,
+        'handler': _activate_idle_death_gamble,
+    },
+}
+
+
+@bot.command(name="extension")
+async def cmd_extension(ctx, *, invocation: str = None):
+    """Lance le rituel `!extension du territoire` puis attend son nom."""
+    owner_bypass = is_bot_owner(ctx.author)
+    if _normalize_extension_name(invocation or '') != 'du territoire':
+        return await ctx.send(
+            "Usage : `!extension du territoire`",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    if territory_extension_prompts:
+        return await ctx.send(
+            "⏳ Une extension du territoire est déjà en préparation.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    if _casino_chance_multiplier() > 1 and not owner_bypass:
+        return await ctx.send(
+            "⚠️ Une extension du territoire est déjà active. Attendez qu'elle se termine.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    territory_extension_prompts.add(ctx.channel.id)
+    await ctx.send(
+        "🌌 **Une extension du territoire va être déployée.**\n"
+        "Quel est le nom de votre extension ?",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+    def check(message):
+        return (
+            message.author.id == ctx.author.id
+            and message.channel.id == ctx.channel.id
+            and not message.author.bot
+        )
+
+    try:
+        answer = await bot.wait_for('message', check=check, timeout=30.0)
+    except asyncio.TimeoutError:
+        return await ctx.send(
+            "⌛ Extension annulée : aucun nom n'a été donné à temps.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    finally:
+        territory_extension_prompts.discard(ctx.channel.id)
+
+    extension = TERRITORY_EXTENSIONS.get(_normalize_extension_name(answer.content))
+    if extension is None:
+        return await ctx.send(
+            "❓ Cette extension du territoire est **inconnue**.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    if ctx.author.id != extension['user_id'] and not owner_bypass:
+        return await ctx.send(
+            "🚫 Cette extension du territoire ne vous appartient pas.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    now_paris = datetime.now(BS_SEASON_TZ)
+    extension_id = extension['id']
+    last_used_raw = territory_extension_daily.get(extension_id)
+    if last_used_raw and not owner_bypass:
+        try:
+            last_used = datetime.fromisoformat(last_used_raw)
+            # Compatibilité avec une éventuelle ancienne valeur sans fuseau.
+            if last_used.tzinfo is None:
+                last_used = last_used.replace(tzinfo=BS_SEASON_TZ)
+            available_at = last_used + timedelta(hours=24)
+            if now_paris < available_at:
+                remaining = available_at - now_paris
+                total_minutes = max(1, math.ceil(remaining.total_seconds() / 60))
+                hours, minutes = divmod(total_minutes, 60)
+                wait_text = f"{hours}h {minutes}min" if hours else f"{minutes}min"
+                return await ctx.send(
+                    "⏳ Cette extension du territoire est encore en recharge pendant "
+                    f"**{wait_text}**.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        except (TypeError, ValueError):
+            pass
+
+    await extension['handler'](ctx)
+    # Les owners sont hors cooldown et leur activation ne consomme pas
+    # l'utilisation disponible du propriétaire normal de l'extension.
+    if not owner_bypass:
+        territory_extension_daily[extension_id] = now_paris.isoformat()
+        save_data()
 
 
 @bot.hybrid_command(name="pirater", hidden=True)
@@ -5795,7 +6049,7 @@ async def cmd_duel(ctx, member: discord.Member, mise: str):
     if coins[ctx.author.id] < mise or coins[member.id] < mise:
         await ctx.send("❌ Un des joueurs n'a plus assez de coins."); return
 
-    winner = random.choice([ctx.author, member])
+    winner = ctx.author if _casino_success(0.5) else member
     loser  = member if winner == ctx.author else ctx.author
     coins[ctx.author.id] -= mise
     coins[member.id]      -= mise
@@ -6852,6 +7106,19 @@ class MinesView(discord.ui.View):
             btn = next((c for c in self.children if getattr(c, 'custom_id', '') == f"mn_{self._pfx}_{idx}"), None)
             if btn and btn.disabled:
                 return await interaction.response.send_message("❌ Case déjà révélée.", ephemeral=True)
+            # Idle Death Gamble peut transformer une bombe cliquée en case sûre.
+            # La bombe est déplacée vers une autre case encore cachée afin de
+            # conserver trois bombes sur le plateau.
+            if idx in self.bomb_pos and _casino_chance_multiplier() > 1:
+                hidden_safe = []
+                for pos in range(12):
+                    cell = next((c for c in self.children if getattr(c, 'custom_id', '') == f"mn_{self._pfx}_{pos}"), None)
+                    if pos != idx and pos not in self.bomb_pos and cell and not cell.disabled:
+                        hidden_safe.append(pos)
+                if hidden_safe:
+                    self.bomb_pos.remove(idx)
+                    self.bomb_pos.add(random.choice(hidden_safe))
+
             if idx in self.bomb_pos:
                 self.game_over = True
                 active_mines.pop(self.author_id, None)
@@ -7075,8 +7342,21 @@ class HigherLowerView(discord.ui.View):
             if mult is None:
                 return await interaction.response.send_message("❌ Ce pari n'est plus possible.", ephemeral=True)
 
-            drawn = self.deck.pop()
-            cur_val, new_val = RANK_VAL[self.current['r']], RANK_VAL[drawn['r']]
+            cur_val = RANK_VAL[self.current['r']]
+            def matches(card):
+                value = RANK_VAL[card['r']]
+                if direction == 'higher': return value > cur_val
+                if direction == 'lower': return value < cur_val
+                return value == cur_val
+
+            if _casino_chance_multiplier() > 1:
+                wanted_win = _casino_success(count / len(self.deck))
+                pool = [card for card in self.deck if matches(card) == wanted_win]
+                drawn = random.choice(pool or self.deck)
+                self.deck.remove(drawn)
+            else:
+                drawn = self.deck.pop()
+            new_val = RANK_VAL[drawn['r']]
             if direction == 'higher': win = new_val > cur_val
             elif direction == 'lower': win = new_val < cur_val
             else: win = new_val == cur_val
@@ -7484,7 +7764,7 @@ async def cmd_miner(ctx):
     ok, wait = _cd_ok(miner_cooldowns, ctx.author.id, cooldown_h('miner'))
     if not ok:
         return await ctx.send(f"⏳ {ctx.author.mention}, vos mines sont épuisées ! Revenez dans {wait}.")
-    amount = random.randint(50, 200)
+    amount = _casino_lucky_randint(50, 200)
     coins[ctx.author.id] += amount
     save_data()
     embed = discord.Embed(title="⛏️ Minage réussi !", color=0x95a5a6,
@@ -7640,7 +7920,7 @@ async def cmd_hacker(ctx, cible: discord.Member):
         return await ctx.send(f"❌ {cible.mention} ne possède aucune crypto à voler !")
     symbol = random.choice(list(owned.keys()))
     held   = owned[symbol]
-    if random.random() < 0.60:
+    if _casino_success(0.60):
         pct        = random.uniform(0.05, 0.25)
         stolen_qty = round(held * pct, 8)
         crypto_holdings[uid_t][symbol]    = round(held - stolen_qty, 8)
@@ -8131,7 +8411,7 @@ async def cmd_voler(ctx, cible: discord.Member):
         return await ctx.send(guard_err)
     base_rate = 0.55
     if _get_job(ctx.author.id) == 'escroc': base_rate += 0.20
-    if random.random() < base_rate:
+    if _casino_success(base_rate):
         pct    = random.uniform(0.05, 0.20)
         stolen = int(safe_cible * pct)
         stolen = max(50, stolen)
@@ -8176,7 +8456,7 @@ async def cmd_rob(ctx, cible: discord.Member):
     guard_err = _attack_guard(cible.id)
     if guard_err:
         return await ctx.send(guard_err)
-    if random.random() < 0.55:
+    if _casino_success(0.55):
         pct    = random.uniform(0.05, 0.15)
         stolen = int(cash_cible * pct)
         if _get_job(ctx.author.id) == 'escroc':
@@ -9402,6 +9682,8 @@ async def cmd_gratter(ctx):
     # Génération prédéterminée du nombre de trèfles
     weights   = [SCRATCH_PRIZES[i][0] for i in range(6)]   # [18,40,20,15,5,2]
     n_clovers = random.choices(range(6), weights=weights, k=1)[0]
+    if _casino_chance_multiplier() > 1 and n_clovers == 0:
+        n_clovers = random.choices(range(1, 6), weights=weights[1:], k=1)[0]
 
     view = ScratchView(ctx.author.id, n_clovers)
     tickets_left = owned_items.get(uid, {}).get('4', 0)
@@ -9674,6 +9956,17 @@ class CourseView(discord.ui.View):
         await _run_race(interaction.channel, interaction.guild)
 
 
+def _race_bet_wins(driver_idx: int, official_winner_idx: int, weights) -> bool:
+    """Chaque parieur profite de trois tirages pendant Idle Death Gamble."""
+    if driver_idx == official_winner_idx:
+        return True
+    bonus_draws = max(0, _casino_luck_attempts() - 1)
+    return any(
+        random.choices(range(len(race_drivers_live)), weights=weights, k=1)[0] == driver_idx
+        for _ in range(bonus_draws)
+    )
+
+
 async def _run_race(channel, guild):
     """Lance la course (extraction de l'ancien lancer_course)."""
     global race_accepting, race_bets
@@ -9711,7 +10004,7 @@ async def _run_race(channel, guild):
     winners_lines = []
     for uid, binfo in race_bets.items():
         uid_int = int(uid)
-        if binfo['driver'] == winner_idx:
+        if _race_bet_wins(binfo['driver'], winner_idx, weights):
             odds = _race_odds(winner_idx)
             payout = int(binfo['amount'] * odds)
             coins[uid_int] += payout
@@ -9800,7 +10093,7 @@ async def cmd_lancer_course(ctx):
     winners_lines = []
     for uid, binfo in race_bets.items():
         uid_int = int(uid)
-        if binfo['driver'] == winner_idx:
+        if _race_bet_wins(binfo['driver'], winner_idx, weights):
             odds   = _race_odds(winner_idx)
             payout = int(binfo['amount'] * odds)
             coins[uid_int] += payout
@@ -12067,7 +12360,7 @@ async def cmd_punition(ctx, nombre: int, membre: discord.Member):
         return
     if nombre <= 0:
         return await ctx.send("❌ Le nombre doit être supérieur à 0.")
-    
+
     guild = ctx.guild
 
     # Créer le salon de punition
@@ -12087,7 +12380,7 @@ async def cmd_punition(ctx, nombre: int, membre: discord.Member):
         overwrites=overwrites,
         reason=f"Punition pour {membre.display_name}"
     )
-    
+
     # Couper l'accès à tous les autres salons
     for channel in guild.channels:
         if channel.id != salon.id:
@@ -12095,7 +12388,7 @@ async def cmd_punition(ctx, nombre: int, membre: discord.Member):
                 await channel.set_permissions(membre, view_channel=False, send_messages=False)
             except:
                 pass
-    
+
     # Sauvegarder la punition
     punitions[str(membre.id)] = {
         'salon_id': salon.id,
@@ -12308,9 +12601,12 @@ async def on_message(message):
         await _maybe_azog_ping_reaction(message)
         await _maybe_dev_ping_reaction(message)
 
+    if await economy_router.handle(message):
+        return
+
     await bot.process_commands(message)
 
-    
+
 
 # =======================================================================
 # ======================== NOUVELLES FONCTIONNALITÉS ====================
@@ -14119,6 +14415,17 @@ async def cmd_bs_famille(ctx, action: str = None, tag: str = None):
         alias = _bs_alias(slug, reserved)
 
         entry = {'tag': clean, 'name': data['name'], 'slug': slug, 'alias': alias}
+        economy_conflicts = economy_router.command_names & {slug.casefold(), alias.casefold()}
+        if economy_conflicts:
+            conflict = sorted(economy_conflicts)[0]
+            logging.error(
+                '[ECONOMY] Dynamic command registration refused: "%s" conflicts with a ? command',
+                conflict,
+            )
+            return await ctx.send(
+                f'❌ La commande dynamique `!{conflict}` entre en conflit avec `?{conflict}`. '
+                "Le clan n'a pas été ajouté."
+            )
         db_bs.add_family_club(clean, data['name'], slug, alias)
         _bs_register_club_command(entry)
         if ctx.guild:
@@ -14161,6 +14468,17 @@ async def _apply_bs_famille_add(tag: str) -> tuple[dict | None, str | None]:
     alias = _bs_alias(slug, reserved)
 
     entry = {'tag': clean, 'name': data['name'], 'slug': slug, 'alias': alias}
+    economy_conflicts = economy_router.command_names & {slug.casefold(), alias.casefold()}
+    if economy_conflicts:
+        conflict = sorted(economy_conflicts)[0]
+        logging.error(
+            '[ECONOMY] Dynamic command registration refused: "%s" conflicts with a ? command',
+            conflict,
+        )
+        return None, (
+            f'La commande dynamique !{conflict} entre en conflit avec ?{conflict}. '
+            "Le clan n'a pas été ajouté."
+        )
     db_bs.add_family_club(clean, data['name'], slug, alias)
     _bs_register_club_command(entry)
     guild = bot.get_guild(BS_FAMILY_GUILD_ID)
@@ -14547,11 +14865,22 @@ async def _bs_club_command_callback(ctx, club_tag: str):
     await ctx.send(embed=view.build_embed(), view=view)
 
 
-def _bs_register_club_command(entry: dict):
+def _bs_register_club_command(entry: dict, *, fail_on_economy_conflict: bool = False) -> bool:
     """(Ré)enregistre la commande dédiée d'un clan (ex: !projetx / !px) auprès du bot.
     Appelé au démarrage pour chaque clan déjà configuré, et à chaque !bs_famille ajouter."""
+    dynamic_names = {entry['slug']}
+    if entry.get('alias'):
+        dynamic_names.add(entry['alias'])
+    collisions = {name.casefold() for name in dynamic_names} & economy_router.command_names
+    if collisions:
+        names = ", ".join(f'"{name}"' for name in sorted(collisions))
+        error_message = f"Conflit détecté entre une commande ! dynamique et ?: {names}"
+        if fail_on_economy_conflict:
+            raise RuntimeError(error_message)
+        logging.error("[ECONOMY] %s — enregistrement dynamique refusé", error_message)
+        return False
     if bot.get_command(entry['slug']) is not None:
-        return
+        return False
     club_tag = entry['tag']
 
     async def _cb(ctx):
@@ -14560,6 +14889,7 @@ def _bs_register_club_command(entry: dict):
     cmd = commands.HybridCommand(_cb, name=entry['slug'], aliases=[entry['alias']] if entry.get('alias') else [])
     cmd.help = f"Classement trophées du clan {entry['name']}"
     bot.add_command(cmd)
+    return True
 
 
 def _bs_unregister_club_command(entry: dict):
@@ -16858,6 +17188,8 @@ async def cmd_help_staff(ctx):
         if embed:
             await ctx.send(embed=embed)
 
+
+validate_command_names(bot, economy_router.command_names)
 
 token = os.getenv("TOKEN")
 if token is not None:
