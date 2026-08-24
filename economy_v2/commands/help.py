@@ -13,30 +13,54 @@ async def ecohelp_command(context: EconomyCommandContext) -> None:
         color=0xD68910,
     )
     embed.add_field(
-        name="Commandes disponibles",
+        name="Compte et entreprise",
         value=(
             "`?wallet` — Consulter son compte économique industriel\n"
             "`?company` — Afficher son entreprise\n"
             "`?company create <métier> <nom>` — Créer gratuitement sa première entreprise"
-            "\n`?mine` — Afficher sa mine *(Mineurs)*\n"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="⛏️ Mine et marché",
+        value=(
+            "`?mine` — Afficher sa mine *(Mineurs)*\n"
             "`?mine collect` — Récolter le minerai\n"
             "`?mine upgrade <type>` — Améliorer la mine\n"
             "`?market` — Consulter le marché industriel\n"
             "`?market <sell|buy> iron_ore <quantité> <prix>` — Échanger\n"
             "`?market orders` / `?market cancel <id>` — Gérer ses ordres"
-            "\n`?merchant` — Gérer son entreprise Marchand\n"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🚚 Marchand et transports",
+        value=(
+            "`?merchant` — Gérer son entreprise Marchand\n"
             "`?merchant inventory` / `?merchant transports` — Logistique\n"
             "`?merchant transport <forgeron> iron_ore <quantité>` — Expédier\n"
-            "`?merchant upgrade <type>` — Améliorer les camions"
-            "\n`?forge` / `?forge inventory` — Gérer sa forge\n"
+            "`?merchant upgrade <type>` — Améliorer les camions\n"
+            "`?merchant transport-ingots <id>` — Charger les lingots"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🔨 Forge et expéditions",
+        value=(
+            "`?forge` / `?forge inventory` — Gérer sa forge\n"
             "`?forge process iron_ore <quantité>` — Transformer le minerai\n"
             "`?forge collect` / `?forge jobs` — Suivre la production\n"
             "`?forge upgrade <type>` — Améliorer la forge\n"
             "`?forge ai-supply iron_ore <quantité>` — Fournisseur IA de secours\n"
             "`?forge shipment create <marchand> <banquier> <quantité>` — Préparer des lingots\n"
-            "`?forge shipment cancel <id>` — Annuler une expédition\n"
-            "`?merchant transport-ingots <id>` — Charger les lingots"
-            "\n`?bank` / `?bank inventory` — Gérer sa banque\n"
+            "`?forge shipment cancel <id>` — Annuler une expédition"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🏦 Banque et systèmes communs",
+        value=(
+            "`?bank` / `?bank inventory` — Gérer sa banque\n"
             "`?bank market` — Consulter le marché mondial\n"
             "`?bank sell iron_ingot <quantité>` — Vendre des lingots\n"
             "`?bank ai-order iron_ingot <quantité>` — Forgeron IA de secours\n"

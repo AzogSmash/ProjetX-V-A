@@ -17,7 +17,8 @@ def register_economy_commands(
     router: EconomyRouter,
     service: IndustrialEconomyService,
 ) -> None:
-    router.register_command("ecohelp", ecohelp_command)
+    # L'aide est statique et doit rester disponible sans aucune dépendance DB.
+    router.register_command("ecohelp", ecohelp_command, track_activity=False)
     router.register_command("wallet", build_wallet_command(service))
     router.register_command("company", build_company_command(service))
     router.register_command("mine", build_mine_command(service))

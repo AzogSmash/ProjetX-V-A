@@ -41,19 +41,28 @@ def parse_economy_message(content: str) -> ParsedEconomyCommand | None:
 class EconomyRouter:
     def __init__(self, activity_recorder=None) -> None:
         self._commands: dict[str, EconomyCommandHandler] = {}
+        self._activity_exempt_commands: set[str] = set()
         self._activity_recorder = activity_recorder
 
     @property
     def command_names(self) -> frozenset[str]:
         return frozenset(self._commands)
 
-    def register_command(self, name: str, handler: EconomyCommandHandler) -> None:
+    def register_command(
+        self,
+        name: str,
+        handler: EconomyCommandHandler,
+        *,
+        track_activity: bool = True,
+    ) -> None:
         normalized = name.strip().casefold()
         if not normalized or any(char.isspace() for char in normalized):
             raise ValueError(f"Nom de commande économique invalide : {name!r}")
         if normalized in self._commands:
             raise RuntimeError(f"Commande économique déjà enregistrée : {normalized!r}")
         self._commands[normalized] = handler
+        if not track_activity:
+            self._activity_exempt_commands.add(normalized)
 
     async def handle(self, message: discord.Message) -> bool:
         parsed = parse_economy_message(message.content or "")
@@ -70,19 +79,29 @@ class EconomyRouter:
             return True
 
         logger.info("[ECONOMY] Command: %s | User: %s", command_name, message.author.id)
-        if self._activity_recorder is not None:
+        if (
+            self._activity_recorder is not None
+            and command_name not in self._activity_exempt_commands
+        ):
             try:
                 await self._activity_recorder(message.author.id)
-            except Exception:
-                logger.exception("[ECONOMY] Activity recording failed | User: %s", message.author.id)
+            except Exception as error:
+                logger.exception(
+                    "[ECONOMY] Activity recording failed | User: %s | Error: %s: %s",
+                    message.author.id,
+                    type(error).__name__,
+                    error,
+                )
         context = EconomyCommandContext(message=message, args=parsed.args, router=self)
         try:
             await handler(context)
-        except Exception:
+        except Exception as error:
             logger.exception(
-                "[ECONOMY] Command failed: %s | User: %s",
+                "[ECONOMY] Command failed: %s | User: %s | Error: %s: %s",
                 command_name,
                 message.author.id,
+                type(error).__name__,
+                error,
             )
             await message.channel.send(
                 "Une erreur est survenue lors de l'accès à l'économie industrielle.\n"

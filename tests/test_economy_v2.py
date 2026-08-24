@@ -47,6 +47,24 @@ class FakeEconomyService:
         return company
 
 
+class UnavailableActivityService(FakeEconomyService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.activity_calls = 0
+
+    async def record_activity(self, user_id: int) -> None:
+        self.activity_calls += 1
+        raise RuntimeError("Supabase unavailable")
+
+
+class UnavailableDatabaseService(UnavailableActivityService):
+    async def get_or_create_user(self, user_id: int) -> IndustrialUser:
+        raise RuntimeError("Supabase unavailable")
+
+    async def get_balance(self, user_id: int) -> int:
+        raise RuntimeError("Supabase unavailable")
+
+
 class FakeCommand:
     def __init__(self, name: str, aliases=()) -> None:
         self.name = name
@@ -87,6 +105,22 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
         handled = await build_economy_router(FakeEconomyService()).handle(message)
         self.assertTrue(handled)
         self.assertIn("embed", message.channel.sent[0][1])
+
+    async def test_help_is_static_when_supabase_is_unavailable(self) -> None:
+        service = UnavailableDatabaseService()
+        message = FakeMessage("?ecohelp")
+        await build_economy_router(service).handle(message)
+        self.assertEqual(service.activity_calls, 0)
+        self.assertIn("embed", message.channel.sent[0][1])
+        embed = message.channel.sent[0][1]["embed"]
+        self.assertTrue(all(len(field.value) <= 1024 for field in embed.fields))
+
+    async def test_activity_failure_does_not_hide_database_command_result(self) -> None:
+        service = UnavailableActivityService()
+        message = FakeMessage("?wallet")
+        await build_economy_router(service).handle(message)
+        self.assertEqual(service.activity_calls, 1)
+        self.assertIn("0 CR", message.channel.sent[0][1]["embed"].description)
 
     async def test_wallet_uses_industrial_placeholder(self) -> None:
         message = FakeMessage("?wallet")
