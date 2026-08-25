@@ -6,6 +6,7 @@ from economy_v2.commands.merchant import build_merchant_command
 from economy_v2.commands.forge import build_forge_command
 from economy_v2.commands.wallet import build_wallet_command
 from economy_v2.commands.bank import build_bank_command
+from economy_v2.commands.admin_money import build_admin_money_command
 from economy_v2.commands.delivery import build_delivery_command
 from economy_v2.commands.contracts import build_contracts_command
 from economy_v2.commands.economy import build_economy_command
@@ -29,3 +30,6 @@ def register_economy_commands(
     router.register_command("delivery", build_delivery_command(service))
     router.register_command("contracts", build_contracts_command(service))
     router.register_command("economy", build_economy_command(service))
+    admin_money = build_admin_money_command(service)
+    router.register_command("adminmoney", admin_money, track_activity=False)
+    router.register_command("am", admin_money, track_activity=False)

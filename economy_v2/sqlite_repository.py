@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
 from economy_v2.ai_config import AI_EFFICIENCY_PERCENT, ai_is_needed
+from economy_v2.admin_money_config import MAX_ADMIN_CREDIT_AMOUNT, SQLITE_INTEGER_MAX
 from economy_v2.ai_economy_config import AI_BOOTSTRAP_CREDITS, AI_ORE_RATE_PER_HOUR, AI_STORAGE_CAPACITY, get_ai_unit_price
 from economy_v2.database import connect_database, immediate_transaction, initialize_database_sync
 from economy_v2.delivery_config import get_delivery_cooldown_seconds, get_delivery_level, get_delivery_reduction_seconds, get_delivery_xp, get_max_delivery_commission
 from economy_v2.forge_config import MAX_FORGE_UPGRADE_LEVEL, get_forge_count, get_forge_duration_seconds, get_forge_storage_capacity, get_forge_upgrade_cost
 from economy_v2.merchant_config import MAX_MERCHANT_UPGRADE_LEVEL, get_merchant_upgrade_cost, get_trip_duration_seconds, get_truck_capacity
 from economy_v2.mining_config import MAX_MINE_UPGRADE_LEVEL, get_production_rate, get_storage_capacity, get_upgrade_cost
-from economy_v2.models import (Banker, Blacksmith, DeliveryMission, DeliveryProfile, ForgeCollectionResult, ForgeJob, ForgeProcessResult, ForgeUpgradeResult, IndustrialActor, IndustrialCompany, IndustrialContract, IndustrialTransport, IndustrialUser, IngotShipment, InventoryEntry, MarketOrder, MarketOrderResult, MarketSummary, Merchant, MerchantTransportResult, MerchantUpgradeResult, Mine, MineCollectionResult, MineUpgradeResult, ShipmentResult, WorldSale)
+from economy_v2.models import (AdminCreditResult, Banker, Blacksmith, DeliveryMission, DeliveryProfile, ForgeCollectionResult, ForgeJob, ForgeProcessResult, ForgeUpgradeResult, IndustrialActor, IndustrialCompany, IndustrialContract, IndustrialTransport, IndustrialUser, IngotShipment, InventoryEntry, MarketOrder, MarketOrderResult, MarketSummary, Merchant, MerchantTransportResult, MerchantUpgradeResult, Mine, MineCollectionResult, MineUpgradeResult, ShipmentResult, WorldSale)
 from economy_v2.world_market_config import bounded_world_price
 
 
@@ -456,6 +458,82 @@ class SQLiteIndustrialEconomyRepository:
         with immediate_transaction(self.database_path) as c:
             self._ensure_user(c,user_id);c.execute("INSERT INTO industrial_user_activity(discord_user_id,last_active_at,command_count) VALUES(?,?,1) ON CONFLICT(discord_user_id) DO UPDATE SET last_active_at=excluded.last_active_at,command_count=command_count+1",(user_id,_now()))
 
+    def adjust_admin_credits(self, admin_user_id, target_user_id, operation, amount, request_id):
+        if not 1 <= admin_user_id <= SQLITE_INTEGER_MAX or not 1 <= target_user_id <= SQLITE_INTEGER_MAX:
+            raise ValueError("invalid Discord user id")
+        if operation not in {"add", "remove"} or not 1 <= amount <= MAX_ADMIN_CREDIT_AMOUNT:
+            raise ValueError("invalid admin credit adjustment")
+        if not request_id or len(request_id) > 80:
+            raise ValueError("invalid admin credit request id")
+        with immediate_transaction(self.database_path) as c:
+            previous = c.execute(
+                "SELECT * FROM industrial_admin_credit_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if previous:
+                parameters = (
+                    int(previous["admin_discord_user_id"]),
+                    int(previous["target_discord_user_id"]),
+                    previous["operation"],
+                    int(previous["amount"]),
+                )
+                if parameters != (admin_user_id, target_user_id, operation, amount):
+                    raise ValueError("admin credit request id parameter mismatch")
+                return AdminCreditResult(
+                    "ok", operation, admin_user_id, target_user_id, amount,
+                    int(previous["balance_before"]), int(previous["balance_after"]),
+                    request_id, True,
+                )
+
+            existing = c.execute(
+                "SELECT credits FROM industrial_users WHERE discord_user_id=?",
+                (target_user_id,),
+            ).fetchone()
+            balance_before = int(existing[0]) if existing else 0
+            if operation == "add" and balance_before > SQLITE_INTEGER_MAX - amount:
+                raise ValueError("industrial credit balance overflow")
+            if operation == "remove" and balance_before < amount:
+                return AdminCreditResult(
+                    "insufficient_funds", operation, admin_user_id, target_user_id,
+                    amount, balance_before, balance_before, request_id,
+                )
+
+            self._ensure_user(c, target_user_id)
+            balance_after = balance_before + amount if operation == "add" else balance_before - amount
+            c.execute(
+                "UPDATE industrial_users SET credits=?,updated_at=? WHERE discord_user_id=?",
+                (balance_after, _now(), target_user_id),
+            )
+            request = c.execute(
+                "INSERT INTO industrial_admin_credit_requests("
+                "request_id,admin_discord_user_id,target_discord_user_id,operation,amount,"
+                "balance_before,balance_after) VALUES(?,?,?,?,?,?,?)",
+                (request_id, admin_user_id, target_user_id, operation, amount,
+                 balance_before, balance_after),
+            )
+            transaction_type = f"admin_credit_{operation}"
+            monetary_effect = "source" if operation == "add" else "sink"
+            metadata = json.dumps({
+                "admin_discord_user_id": admin_user_id,
+                "target_discord_user_id": target_user_id,
+                "amount": amount,
+                "balance_before": balance_before,
+                "balance_after": balance_after,
+                "request_id": request_id,
+                "reason": None,
+            }, separators=(",", ":"))
+            c.execute(
+                "INSERT INTO industrial_transactions("
+                "transaction_type,monetary_effect,actor_id,credits,reference_type,"
+                "reference_id,metadata) VALUES(?,?,?,?,?,?,?)",
+                (transaction_type, monetary_effect, self._actor_id(c, target_user_id),
+                 amount, "admin_credit_request", request.lastrowid, metadata),
+            )
+            return AdminCreditResult(
+                "ok", operation, admin_user_id, target_user_id, amount,
+                balance_before, balance_after, request_id,
+            )
+
     def _ensure_ai(self,c):
         rows=[]
         for job,name in (("miner","Mines de Secours"),("merchant","Transit de Secours"),("blacksmith","Forges de Secours")):
@@ -487,6 +565,22 @@ class SQLiteIndustrialEconomyRepository:
             if available<quantity:return {"result_status":"insufficient_inventory","available_amount":available}
             if balance<total:return {"result_status":"insufficient_funds","available_amount":balance}
             c.execute("UPDATE industrial_users SET credits=credits-? WHERE discord_user_id=?",(total,user_id));c.execute("UPDATE industrial_ai_accounts SET credits=credits+? WHERE actor_id=?",(total,producer[0]));c.execute("UPDATE industrial_inventory SET quantity=quantity-? WHERE actor_id=? AND resource_type=?",(quantity,producer[0],resource_type));self._add_inventory(c,user_id,resource_type,quantity);cur=c.execute("INSERT INTO industrial_ai_supply_purchases(buyer_discord_user_id,producer_actor_id,operator_actor_id,resource_type,quantity,total_price,request_id) VALUES(?,?,?,?,?,?,?)",(user_id,producer[0],producer[0],resource_type,quantity,total,request_id));return {"result_status":"ok","purchase_id":cur.lastrowid,"quantity":quantity,"unit_price":price,"total_price":total,"transport_id":None,"arrival_at":_now()}
+
+    def get_admin_credit_stats(self):
+        since = _now() - 86400
+        with self._read() as c:
+            rows = c.execute(
+                "SELECT transaction_type,coalesce(sum(credits),0) AS total "
+                "FROM industrial_transactions WHERE transaction_type IN("
+                "'admin_credit_add','admin_credit_remove') AND created_at>=? "
+                "GROUP BY transaction_type",
+                (since,),
+            ).fetchall()
+        totals = {row["transaction_type"]: int(row["total"]) for row in rows}
+        return {
+            "admin_credit_sources": totals.get("admin_credit_add", 0),
+            "admin_credit_sinks": totals.get("admin_credit_remove", 0),
+        }
 
     def get_economy_stats(self):
         with immediate_transaction(self.database_path) as c:

@@ -228,6 +228,8 @@ class IndustrialEconomyService(IndustrialWalletService, Protocol):
     async def purchase_ai_supply(self, user_id: int, resource_type: str,
                                  quantity: int, request_id: str) -> dict: ...
     async def get_economy_stats(self) -> dict: ...
+    async def adjust_admin_credits(self, admin_user_id: int, target_user_id: int,
+                                   operation: str, amount: int, request_id: str): ...
 
 
 class SQLiteIndustrialEconomyService:
@@ -595,4 +597,16 @@ class SQLiteIndustrialEconomyService:
         return row
 
     async def get_economy_stats(self) -> dict:
-        return await self._run("get_economy_stats",0,self._repository.get_economy_stats)
+        stats = await self._run("get_economy_stats",0,self._repository.get_economy_stats)
+        admin_stats = await self._run(
+            "get_admin_credit_stats", 0, self._repository.get_admin_credit_stats,
+        )
+        return stats | admin_stats
+
+    async def adjust_admin_credits(self, admin_user_id: int, target_user_id: int,
+                                   operation: str, amount: int, request_id: str):
+        return await self._run(
+            "adjust_admin_credits", admin_user_id,
+            self._repository.adjust_admin_credits,
+            admin_user_id, target_user_id, operation, amount, request_id,
+        )

@@ -16,6 +16,12 @@ def build_economy_command(service: IndustrialEconomyService) -> EconomyCommandHa
             player_credits, ai_credits = int(s["player_credits"]), int(s["ai_credits"])
             embed.add_field(name="CR en circulation",value=f"{player_credits + ai_credits:,} CR")
             embed.add_field(name="Ventilation CR",value=f"Joueurs {player_credits:,} • IA {ai_credits:,}")
+            embed.add_field(
+                name="Flux admin 24 h",
+                value=(f"Créés {int(s['admin_credit_sources']):,} CR • "
+                       f"Détruits {int(s['admin_credit_sinks']):,} CR"),
+                inline=False,
+            )
             embed.add_field(name="Minerai produit",value=f"Joueurs {int(s['player_ore']):,} • IA {int(s['ai_ore']):,} ({float(s['ai_ore_percent']):.1f} %)")
             embed.add_field(name="Lingots produits",value=f"Joueurs {int(s['player_ingots']):,} • IA {int(s['ai_ingots']):,} ({float(s['ai_ingot_percent']):.1f} %)")
             embed.add_field(name="Marché 24 h",value=f"Volume {int(s['market_volume']):,} • moyen {float(s['market_average_price']):.2f} CR\nPart IA {float(s['ai_market_percent']):.1f} %")

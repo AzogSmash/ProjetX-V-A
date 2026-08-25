@@ -17,6 +17,19 @@ class IndustrialUser:
 
 
 @dataclass(frozen=True)
+class AdminCreditResult:
+    status: str
+    operation: str
+    admin_discord_user_id: int
+    target_discord_user_id: int
+    amount: int
+    balance_before: int
+    balance_after: int
+    request_id: str
+    duplicate_request: bool = False
+
+
+@dataclass(frozen=True)
 class IndustrialCompany:
     id: int
     owner_discord_user_id: int
