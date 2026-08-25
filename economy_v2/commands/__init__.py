@@ -11,6 +11,10 @@ from economy_v2.commands.admin_money import build_admin_money_command
 from economy_v2.commands.delivery import build_delivery_command
 from economy_v2.commands.contracts import build_contracts_command
 from economy_v2.commands.economy import build_economy_command
+from economy_v2.commands.insights import (build_adminlog_command, build_achievements_command,
+    build_bilan_command, build_economycheck_command, build_fiche_command,
+    build_notifications_command, build_objectives_command, build_orders_command,
+    build_partners_command, build_rank_command)
 from economy_v2.router import EconomyRouter
 from economy_v2.services import IndustrialEconomyService
 
@@ -38,3 +42,13 @@ def register_economy_commands(
     router.register_command("next", next_actions, track_activity=False)
     router.register_command("go", next_actions, track_activity=False)
     router.register_command("progress", next_actions, track_activity=False)
+    for name, handler in (
+        ("fiche", build_fiche_command(service)), ("cv", build_fiche_command(service)),
+        ("rank", build_rank_command(service)), ("achievements", build_achievements_command(service)),
+        ("succes", build_achievements_command(service)), ("objectives", build_objectives_command(service)),
+        ("objectifs", build_objectives_command(service)), ("bilan", build_bilan_command(service)),
+        ("indstats", build_bilan_command(service)), ("orders", build_orders_command(service)),
+        ("partners", build_partners_command(service)), ("notifications", build_notifications_command(service)),
+        ("adminlog", build_adminlog_command(service)), ("economycheck", build_economycheck_command(service)),
+    ):
+        router.register_command(name, handler, track_activity=False)

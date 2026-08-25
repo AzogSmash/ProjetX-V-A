@@ -22,6 +22,7 @@ from economy_v2 import (
     economy_router,
     validate_command_names,
 )
+from economy_v2.backups import start_backup_scheduler
 
 load_dotenv()
 
@@ -1698,6 +1699,7 @@ async def check_mutes():
 @bot.event
 async def on_ready():
     logging.warning("Connecté en tant que %s — DATA_FILE=%s — fichier_existe=%s", bot.user, DATA_FILE, os.path.exists(DATA_FILE))
+    start_backup_scheduler()
 
     # Vues de tickets en tout premier (avant load_data/re-registration des
     # clans, plus lents) : minimise la fenêtre où un clic sur un vieux salon

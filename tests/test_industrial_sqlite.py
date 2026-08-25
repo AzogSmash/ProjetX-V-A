@@ -60,7 +60,7 @@ class SQLiteIndustrialRepositoryTests(unittest.TestCase):
         with closing(connect_database(self.database_path)) as connection:
             self.assertEqual(1, connection.execute("PRAGMA foreign_keys").fetchone()[0])
             self.assertEqual("wal", connection.execute("PRAGMA journal_mode").fetchone()[0])
-            self.assertEqual([1, 2], [r[0] for r in connection.execute(
+            self.assertEqual([1, 2, 3, 4, 5], [r[0] for r in connection.execute(
                 "SELECT version FROM industrial_schema_version"
             )])
             tables = {r[0] for r in connection.execute(

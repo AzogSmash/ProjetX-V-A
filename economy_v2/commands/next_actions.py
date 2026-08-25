@@ -1,4 +1,5 @@
 import logging
+import time
 
 import discord
 
@@ -53,6 +54,9 @@ def build_recommendations(snapshot: dict) -> list[tuple[int, str, str, str]]:
                 f"Stock : **{mine['stock']:,} / {mine['capacity']:,}**",
                 "?mine collect",
             )
+        if mine.get("seconds_to_full", 0) > 0:
+            minutes = max(1, (mine["seconds_to_full"] + 59) // 60)
+            _add(recommendations, 42, "⏱️ Stockage en production", f"Ton stockage sera plein dans environ **{minutes:,} minute(s)**.", "?mine")
         affordable = []
         for upgrade, key in (
             ("storage", "storage_level"),
@@ -164,6 +168,10 @@ def build_recommendations(snapshot: dict) -> list[tuple[int, str, str, str]]:
                 f"**{snapshot['active_transports']}** transport(s) à suivre.",
                 "?merchant transports",
             )
+            arrival = snapshot.get("next_transport_arrival")
+            if arrival:
+                minutes=max(1,(arrival-int(time.time())+59)//60)
+                _add(recommendations, 46, "🚚 Prochaine arrivée", f"Transport attendu dans **{minutes:,} minute(s)**.", "?orders")
         affordable = []
         for upgrade, key in (
             ("warehouse", "warehouse_level"), ("capacity", "truck_capacity_level"),
@@ -189,6 +197,9 @@ def build_recommendations(snapshot: dict) -> list[tuple[int, str, str, str]]:
             f"Inventaire : **{ingots:,} iron_ingot** • Prix : **{price:,} CR / unité**",
             f"?bank sell iron_ingot {ingots}",
         )
+        average=snapshot.get("world_average_24h")
+        if average and price>average:
+            _add(recommendations, 88, "🏦 Prix bancaire favorable", f"Prix actuel : **{price:,} CR** • moyenne 24h : **{average:.1f} CR**", "?bank market")
 
     if snapshot["available_delivery_missions"]:
         _add(
@@ -202,6 +213,12 @@ def build_recommendations(snapshot: dict) -> list[tuple[int, str, str, str]]:
             f"Tu as **{snapshot['open_market_orders']}** ordre(s) à suivre.",
             "?market orders",
         )
+    objective=snapshot.get("nearest_objective")
+    if objective:
+        missing=max(0,int(objective["target"])-int(objective["progress"]))
+        _add(recommendations, 48, "🎯 Objectif quotidien proche", f"Il te manque **{missing:,}** unité(s) pour le terminer.", "?objectives")
+    if snapshot.get("partner_count"):
+        _add(recommendations, 35, "🤝 Réseau industriel", f"**{snapshot['partner_count']}** partenaire(s) peuvent faciliter ta prochaine étape.", "?partners")
 
     recommendations.sort(key=lambda item: (-item[0], item[1], item[3]))
     return recommendations[:MAX_RECOMMENDATIONS]

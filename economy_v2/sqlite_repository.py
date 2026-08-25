@@ -12,6 +12,7 @@ from economy_v2.ai_economy_config import AI_BOOTSTRAP_CREDITS, AI_ORE_RATE_PER_H
 from economy_v2.database import connect_database, immediate_transaction, initialize_database_sync
 from economy_v2.delivery_config import get_delivery_cooldown_seconds, get_delivery_level, get_delivery_reduction_seconds, get_delivery_xp, get_max_delivery_commission
 from economy_v2.forge_config import MAX_FORGE_UPGRADE_LEVEL, get_forge_count, get_forge_duration_seconds, get_forge_storage_capacity, get_forge_upgrade_cost
+from economy_v2.extended_repository import IndustrialInsightsMixin
 from economy_v2.merchant_config import MAX_MERCHANT_UPGRADE_LEVEL, get_merchant_upgrade_cost, get_trip_duration_seconds, get_truck_capacity
 from economy_v2.mining_config import MAX_MINE_UPGRADE_LEVEL, get_production_rate, get_storage_capacity, get_upgrade_cost
 from economy_v2.models import (AdminCreditResult, Banker, Blacksmith, DeliveryMission, DeliveryProfile, ForgeCollectionResult, ForgeJob, ForgeProcessResult, ForgeUpgradeResult, IndustrialActor, IndustrialCompany, IndustrialContract, IndustrialTransport, IndustrialUser, IngotShipment, InventoryEntry, MarketOrder, MarketOrderResult, MarketSummary, Merchant, MerchantTransportResult, MerchantUpgradeResult, Mine, MineCollectionResult, MineUpgradeResult, ShipmentResult, WorldSale)
@@ -22,7 +23,7 @@ def _now() -> int:
     return int(time.time())
 
 
-class SQLiteIndustrialEconomyRepository:
+class SQLiteIndustrialEconomyRepository(IndustrialInsightsMixin):
     """Repository SQLite local ; les mutations critiques utilisent BEGIN IMMEDIATE."""
 
     def __init__(self, database_path: str | Path | None = None) -> None:
@@ -45,7 +46,8 @@ class SQLiteIndustrialEconomyRepository:
     @staticmethod
     def _forge_job(r): return ForgeJob(int(r["id"]), int(r["owner_discord_user_id"]), int(r["company_id"]), int(r["forge_slot"]), r["resource_input"], r["resource_output"], int(r["input_quantity"]), int(r["output_quantity"]), str(r["started_at"]), str(r["finishes_at"]), r["status"])
     @staticmethod
-    def _contract(r): return IndustrialContract(int(r["id"]), int(r["creator_discord_user_id"]), int(r["accepter_discord_user_id"]) if r["accepter_discord_user_id"] is not None else None, r["resource_type"], int(r["quantity"]), int(r["total_price"]), r["status"], str(r["expires_at"]))
+    def _contract(r):
+        keys=set(r.keys());return IndustrialContract(int(r["id"]),int(r["creator_discord_user_id"]),int(r["accepter_discord_user_id"]) if r["accepter_discord_user_id"] is not None else None,r["resource_type"],int(r["quantity"]),int(r["total_price"]),r["status"],str(r["expires_at"]),int(r["target_company_id"]) if "target_company_id" in keys and r["target_company_id"] else None,int(r["target_actor_id"]) if "target_actor_id" in keys and r["target_actor_id"] else None)
 
     def _ensure_user(self, c, user_id):
         c.execute("INSERT OR IGNORE INTO industrial_users(discord_user_id) VALUES(?)", (user_id,))
@@ -188,7 +190,11 @@ class SQLiteIndustrialEconomyRepository:
 
     def get_market_summary(self,resource_type,depth):
         with self._read() as c:
-            s=c.execute("SELECT sum(total_price),sum(quantity),min(unit_price),max(unit_price) FROM industrial_market_trades WHERE resource_type=? AND created_at>=?",(resource_type,_now()-86400)).fetchone();avg=float(s[0]/s[1]) if s[1] else None;sells=tuple(self._order(r) for r in c.execute("SELECT * FROM industrial_market_orders WHERE resource_type=? AND side='sell' AND status='open' ORDER BY unit_price,created_at LIMIT ?",(resource_type,depth)));buys=tuple(self._order(r) for r in c.execute("SELECT * FROM industrial_market_orders WHERE resource_type=? AND side='buy' AND status='open' ORDER BY unit_price DESC,created_at LIMIT ?",(resource_type,depth)));return MarketSummary(resource_type,avg,int(s[2]) if s[2] is not None else None,int(s[3]) if s[3] is not None else None,int(s[1] or 0),sells,buys)
+            now=_now();s=c.execute("SELECT sum(total_price),sum(quantity),min(unit_price),max(unit_price) FROM industrial_market_trades WHERE resource_type=? AND created_at>=?",(resource_type,now-86400)).fetchone();avg=float(s[0]/s[1]) if s[1] else None
+            previous=c.execute("SELECT sum(total_price),sum(quantity) FROM industrial_market_trades WHERE resource_type=? AND created_at>=? AND created_at<?",(resource_type,now-172800,now-86400)).fetchone();previous_avg=float(previous[0]/previous[1]) if previous[1] else None;variation=((avg-previous_avg)/previous_avg*100) if avg is not None and previous_avg else None
+            sells=tuple(self._order(r) for r in c.execute("SELECT * FROM industrial_market_orders WHERE resource_type=? AND side='sell' AND status='open' ORDER BY unit_price,created_at,id LIMIT ?",(resource_type,depth)));buys=tuple(self._order(r) for r in c.execute("SELECT * FROM industrial_market_orders WHERE resource_type=? AND side='buy' AND status='open' ORDER BY unit_price DESC,created_at,id LIMIT ?",(resource_type,depth)))
+            best_sell=sells[0].unit_price if sells else None;best_buy=buys[0].unit_price if buys else None;spread=(best_sell-best_buy) if best_sell is not None and best_buy is not None else None;recent=tuple((int(r[0]),int(r[1]),int(r[2])) for r in c.execute("SELECT quantity,unit_price,created_at FROM industrial_market_trades WHERE resource_type=? ORDER BY created_at DESC,id DESC LIMIT 5",(resource_type,)))
+            return MarketSummary(resource_type,avg,int(s[2]) if s[2] is not None else None,int(s[3]) if s[3] is not None else None,int(s[1] or 0),sells,buys,best_sell,best_buy,spread,variation,recent)
 
     def _transport(self,r):
         return IndustrialTransport(int(r["id"]),int(r["sender_company_id"] or 0),int(r["receiver_company_id"] or 0),r["receiver_company_name"] or "Entreprise IA",int(r["merchant_discord_user_id"] or 0),r["resource_type"],int(r["quantity"]),str(r["departure_at"]),str(r["arrival_at"]),r["status"],int(r["truck_slot"]))
@@ -420,15 +426,22 @@ class SQLiteIndustrialEconomyRepository:
         for r in c.execute("SELECT * FROM industrial_contracts WHERE status='open' AND expires_at<=?",(_now(),)).fetchall():
             c.execute("UPDATE industrial_users SET credits=credits+? WHERE discord_user_id=?",(r["escrow_credits"],r["creator_discord_user_id"]));c.execute("UPDATE industrial_contracts SET status='expired',escrow_credits=0,cancelled_at=? WHERE id=?",(_now(),r["id"]))
 
-    def create_contract(self,user_id,resource,quantity,total,request_id):
+    def create_contract(self,user_id,resource,quantity,total,request_id,target_user_id=None):
         with immediate_transaction(self.database_path) as c:
             u=self._ensure_user(c,user_id);self._expire_contracts(c);previous=c.execute("SELECT * FROM industrial_contracts WHERE request_id=?",(request_id,)).fetchone()
             if previous:
-                if (previous["creator_discord_user_id"],previous["resource_type"],previous["quantity"],previous["total_price"])!=(user_id,resource,quantity,total):raise ValueError("request id parameter mismatch")
+                expected_target=self._actor_id(c,target_user_id) if target_user_id else None
+                if (previous["creator_discord_user_id"],previous["resource_type"],previous["quantity"],previous["total_price"],previous["target_actor_id"])!=(user_id,resource,quantity,total,expected_target):raise ValueError("request id parameter mismatch")
                 return "duplicate",None,self._contract(previous)
             if c.execute("SELECT count(*) FROM industrial_contracts WHERE creator_discord_user_id=? AND status='open'",(user_id,)).fetchone()[0]>=10:return "contract_limit",None,None
             if int(u["credits"])<total:return "insufficient_funds",int(u["credits"]),None
-            c.execute("UPDATE industrial_users SET credits=credits-? WHERE discord_user_id=?",(total,user_id));cur=c.execute("INSERT INTO industrial_contracts(creator_discord_user_id,resource_type,quantity,total_price,escrow_credits,request_id) VALUES(?,?,?,?,?,?)",(user_id,resource,quantity,total,total,request_id));return "ok",int(u["credits"])-total,self._contract(c.execute("SELECT * FROM industrial_contracts WHERE id=?",(cur.lastrowid,)).fetchone())
+            target_actor=target_company=None
+            if target_user_id is not None:
+                if target_user_id==user_id:return "own_contract",None,None
+                target=c.execute("SELECT id FROM industrial_companies WHERE owner_discord_user_id=?",(target_user_id,)).fetchone();actor=c.execute("SELECT id FROM industrial_actors WHERE discord_user_id=?",(target_user_id,)).fetchone()
+                if not target or not actor:return "invalid_target",None,None
+                target_company,target_actor=int(target[0]),int(actor[0])
+            c.execute("UPDATE industrial_users SET credits=credits-? WHERE discord_user_id=?",(total,user_id));cur=c.execute("INSERT INTO industrial_contracts(creator_discord_user_id,resource_type,quantity,total_price,escrow_credits,request_id,target_company_id,target_actor_id) VALUES(?,?,?,?,?,?,?,?)",(user_id,resource,quantity,total,total,request_id,target_company,target_actor));return "ok",int(u["credits"])-total,self._contract(c.execute("SELECT * FROM industrial_contracts WHERE id=?",(cur.lastrowid,)).fetchone())
 
     def accept_contract(self,user_id,contract_id,request_id):
         with immediate_transaction(self.database_path) as c:
@@ -437,6 +450,7 @@ class SQLiteIndustrialEconomyRepository:
             if r["status"]=="completed" and r["accept_request_id"]==request_id:return "duplicate",None,self._contract(r)
             if r["status"]!="open":return "already_closed",None,None
             if int(r["creator_discord_user_id"])==user_id:return "own_contract",None,None
+            if r["target_actor_id"] and int(r["target_actor_id"])!=self._actor_id(c,user_id):return "targeted_contract",None,None
             available=self._inventory(c,user_id,r["resource_type"])
             if available<int(r["quantity"]):return "insufficient_inventory",available,None
             c.execute("UPDATE industrial_inventory SET quantity=quantity-? WHERE owner_discord_user_id=? AND resource_type=?",(r["quantity"],user_id,r["resource_type"]));self._add_inventory(c,int(r["creator_discord_user_id"]),r["resource_type"],int(r["quantity"]));c.execute("UPDATE industrial_users SET credits=credits+? WHERE discord_user_id=?",(r["escrow_credits"],user_id));c.execute("UPDATE industrial_contracts SET status='completed',escrow_credits=0,accepter_discord_user_id=?,accept_request_id=?,completed_at=? WHERE id=?",(user_id,request_id,_now(),contract_id));return "ok",available-int(r["quantity"]),self._contract(c.execute("SELECT * FROM industrial_contracts WHERE id=?",(contract_id,)).fetchone())
@@ -452,7 +466,7 @@ class SQLiteIndustrialEconomyRepository:
 
     def get_contracts(self,user_id,mine):
         with immediate_transaction(self.database_path) as c:
-            self._expire_contracts(c);sql="SELECT * FROM industrial_contracts WHERE creator_discord_user_id=?" if mine else "SELECT * FROM industrial_contracts WHERE status='open'";args=(user_id,) if mine else ();return [self._contract(r) for r in c.execute(sql+" ORDER BY created_at DESC LIMIT 20",args)]
+            self._expire_contracts(c);sql="SELECT * FROM industrial_contracts WHERE creator_discord_user_id=?" if mine else "SELECT * FROM industrial_contracts WHERE status='open' AND (target_actor_id IS NULL OR target_actor_id=(SELECT id FROM industrial_actors WHERE discord_user_id=?))";args=(user_id,);return [self._contract(r) for r in c.execute(sql+" ORDER BY created_at DESC LIMIT 20",args)]
 
     def record_activity(self,user_id):
         with immediate_transaction(self.database_path) as c:
@@ -648,6 +662,7 @@ class SQLiteIndustrialEconomyRepository:
                 ).fetchone()
                 active_transports = int(transport_counts[0])
                 arrived_transports = int(transport_counts[1])
+            next_arrival = c.execute("SELECT min(arrival_at) FROM industrial_transports WHERE operator_actor_id=? AND status='in_transit' AND arrival_at>?", (actor_id or -1, now)).fetchone()[0]
 
             forge_counts = c.execute(
                 "SELECT coalesce(sum(CASE WHEN status='completed' OR "
@@ -682,6 +697,9 @@ class SQLiteIndustrialEconomyRepository:
                 "SELECT coalesce(sum(quantity),0) FROM industrial_world_sales WHERE created_at>=?",
                 (now - 86400,),
             ).fetchone()[0])
+            world_history = c.execute("SELECT sum(total_credits)*1.0/nullif(sum(quantity),0) FROM industrial_world_sales WHERE created_at>=?", (now-86400,)).fetchone()[0]
+            partner_count = int(c.execute("SELECT count(*) FROM industrial_partnerships WHERE (low_user_id=? OR high_user_id=?) AND status='accepted'", (user_id,user_id)).fetchone()[0])
+            objective = c.execute("SELECT label.progress,label.target FROM (SELECT progress,target,objective_key FROM industrial_objective_progress WHERE discord_user_id=? AND period_type='daily' AND period_start=? AND completed_at IS NULL ORDER BY target-progress LIMIT 1) label", (user_id, now-now%86400)).fetchone()
 
         mine_state = None
         if mine:
@@ -697,6 +715,7 @@ class SQLiteIndustrialEconomyRepository:
                 "storage_level": int(mine["storage_level"]),
                 "production_level": int(mine["production_level"]),
                 "quality_level": int(mine["quality_level"]),
+                "seconds_to_full": max(0, ((capacity-stock)*3600-progress%3600 + get_production_rate(int(mine["production_level"]))-1)//get_production_rate(int(mine["production_level"]))) if stock<capacity else 0,
             }
         return {
             "profile_exists": user is not None,
@@ -708,6 +727,7 @@ class SQLiteIndustrialEconomyRepository:
             "open_market_orders": open_orders,
             "best_iron_ore_buy_price": int(best_buy) if best_buy is not None else None,
             "active_transports": active_transports,
+            "next_transport_arrival": int(next_arrival) if next_arrival else None,
             "arrived_transports": arrived_transports,
             "merchant": dict(merchant) if merchant else None,
             "forge": dict(blacksmith) if blacksmith else None,
@@ -722,6 +742,9 @@ class SQLiteIndustrialEconomyRepository:
             "delivery_cooldown_until": cooldown_until,
             "contracts": contracts,
             "world_price": bounded_world_price(world_volume),
+            "world_average_24h": float(world_history) if world_history else None,
+            "partner_count": partner_count,
+            "nearest_objective": dict(objective) if objective else None,
         }
 
     def get_economy_stats(self):

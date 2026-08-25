@@ -1,0 +1,16 @@
+CREATE INDEX industrial_market_trades_resource_time_idx
+ ON industrial_market_trades(resource_type,created_at DESC,id DESC);
+CREATE INDEX industrial_market_orders_owner_status_time_idx
+ ON industrial_market_orders(owner_discord_user_id,status,created_at DESC);
+CREATE INDEX industrial_world_sales_owner_time_idx
+ ON industrial_world_sales(banker_discord_user_id,created_at DESC);
+CREATE INDEX industrial_forge_jobs_owner_status_time_idx
+ ON industrial_forge_jobs(owner_discord_user_id,status,started_at DESC);
+CREATE INDEX industrial_transports_operator_status_time_idx
+ ON industrial_transports(operator_actor_id,status,created_at DESC);
+CREATE INDEX industrial_delivery_courier_time_idx
+ ON industrial_delivery_missions(courier_discord_user_id,accepted_at DESC);
+CREATE INDEX industrial_contracts_creator_status_time_idx
+ ON industrial_contracts(creator_discord_user_id,status,created_at DESC);
+CREATE INDEX industrial_transactions_type_time_idx
+ ON industrial_transactions(transaction_type,created_at DESC);
