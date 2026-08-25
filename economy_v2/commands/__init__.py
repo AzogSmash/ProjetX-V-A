@@ -2,6 +2,7 @@ from economy_v2.commands.company import build_company_command
 from economy_v2.commands.help import ecohelp_command
 from economy_v2.commands.mine import build_mine_command
 from economy_v2.commands.market import build_market_command
+from economy_v2.commands.next_actions import build_next_actions_command
 from economy_v2.commands.merchant import build_merchant_command
 from economy_v2.commands.forge import build_forge_command
 from economy_v2.commands.wallet import build_wallet_command
@@ -33,3 +34,7 @@ def register_economy_commands(
     admin_money = build_admin_money_command(service)
     router.register_command("adminmoney", admin_money, track_activity=False)
     router.register_command("am", admin_money, track_activity=False)
+    next_actions = build_next_actions_command(service)
+    router.register_command("next", next_actions, track_activity=False)
+    router.register_command("go", next_actions, track_activity=False)
+    router.register_command("progress", next_actions, track_activity=False)

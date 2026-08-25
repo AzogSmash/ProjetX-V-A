@@ -582,6 +582,148 @@ class SQLiteIndustrialEconomyRepository:
             "admin_credit_sinks": totals.get("admin_credit_remove", 0),
         }
 
+    def get_next_actions_snapshot(self, user_id):
+        """Return current actionable state using SELECT statements only."""
+        now = _now()
+        with self._read() as c:
+            user = c.execute(
+                "SELECT credits,primary_job FROM industrial_users WHERE discord_user_id=?",
+                (user_id,),
+            ).fetchone()
+            company = c.execute(
+                "SELECT id,name,job_type FROM industrial_companies "
+                "WHERE owner_discord_user_id=? AND is_first_company=1",
+                (user_id,),
+            ).fetchone()
+            actor = c.execute(
+                "SELECT id FROM industrial_actors WHERE discord_user_id=?",
+                (user_id,),
+            ).fetchone()
+            inventory = {
+                row["resource_type"]: int(row["quantity"])
+                for row in c.execute(
+                    "SELECT resource_type,quantity FROM industrial_inventory "
+                    "WHERE owner_discord_user_id=?",
+                    (user_id,),
+                )
+            }
+            mine = c.execute(
+                "SELECT stock,storage_level,production_level,quality_level,"
+                "production_progress,last_production_at FROM industrial_mines "
+                "WHERE owner_discord_user_id=?",
+                (user_id,),
+            ).fetchone()
+            merchant = c.execute(
+                "SELECT truck_count,truck_capacity_level,truck_speed_level,warehouse_level "
+                "FROM industrial_merchants WHERE owner_discord_user_id=?",
+                (user_id,),
+            ).fetchone()
+            blacksmith = c.execute(
+                "SELECT forge_level,speed_level,storage_level,yield_level "
+                "FROM industrial_blacksmiths WHERE owner_discord_user_id=?",
+                (user_id,),
+            ).fetchone()
+            delivery = c.execute(
+                "SELECT delivery_level,delivery_cooldown_until "
+                "FROM industrial_delivery_profiles WHERE discord_user_id=?",
+                (user_id,),
+            ).fetchone()
+
+            open_orders = int(c.execute(
+                "SELECT count(*) FROM industrial_market_orders "
+                "WHERE owner_discord_user_id=? AND status='open'",
+                (user_id,),
+            ).fetchone()[0])
+            best_buy = c.execute(
+                "SELECT max(unit_price) FROM industrial_market_orders "
+                "WHERE resource_type='iron_ore' AND side='buy' AND status='open'",
+            ).fetchone()[0]
+            actor_id = int(actor[0]) if actor else None
+            active_transports = arrived_transports = 0
+            if actor_id is not None:
+                transport_counts = c.execute(
+                    "SELECT count(*),coalesce(sum(CASE WHEN arrival_at<=? THEN 1 ELSE 0 END),0) "
+                    "FROM industrial_transports WHERE operator_actor_id=? AND status='in_transit'",
+                    (now, actor_id),
+                ).fetchone()
+                active_transports = int(transport_counts[0])
+                arrived_transports = int(transport_counts[1])
+
+            forge_counts = c.execute(
+                "SELECT coalesce(sum(CASE WHEN status='completed' OR "
+                "(status='processing' AND finishes_at<=?) THEN output_quantity ELSE 0 END),0),"
+                "coalesce(sum(CASE WHEN status='processing' AND finishes_at>? THEN 1 ELSE 0 END),0) "
+                "FROM industrial_forge_jobs WHERE owner_discord_user_id=?",
+                (now, now, user_id),
+            ).fetchone()
+            pending_shipment = c.execute(
+                "SELECT count(*) AS count,min(id) AS first_id FROM industrial_ingot_shipments "
+                "WHERE merchant_discord_user_id=? AND status='pending'",
+                (user_id,),
+            ).fetchone()
+            cooldown_until = int(delivery["delivery_cooldown_until"] or 0) if delivery else 0
+            available_missions = 0
+            if cooldown_until <= now:
+                available_missions = int(c.execute(
+                    "SELECT count(*) FROM industrial_delivery_missions m "
+                    "JOIN industrial_transports t ON t.id=m.transport_id "
+                    "WHERE m.status='open' AND t.status='in_transit' AND t.arrival_at>? "
+                    "AND coalesce(m.merchant_discord_user_id,0)<>?",
+                    (now, user_id),
+                ).fetchone()[0])
+            contract_rows = c.execute(
+                "SELECT resource_type,count(*) AS count FROM industrial_contracts "
+                "WHERE status='open' AND expires_at>? AND creator_discord_user_id<>? "
+                "GROUP BY resource_type",
+                (now, user_id),
+            ).fetchall()
+            contracts = {row["resource_type"]: int(row["count"]) for row in contract_rows}
+            world_volume = int(c.execute(
+                "SELECT coalesce(sum(quantity),0) FROM industrial_world_sales WHERE created_at>=?",
+                (now - 86400,),
+            ).fetchone()[0])
+
+        mine_state = None
+        if mine:
+            capacity = get_storage_capacity(int(mine["storage_level"]))
+            elapsed = max(0, now - int(mine["last_production_at"]))
+            progress = int(mine["production_progress"]) + elapsed * get_production_rate(
+                int(mine["production_level"])
+            )
+            stock = min(capacity, int(mine["stock"]) + progress // 3600)
+            mine_state = {
+                "stock": stock,
+                "capacity": capacity,
+                "storage_level": int(mine["storage_level"]),
+                "production_level": int(mine["production_level"]),
+                "quality_level": int(mine["quality_level"]),
+            }
+        return {
+            "profile_exists": user is not None,
+            "job": user["primary_job"] if user else None,
+            "company": dict(company) if company else None,
+            "wallet": int(user["credits"]) if user else 0,
+            "mine": mine_state,
+            "inventory": inventory,
+            "open_market_orders": open_orders,
+            "best_iron_ore_buy_price": int(best_buy) if best_buy is not None else None,
+            "active_transports": active_transports,
+            "arrived_transports": arrived_transports,
+            "merchant": dict(merchant) if merchant else None,
+            "forge": dict(blacksmith) if blacksmith else None,
+            "ready_forge_ingots": int(forge_counts[0]),
+            "processing_forge_jobs": int(forge_counts[1]),
+            "pending_ingot_shipments": int(pending_shipment["count"]),
+            "pending_ingot_shipment_id": (
+                int(pending_shipment["first_id"])
+                if pending_shipment["first_id"] is not None else None
+            ),
+            "available_delivery_missions": available_missions,
+            "delivery_cooldown_until": cooldown_until,
+            "contracts": contracts,
+            "world_price": bounded_world_price(world_volume),
+        }
+
     def get_economy_stats(self):
         with immediate_transaction(self.database_path) as c:
             self._ensure_ai(c);self._refresh_ai(c);since=_now()-86400
