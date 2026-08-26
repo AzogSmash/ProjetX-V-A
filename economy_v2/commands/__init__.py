@@ -18,6 +18,7 @@ from economy_v2.commands.insights import (build_adminlog_command, build_achievem
 from economy_v2.commands.systems import (build_events_command, build_season_command,
     build_team_command, build_title_command, build_titles_command)
 from economy_v2.commands.economy_report import build_economy_report_command
+from economy_v2.commands.tutorial import build_tutorial_command
 from economy_v2.router import EconomyRouter
 from economy_v2.services import IndustrialEconomyService
 
@@ -28,6 +29,9 @@ def register_economy_commands(
 ) -> None:
     # L'aide est statique et doit rester disponible sans aucune dépendance DB.
     router.register_command("ecohelp", ecohelp_command, track_activity=False)
+    tutorial=build_tutorial_command(service)
+    router.register_command("tutorial",tutorial,track_activity=False)
+    router.register_command("tuto",tutorial,track_activity=False)
     router.register_command("wallet", build_wallet_command(service))
     router.register_command("company", build_company_command(service))
     router.register_command("mine", build_mine_command(service))

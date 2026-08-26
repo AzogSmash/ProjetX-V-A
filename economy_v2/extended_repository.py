@@ -60,6 +60,7 @@ class IndustrialInsightsMixin:
             result["achievement_titles"] = [r[0] for r in c.execute("SELECT title FROM industrial_achievements WHERE discord_user_id=? ORDER BY earned_at DESC LIMIT 5", (uid,))]
             equipped=c.execute("SELECT t.display_name FROM industrial_user_titles ut JOIN industrial_titles t ON t.id=ut.title_id WHERE ut.discord_user_id=? AND ut.equipped=1",(uid,)).fetchone();result["equipped_title"]=equipped[0] if equipped else None
             result["team_roles"]=[dict(r) for r in c.execute("SELECT co.name,tm.role FROM industrial_team_members tm JOIN industrial_companies co ON co.id=tm.company_id WHERE tm.discord_user_id=? ORDER BY tm.role",(uid,))]
+            tutorial=c.execute("SELECT status,current_step,path FROM industrial_tutorial_progress WHERE discord_user_id=?",(uid,)).fetchone();result["tutorial"]=(dict(tutorial)|{"total_steps":8}) if tutorial else None
             result["money_rank"] = int(c.execute("SELECT count(*)+1 FROM industrial_users WHERE credits>?", (result["credits"],)).fetchone()[0])
             row = c.execute("SELECT last_active_at,command_count FROM industrial_user_activity WHERE discord_user_id=?", (uid,)).fetchone(); result["activity"] = dict(row) if row else None
             return result

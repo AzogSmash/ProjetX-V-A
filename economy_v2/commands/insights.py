@@ -34,6 +34,8 @@ def build_fiche_command(service):
         embed.add_field(name="Titres",value="\n".join(data["achievement_titles"]) or "Aucun",inline=False)
         embed.add_field(name="Titre principal",value=data.get("equipped_title") or "Aucun",inline=False)
         teams=data.get("team_roles",[]);embed.add_field(name="Équipes",value=("\n".join(f"{t['name']} — {t['role']}" for t in teams) or "Aucune")[:1024],inline=False)
+        tutorial=data.get("tutorial")
+        if tutorial:embed.add_field(name="Tutoriel",value="Terminé ✅" if tutorial["status"]=="completed" else f"Étape {int(tutorial['current_step'])+1}/{tutorial['total_steps']} — {tutorial['status']}",inline=False)
         embed.set_footer(text="Détails : ?bilan • progression : ?next")
         await ctx.message.channel.send(embed=embed)
     return command

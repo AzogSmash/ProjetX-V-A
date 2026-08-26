@@ -13,6 +13,11 @@ async def ecohelp_command(context: EconomyCommandContext) -> None:
         color=0xD68910,
     )
     embed.add_field(
+        name="Nouveau joueur ?",
+        value="`?tutorial` / `?tuto` — Tutoriel interactif adapté à ton métier",
+        inline=False,
+    )
+    embed.add_field(
         name="Compte et entreprise",
         value=(
             "`?wallet` — Consulter son compte économique industriel\n"

@@ -15,6 +15,7 @@ from economy_v2.forge_config import MAX_FORGE_UPGRADE_LEVEL, get_forge_count, ge
 from economy_v2.extended_repository import IndustrialInsightsMixin
 from economy_v2.systems_repository import IndustrialSystemsMixin
 from economy_v2.reporting_repository import IndustrialReportingMixin
+from economy_v2.tutorial_repository import IndustrialTutorialMixin
 from economy_v2.merchant_config import MAX_MERCHANT_UPGRADE_LEVEL, get_merchant_upgrade_cost, get_trip_duration_seconds, get_truck_capacity
 from economy_v2.mining_config import MAX_MINE_UPGRADE_LEVEL, get_production_rate, get_storage_capacity, get_upgrade_cost
 from economy_v2.models import (AdminCreditResult, Banker, Blacksmith, DeliveryMission, DeliveryProfile, ForgeCollectionResult, ForgeJob, ForgeProcessResult, ForgeUpgradeResult, IndustrialActor, IndustrialCompany, IndustrialContract, IndustrialTransport, IndustrialUser, IngotShipment, InventoryEntry, MarketOrder, MarketOrderResult, MarketSummary, Merchant, MerchantTransportResult, MerchantUpgradeResult, Mine, MineCollectionResult, MineUpgradeResult, ShipmentResult, WorldSale)
@@ -25,7 +26,7 @@ def _now() -> int:
     return int(time.time())
 
 
-class SQLiteIndustrialEconomyRepository(IndustrialReportingMixin, IndustrialSystemsMixin, IndustrialInsightsMixin):
+class SQLiteIndustrialEconomyRepository(IndustrialTutorialMixin, IndustrialReportingMixin, IndustrialSystemsMixin, IndustrialInsightsMixin):
     """Repository SQLite local ; les mutations critiques utilisent BEGIN IMMEDIATE."""
 
     def __init__(self, database_path: str | Path | None = None) -> None:
@@ -705,6 +706,7 @@ class SQLiteIndustrialEconomyRepository(IndustrialReportingMixin, IndustrialSyst
             partner_count = int(c.execute("SELECT count(*) FROM industrial_partnerships WHERE (low_user_id=? OR high_user_id=?) AND status='accepted'", (user_id,user_id)).fetchone()[0])
             objective = c.execute("SELECT label.progress,label.target FROM (SELECT progress,target,objective_key FROM industrial_objective_progress WHERE discord_user_id=? AND period_type='daily' AND period_start=? AND completed_at IS NULL ORDER BY target-progress LIMIT 1) label", (user_id, now-now%86400)).fetchone()
             team_invites=int(c.execute("SELECT count(*) FROM industrial_team_invitations WHERE invitee_discord_user_id=? AND status='pending' AND expires_at>?",(user_id,now)).fetchone()[0])
+            tutorial=c.execute("SELECT status,current_step,path FROM industrial_tutorial_progress WHERE discord_user_id=?",(user_id,)).fetchone()
 
         mine_state = None
         if mine:
@@ -749,6 +751,7 @@ class SQLiteIndustrialEconomyRepository(IndustrialReportingMixin, IndustrialSyst
             "partner_count": partner_count,
             "nearest_objective": dict(objective) if objective else None,
             "team_invitations": team_invites,
+            "tutorial": dict(tutorial) if tutorial else None,
         }
 
     def get_economy_stats(self):

@@ -188,7 +188,7 @@ class MigrationSixTests(unittest.TestCase):
             for migration in sorted(MIGRATIONS_DIRECTORY.glob("00[1-5]_*.sql")):
                 version=int(migration.name[:3]);c.executescript("BEGIN IMMEDIATE;\n"+migration.read_text(encoding="utf-8")+f"\nINSERT INTO industrial_schema_version VALUES({version},unixepoch());\nCOMMIT;")
             c.execute("INSERT INTO industrial_users(discord_user_id,credits) VALUES(7,777)");c.close();initialize_database_sync(path);initialize_database_sync(path)
-            with closing(connect_database(path)) as c:self.assertEqual(777,c.execute("SELECT credits FROM industrial_users WHERE discord_user_id=7").fetchone()[0]);self.assertEqual([1,2,3,4,5,6],[r[0] for r in c.execute("SELECT version FROM industrial_schema_version ORDER BY version")]);self.assertEqual("ok",c.execute("PRAGMA integrity_check").fetchone()[0]);self.assertEqual([],c.execute("PRAGMA foreign_key_check").fetchall())
+            with closing(connect_database(path)) as c:self.assertEqual(777,c.execute("SELECT credits FROM industrial_users WHERE discord_user_id=7").fetchone()[0]);self.assertEqual([1,2,3,4,5,6,7],[r[0] for r in c.execute("SELECT version FROM industrial_schema_version ORDER BY version")]);self.assertEqual("ok",c.execute("PRAGMA integrity_check").fetchone()[0]);self.assertEqual([],c.execute("PRAGMA foreign_key_check").fetchall())
             backup=backup_once(path,root/"backups",2,123);self.assertTrue(backup.exists())
             with closing(sqlite3.connect(backup)) as c:self.assertEqual(1,c.execute("SELECT count(*) FROM sqlite_master WHERE name='industrial_seasons'").fetchone()[0])
 

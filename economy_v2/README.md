@@ -53,3 +53,11 @@ seule ; l'option `text` produit une version copiable. Les alertes V1 sont centra
 dans `reporting_repository.py` : production IA > 40 %, métier < 10 %, croissance nette
 des CR > 25 % sur 7 jours, spread > 50 %, top 10 % > 70 % de la richesse, contrats
 expirés > 35 %, moins de 3 livraisons hebdomadaires et mines pleines > 60 %.
+
+## Tutoriel interactif
+
+`?tutorial` (`?tuto`) propose huit étapes adaptées au métier réel. Les étapes
+économiques sont validées uniquement par les preuves SQLite existantes ; les étapes
+informatives peuvent être avancées avec `next`. Seules les tables de progression du
+tutoriel sont modifiées : aucune récompense, aucun CR et aucune ressource ne sont créés.
+La migration additive 007 conserve la progression entre les redémarrages.
