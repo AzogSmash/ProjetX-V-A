@@ -31,7 +31,7 @@ from economy_v2.models import (
 )
 from economy_v2.repository import (
     IndustrialEconomyRepository,
-    SupabaseIndustrialEconomyRepository,
+    SQLiteIndustrialEconomyRepository,
 )
 
 
@@ -219,7 +219,7 @@ class IndustrialEconomyService(IndustrialWalletService, Protocol):
     async def get_delivery_profile(self, user_id: int) -> DeliveryProfile: ...
     async def accept_delivery(self, user_id: int, mission_id: int, request_id: str) -> dict: ...
     async def create_contract(self, user_id: int, resource: str, quantity: int,
-                              total: int, request_id: str) -> IndustrialContract: ...
+                              total: int, request_id: str, target_user_id: int | None = None) -> IndustrialContract: ...
     async def accept_contract(self, user_id: int, contract_id: int, request_id: str) -> IndustrialContract: ...
     async def cancel_contract(self, user_id: int, contract_id: int, request_id: str) -> IndustrialContract: ...
     async def get_contracts(self, user_id: int, mine: bool = False) -> list[IndustrialContract]: ...
@@ -228,11 +228,41 @@ class IndustrialEconomyService(IndustrialWalletService, Protocol):
     async def purchase_ai_supply(self, user_id: int, resource_type: str,
                                  quantity: int, request_id: str) -> dict: ...
     async def get_economy_stats(self) -> dict: ...
+    async def adjust_admin_credits(self, admin_user_id: int, target_user_id: int,
+                                   operation: str, amount: int, request_id: str): ...
+    async def get_next_actions_snapshot(self, user_id: int) -> dict: ...
+    async def get_industrial_profile(self, user_id: int): ...
+    async def get_rankings(self, category: str, limit: int = 10): ...
+    async def refresh_achievements(self, user_id: int): ...
+    async def get_objectives(self, user_id: int, now: int | None = None): ...
+    async def get_player_stats(self, user_id: int): ...
+    async def get_orders_overview(self, user_id: int): ...
+    async def update_partnership(self, user_id: int, target_id: int, action: str, request_id: str): ...
+    async def get_partnerships(self, user_id: int): ...
+    async def get_notification_preferences(self, user_id: int): ...
+    async def set_notification_preference(self, user_id: int, category: str, enabled: bool): ...
+    async def get_admin_log(self, user_id: int, limit: int = 20): ...
+    async def economy_check(self): ...
+    async def get_season_dashboard(self, user_id: int, category: str = "overall"): ...
+    async def get_season_history(self): ...
+    async def refresh_titles(self, user_id: int): ...
+    async def equip_title(self, user_id: int, selector: str, request_id: str): ...
+    async def remove_title(self, user_id: int, request_id: str): ...
+    async def get_active_events(self): ...
+    async def get_team(self, user_id: int): ...
+    async def invite_team_member(self, user_id: int, target_id: int, request_id: str): ...
+    async def resolve_team_invitation(self, user_id: int, invitation_id: int, action: str, request_id: str): ...
+    async def change_team(self, user_id: int, action: str, target_id: int | None, role: str | None, request_id: str): ...
+    async def get_economy_report(self): ...
+    async def get_tutorial(self,user_id:int): ...
+    async def update_tutorial(self,user_id:int,action:str,request_id:str): ...
 
 
-class SupabaseIndustrialEconomyService:
+class SQLiteIndustrialEconomyService:
     def __init__(self, repository: IndustrialEconomyRepository | None = None) -> None:
-        self._repository = repository or SupabaseIndustrialEconomyRepository()
+        self._repository = repository or SQLiteIndustrialEconomyRepository()
+        if repository is None:
+            self._repository.ensure_current_event()
 
     async def _run(self, operation: str, user_id: int, function, *args):
         try:
@@ -552,9 +582,9 @@ class SupabaseIndustrialEconomyService:
         return row
 
     async def create_contract(self, user_id: int, resource: str, quantity: int,
-                              total: int, request_id: str) -> IndustrialContract:
+                              total: int, request_id: str, target_user_id: int | None = None) -> IndustrialContract:
         status, available, contract = await self._run("create_contract", user_id,
-            self._repository.create_contract, user_id, resource, quantity, total, request_id)
+            self._repository.create_contract, user_id, resource, quantity, total, request_id, target_user_id)
         if status not in {"ok", "duplicate"} or contract is None:
             raise ShipmentError(status, int(available or 0))
         return contract
@@ -595,4 +625,50 @@ class SupabaseIndustrialEconomyService:
         return row
 
     async def get_economy_stats(self) -> dict:
-        return await self._run("get_economy_stats",0,self._repository.get_economy_stats)
+        stats = await self._run("get_economy_stats",0,self._repository.get_economy_stats)
+        admin_stats = await self._run(
+            "get_admin_credit_stats", 0, self._repository.get_admin_credit_stats,
+        )
+        return stats | admin_stats
+
+    async def adjust_admin_credits(self, admin_user_id: int, target_user_id: int,
+                                   operation: str, amount: int, request_id: str):
+        return await self._run(
+            "adjust_admin_credits", admin_user_id,
+            self._repository.adjust_admin_credits,
+            admin_user_id, target_user_id, operation, amount, request_id,
+        )
+
+    async def get_next_actions_snapshot(self, user_id: int) -> dict:
+        return await self._run(
+            "get_next_actions_snapshot", user_id,
+            self._repository.get_next_actions_snapshot, user_id,
+        )
+
+    async def get_industrial_profile(self, user_id): return await self._run("get_industrial_profile", user_id, self._repository.get_industrial_profile, user_id)
+    async def get_rankings(self, category, limit=10): return await self._run("get_rankings", 0, self._repository.get_rankings, category, limit)
+    async def refresh_achievements(self, user_id): return await self._run("refresh_achievements", user_id, self._repository.refresh_achievements, user_id)
+    async def get_objectives(self, user_id, now=None):
+        args = (user_id,) if now is None else (user_id, now)
+        return await self._run("get_objectives", user_id, self._repository.get_objectives, *args)
+    async def get_player_stats(self, user_id): return await self._run("get_player_stats", user_id, self._repository.get_player_stats, user_id)
+    async def get_orders_overview(self, user_id): return await self._run("get_orders_overview", user_id, self._repository.get_orders_overview, user_id)
+    async def update_partnership(self, user_id, target_id, action, request_id): return await self._run("update_partnership", user_id, self._repository.update_partnership, user_id, target_id, action, request_id)
+    async def get_partnerships(self, user_id): return await self._run("get_partnerships", user_id, self._repository.get_partnerships, user_id)
+    async def get_notification_preferences(self, user_id): return await self._run("get_notification_preferences", user_id, self._repository.get_notification_preferences, user_id)
+    async def set_notification_preference(self, user_id, category, enabled): return await self._run("set_notification_preference", user_id, self._repository.set_notification_preference, user_id, category, enabled)
+    async def get_admin_log(self, user_id, limit=20): return await self._run("get_admin_log", user_id, self._repository.get_admin_log, user_id, limit)
+    async def economy_check(self): return await self._run("economy_check", 0, self._repository.economy_check)
+    async def get_season_dashboard(self,user_id,category="overall"):return await self._run("get_season_dashboard",user_id,self._repository.get_season_dashboard,user_id,category)
+    async def get_season_history(self):return await self._run("get_season_history",0,self._repository.get_season_history)
+    async def refresh_titles(self,user_id):return await self._run("refresh_titles",user_id,self._repository.refresh_titles,user_id)
+    async def equip_title(self,user_id,selector,request_id):return await self._run("equip_title",user_id,self._repository.equip_title,user_id,selector,request_id)
+    async def remove_title(self,user_id,request_id):return await self._run("remove_title",user_id,self._repository.remove_title,user_id,request_id)
+    async def get_active_events(self):return await self._run("get_active_events",0,self._repository.get_active_events)
+    async def get_team(self,user_id):return await self._run("get_team",user_id,self._repository.get_team,user_id)
+    async def invite_team_member(self,user_id,target_id,request_id):return await self._run("invite_team_member",user_id,self._repository.invite_team_member,user_id,target_id,request_id)
+    async def resolve_team_invitation(self,user_id,invitation_id,action,request_id):return await self._run("resolve_team_invitation",user_id,self._repository.resolve_team_invitation,user_id,invitation_id,action,request_id)
+    async def change_team(self,user_id,action,target_id,role,request_id):return await self._run("change_team",user_id,self._repository.change_team,user_id,action,target_id,role,request_id)
+    async def get_economy_report(self):return await self._run("get_economy_report",0,self._repository.get_economy_report)
+    async def get_tutorial(self,user_id):return await self._run("get_tutorial",user_id,self._repository.get_tutorial,user_id)
+    async def update_tutorial(self,user_id,action,request_id):return await self._run("update_tutorial",user_id,self._repository.update_tutorial,user_id,action,request_id)

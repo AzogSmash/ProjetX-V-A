@@ -8,6 +8,7 @@ from economy_v2.router import (
     parse_economy_message,
     validate_command_names,
 )
+from economy_v2.services import SQLiteIndustrialEconomyService
 
 
 class FakeChannel:
@@ -65,6 +66,15 @@ class UnavailableDatabaseService(UnavailableActivityService):
         raise RuntimeError("Supabase unavailable")
 
 
+class RepositoryAccessSpy:
+    def __init__(self) -> None:
+        self.accesses = []
+
+    def __getattr__(self, name):
+        self.accesses.append(name)
+        raise AssertionError(f"Accès repository inattendu : {name}")
+
+
 class FakeCommand:
     def __init__(self, name: str, aliases=()) -> None:
         self.name = name
@@ -100,6 +110,43 @@ class ParsingTests(unittest.TestCase):
 
 
 class RouterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bare_prefix_is_ignored_without_response(self) -> None:
+        message = FakeMessage("?")
+        handled = await build_economy_router(FakeEconomyService()).handle(message)
+        self.assertFalse(handled)
+        self.assertEqual(message.channel.sent, [])
+
+    async def test_bare_prefix_with_spaces_is_ignored_without_response(self) -> None:
+        message = FakeMessage("?   ")
+        handled = await build_economy_router(FakeEconomyService()).handle(message)
+        self.assertFalse(handled)
+        self.assertEqual(message.channel.sent, [])
+
+    async def test_ecohelp_still_displays_help(self) -> None:
+        message = FakeMessage("?ecohelp")
+        handled = await build_economy_router(FakeEconomyService()).handle(message)
+        self.assertTrue(handled)
+        self.assertIn("embed", message.channel.sent[0][1])
+
+    async def test_space_after_prefix_keeps_current_parser_behavior(self) -> None:
+        message = FakeMessage("? wallet")
+        handled = await build_economy_router(FakeEconomyService()).handle(message)
+        self.assertTrue(handled)
+        self.assertIn("0 CR", message.channel.sent[0][1]["embed"].description)
+
+    async def test_bare_prefix_does_not_record_activity(self) -> None:
+        service = UnavailableActivityService()
+        message = FakeMessage("?")
+        await build_economy_router(service).handle(message)
+        self.assertEqual(service.activity_calls, 0)
+
+    async def test_bare_prefix_does_not_access_repository(self) -> None:
+        repository = RepositoryAccessSpy()
+        service = SQLiteIndustrialEconomyService(repository)
+        message = FakeMessage("?")
+        await build_economy_router(service).handle(message)
+        self.assertEqual(repository.accesses, [])
+
     async def test_help_is_case_insensitive(self) -> None:
         message = FakeMessage("?ECOHELP")
         handled = await build_economy_router(FakeEconomyService()).handle(message)

@@ -17,7 +17,7 @@ from economy_v2.models import InventoryEntry, Mine, MineCollectionResult, MineUp
 from economy_v2.services import (
     InsufficientIndustrialFundsError,
     MineUpgradeMaxLevelError,
-    SupabaseIndustrialEconomyService,
+    SQLiteIndustrialEconomyService,
 )
 
 
@@ -146,7 +146,7 @@ class MiningFormulaTests(unittest.TestCase):
 class MiningServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.repository = MiningRepository()
-        self.service = SupabaseIndustrialEconomyService(self.repository)
+        self.service = SQLiteIndustrialEconomyService(self.repository)
 
     async def test_creation_is_idempotent(self) -> None:
         first, second = await asyncio.gather(
@@ -232,14 +232,14 @@ class MiningServiceTests(unittest.IsolatedAsyncioTestCase):
 class MineCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_non_miner_is_refused_without_creating_mine(self) -> None:
         repository = MiningRepository(job="merchant")
-        router = build_economy_router(SupabaseIndustrialEconomyService(repository))
+        router = build_economy_router(SQLiteIndustrialEconomyService(repository))
         message = FakeMessage("?mine")
         await router.handle(message)
         self.assertIn("réservée aux Mineurs", message.channel.sent[0][0])
         self.assertIsNone(repository.mine)
 
     async def test_invalid_action_and_upgrade(self) -> None:
-        router = build_economy_router(SupabaseIndustrialEconomyService(MiningRepository()))
+        router = build_economy_router(SQLiteIndustrialEconomyService(MiningRepository()))
         invalid_action = FakeMessage("?mine azerty")
         await router.handle(invalid_action)
         self.assertIn("Syntaxes", invalid_action.channel.sent[0][0])

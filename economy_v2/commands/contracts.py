@@ -22,7 +22,7 @@ def build_contracts_command(service: IndustrialEconomyService) -> EconomyCommand
                 await context.message.channel.send(embed=discord.Embed(
                     title="📜 Mes contrats" if action == "mine" else "📜 Contrats ouverts",
                     description="\n".join(lines) or "Aucun contrat.", color=0x8E44AD))
-            elif action == "create" and len(context.args) == 4:
+            elif action == "create" and len(context.args) in {4, 5}:
                 await _create(context, service)
             elif action in {"accept", "cancel"} and len(context.args) == 2:
                 try: contract_id = int(context.args[1])
@@ -43,11 +43,12 @@ def build_contracts_command(service: IndustrialEconomyService) -> EconomyCommand
                     messages = {"not_found": "Contrat introuvable.", "already_closed": "Contrat déjà fermé.",
                                 "not_owner": "Ce contrat ne t'appartient pas.",
                                 "own_contract": "Tu ne peux pas accepter ton propre contrat.",
+                                "targeted_contract": "Ce contrat est réservé à une autre entreprise.",
                                 "insufficient_inventory": f"Stock insuffisant : **{error.available or 0:,}**."}
                     await context.message.channel.send(messages.get(error.reason, "Action impossible."))
             else:
                 await context.message.channel.send(
-                    "Syntaxe : `?contracts`, `?contracts create <ressource> <quantité> <prix_total>`, "
+                    "Syntaxe : `?contracts`, `?contracts create <ressource> <quantité> <prix_total> [@cible]`, "
                     "`?contracts accept <id>`, `?contracts mine`, `?contracts cancel <id>`."
                 )
         except IndustrialEconomyError:
@@ -63,13 +64,22 @@ async def _create(context, service) -> None:
     if resource is None or not valid_contract_values(quantity, total):
         await context.message.channel.send("Ressource, quantité ou prix total invalide."); return
     try:
+        target = None
+        if len(context.args) == 5:
+            import re
+            match = re.fullmatch(r"(?:<@!?(\d+)>|(\d+))", context.args[4])
+            if not match:
+                await context.message.channel.send("Utilisateur cible invalide."); return
+            target = int(match.group(1) or match.group(2))
         contract = await service.create_contract(context.message.author.id, resource.resource_type,
-                                                 quantity, total, f"discord:{context.message.id}")
+                                                 quantity, total, f"discord:{context.message.id}", target)
     except ShipmentError as error:
         if error.reason == "insufficient_funds":
             await context.message.channel.send(f"Fonds insuffisants. Solde : **{error.available or 0:,} CR**.")
         elif error.reason == "contract_limit":
             await context.message.channel.send("Tu as atteint la limite de contrats ouverts.")
+        elif error.reason in {"invalid_target", "own_contract"}:
+            await context.message.channel.send("Cible de contrat invalide.")
         else: await context.message.channel.send("Impossible de créer ce contrat.")
         return
     await context.message.channel.send(

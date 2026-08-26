@@ -22,6 +22,7 @@ from economy_v2 import (
     economy_router,
     validate_command_names,
 )
+from economy_v2.backups import start_backup_scheduler
 
 load_dotenv()
 
@@ -1790,6 +1791,7 @@ async def check_mutes():
 @bot.event
 async def on_ready():
     logging.warning("Connecté en tant que %s — DATA_FILE=%s — fichier_existe=%s", bot.user, DATA_FILE, os.path.exists(DATA_FILE))
+    start_backup_scheduler()
 
     # Vues de tickets en tout premier (avant load_data/re-registration des
     # clans, plus lents) : minimise la fenêtre où un clic sur un vieux salon
@@ -3854,55 +3856,11 @@ async def cmd_historique_moderation(ctx, member: discord.Member = None):
     await ctx.send(embed=view.build_embed(), view=view)
 
 
-@bot.command()
-async def lock(ctx, channel: discord.TextChannel = None):
-    channel = channel or ctx.channel
-    if not (ctx.author.guild_permissions.administrator or is_bot_owner(ctx.author)):
-        return await ctx.send("❌ Seuls les administrateurs peuvent utiliser cette commande.")
-
-    try:
-        overwrite = channel.overwrites_for(ctx.guild.default_role)
-        if overwrite.send_messages is False:
-            await ctx.send(f"ℹ️ Le salon {channel.mention} est déjà verrouillé.")
-            return
-
-        overwrite.send_messages = False
-        await channel.set_permissions(ctx.guild.default_role, overwrite=overwrite, reason=f"Salon verrouillé par {ctx.author.name}")
-        await ctx.send(f"🔒 Salon {channel.mention} verrouillé.")
-        fields = [
-            ("Modérateur", ctx.author.mention, True),
-            ("Salon", channel.mention, True)
-        ]
-        await send_log_message(ctx.guild, LOG_MODERATION_CHANNEL_ID, "🔒 Salon Verrouillé", f"Le salon {channel.mention} a été verrouillé par {ctx.author.mention}.", discord.Color.dark_red(), fields)
-    except discord.Forbidden:
-        await ctx.send("❌ Je n'ai pas la permission de verrouiller ce salon.")
-    except Exception as e:
-        await ctx.send(f"❌ Une erreur est survenue lors du verrouillage du salon : {e}")
-
-@bot.command()
-async def unlock(ctx, channel: discord.TextChannel = None):
-    channel = channel or ctx.channel
-    if not (ctx.author.guild_permissions.administrator or is_bot_owner(ctx.author)):
-        return await ctx.send("❌ Seuls les administrateurs peuvent utiliser cette commande.")
-
-    try:
-        overwrite = channel.overwrites_for(ctx.guild.default_role)
-        if overwrite.send_messages is True or overwrite.send_messages is None:
-            await ctx.send(f"ℹ️ Le salon {channel.mention} n'est pas verrouillé ou est déjà déverrouillé.")
-            return
-
-        overwrite.send_messages = True
-        await channel.set_permissions(ctx.guild.default_role, overwrite=overwrite, reason=f"Salon déverrouillé par {ctx.author.name}")
-        await ctx.send(f"🔓 Salon {channel.mention} déverrouillé.")
-        fields = [
-            ("Modérateur", ctx.author.mention, True),
-            ("Salon", channel.mention, True)
-        ]
-        await send_log_message(ctx.guild, LOG_MODERATION_CHANNEL_ID, "🔓 Salon Déverrouillé", f"Le salon {channel.mention} a été déverrouillé par {ctx.author.mention}.", discord.Color.green(), fields)
-    except discord.Forbidden:
-        await ctx.send("❌ Je n'ai pas la permission de déverrouiller ce salon.")
-    except Exception as e:
-        await ctx.send(f"❌ Une erreur est survenue lors du déverrouillage du salon : {e}")
+# !lock/!unlock : voir plus loin dans le fichier (cmd_lock/cmd_unlock,
+# près de lock_serveur/unlock_serveur) — ancienne implémentation retirée le
+# 24/08/2026, dupliquait le nom de commande (CommandRegistrationError au
+# démarrage) et faisait moins bien (pas de restauration exacte de l'état
+# précédent, pas de pendant "verrouiller tout le serveur").
 
 async def _run_giveaway(message_id):
     """Attend la fin d'un giveaway puis tire les gagnants.
@@ -4768,6 +4726,23 @@ async def unban(ctx, *, member_id: int):
             ("Raison", "ID non trouvé dans la liste des bannis.", False)
         ]
         await send_log_message(ctx.guild, LOG_MODERATION_CHANNEL_ID, "⚠️ Échec Débannissement", f"{ctx.author.mention} a tenté de débannir l'ID {member_id} qui n'est pas banni.", discord.Color.orange(), fields)
+
+
+@bot.command()
+@commands.has_permissions(kick_members=True)
+async def kick(ctx, member: discord.Member, *, reason: str = None):
+    """N'existait pas dans ce bot avant le 11/08/2026 — ajoutée en même temps
+    que !jugement, qui en a besoin comme verdict possible. S'appuie sur
+    _apply_kick (déjà loggée dans le salon unifié)."""
+    if await _check_protected_target(ctx, member):
+        return
+    data, err = await _apply_kick(ctx.guild, member.id, ctx.author.id, reason)
+    if err:
+        return await ctx.send(f"❌ {err}")
+    await ctx.send(f"👢 {member.mention} a été expulsé du serveur." + (f" Raison : {reason}" if reason else ""))
+    if not data["dm_sent"]:
+        await ctx.send(f"⚠️ Je n'ai pas pu envoyer de message privé à {member.mention}.")
+
 
 # =======================================================================
 # ============================= CASINO ==================================
@@ -6073,7 +6048,7 @@ async def cmd_extension(ctx, *, invocation: str = None):
             # Compatibilité avec une éventuelle ancienne valeur sans fuseau.
             if last_used.tzinfo is None:
                 last_used = last_used.replace(tzinfo=BS_SEASON_TZ)
-            available_at = last_used + timedelta(hours=24)
+            available_at = last_used + timedelta(hours=10)
             if now_paris < available_at:
                 remaining = available_at - now_paris
                 total_minutes = max(1, math.ceil(remaining.total_seconds() / 60))
@@ -12442,6 +12417,11 @@ async def cmd_jugement(ctx, membre: discord.Member):
     if membre.id == bot.user.id:
         return await ctx.send("❌ On ne juge pas le juge.")
 
+    await send_log_message(
+        ctx.guild, LOG_MODERATION_CHANNEL_ID, "⚖️ Jugement lancé",
+        f"{ctx.author.mention} a lancé un jugement contre {membre.mention}.",
+        discord.Color.blurple(),
+    )
     view = JugementView(membre, ctx.author.id)
     await ctx.send(embed=view._build_embed(), view=view)
 

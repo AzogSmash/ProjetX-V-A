@@ -19,7 +19,7 @@ from economy_v2.models import (
 from economy_v2.services import (
     InsufficientIndustrialFundsError, MerchantAccessDeniedError,
     MerchantTransportError, MerchantUpgradeMaxLevelError,
-    SupabaseIndustrialEconomyService,
+    SQLiteIndustrialEconomyService,
 )
 
 
@@ -150,7 +150,7 @@ class MerchantFormulaTests(unittest.TestCase):
 class MerchantServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.repo = MerchantRepository()
-        self.service = SupabaseIndustrialEconomyService(self.repo)
+        self.service = SQLiteIndustrialEconomyService(self.repo)
 
     async def test_profile_creation_is_idempotent(self):
         first, second = await asyncio.gather(
@@ -225,7 +225,7 @@ class MerchantServiceTests(unittest.IsolatedAsyncioTestCase):
 
 class MerchantCommandAndSqlTests(unittest.IsolatedAsyncioTestCase):
     async def test_registry_and_commands(self):
-        repo = MerchantRepository(); service = SupabaseIndustrialEconomyService(repo)
+        repo = MerchantRepository(); service = SQLiteIndustrialEconomyService(repo)
         router = build_economy_router(service)
         self.assertIn("merchant", router.command_names)
         for index, content in enumerate(("?merchant", "?merchant inventory", "?merchant transport <@20> iron_ore 50", "?merchant transports"), 1):
@@ -235,7 +235,7 @@ class MerchantCommandAndSqlTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("Une erreur est survenue", message.channel.sent[0][0] or "")
 
     async def test_bad_transport_parsing(self):
-        router = build_economy_router(SupabaseIndustrialEconomyService(MerchantRepository()))
+        router = build_economy_router(SQLiteIndustrialEconomyService(MerchantRepository()))
         message = FakeMessage("?merchant transport personne iron_ore dix")
         await router.handle(message)
         self.assertIn("mention", message.channel.sent[0][0])

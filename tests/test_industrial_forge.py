@@ -17,7 +17,7 @@ from economy_v2.models import (
 )
 from economy_v2.services import (
     BlacksmithAccessDeniedError, ForgeProcessError, ForgeUpgradeMaxLevelError,
-    InsufficientIndustrialFundsError, SupabaseIndustrialEconomyService,
+    InsufficientIndustrialFundsError, SQLiteIndustrialEconomyService,
 )
 
 
@@ -151,7 +151,7 @@ class ForgeFormulaTests(unittest.TestCase):
 
 class ForgeServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.repo = ForgeRepository(); self.service = SupabaseIndustrialEconomyService(self.repo)
+        self.repo = ForgeRepository(); self.service = SQLiteIndustrialEconomyService(self.repo)
 
     async def test_profile_creation_and_wrong_role(self):
         first, second = await asyncio.gather(self.service.get_or_create_blacksmith(30), self.service.get_or_create_blacksmith(30))
@@ -236,7 +236,7 @@ class ForgeServiceTests(unittest.IsolatedAsyncioTestCase):
 
 class ForgeCommandAndSqlTests(unittest.IsolatedAsyncioTestCase):
     async def test_registry_and_commands(self):
-        repo = ForgeRepository(); router = build_economy_router(SupabaseIndustrialEconomyService(repo))
+        repo = ForgeRepository(); router = build_economy_router(SQLiteIndustrialEconomyService(repo))
         self.assertIn("forge", router.command_names)
         commands = ("?forge", "?forge inventory", "?forge process iron_ore 10", "?forge jobs")
         for index, content in enumerate(commands, 1):
@@ -246,7 +246,7 @@ class ForgeCommandAndSqlTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("Une erreur est survenue", message.channel.sent[0][0] or "")
 
     async def test_invalid_process_and_upgrade(self):
-        router = build_economy_router(SupabaseIndustrialEconomyService(ForgeRepository()))
+        router = build_economy_router(SQLiteIndustrialEconomyService(ForgeRepository()))
         for content, expected in (("?forge process copper 10", "iron_ore"), ("?forge upgrade camion", "invalide")):
             message = FakeMessage(content)
             await router.handle(message)

@@ -13,6 +13,11 @@ async def ecohelp_command(context: EconomyCommandContext) -> None:
         color=0xD68910,
     )
     embed.add_field(
+        name="Nouveau joueur ?",
+        value="`?tutorial` / `?tuto` — Tutoriel interactif adapté à ton métier",
+        inline=False,
+    )
+    embed.add_field(
         name="Compte et entreprise",
         value=(
             "`?wallet` — Consulter son compte économique industriel\n"
@@ -74,5 +79,19 @@ async def ecohelp_command(context: EconomyCommandContext) -> None:
         ),
         inline=False,
     )
+    embed.add_field(
+        name="Progression et suivi",
+        value=(
+            "`?next` — Recommandations dynamiques\n"
+            "`?fiche` / `?cv` — Fiche industrielle\n"
+            "`?rank` — Classements\n"
+            "`?bilan` — Statistiques personnelles\n"
+            "`?achievements` / `?objectives` — Progression\n"
+            "`?orders` — Opérations en cours\n"
+            "`?partners` / `?notifications` — Réseau et préférences"
+        ),
+        inline=False,
+    )
+    embed.add_field(name="Saisons et entreprise",value="`?season` / `?saison` — Saison et classements\n`?titles` / `?title` — Titres cosmétiques\n`?events` — Événements temporaires\n`?equipe` / `?crew` — Équipe d’entreprise",inline=False)
     embed.set_footer(text="Préfixe réservé à l'économie industrielle : ?")
     await context.message.channel.send(embed=embed)

@@ -112,9 +112,13 @@ async def _show_market(context, service) -> None:
     avg = f"{summary.average_price_24h:.2f} CR" if summary.average_price_24h is not None else "Aucun échange"
     embed = discord.Embed(title="📈 Marché industriel", description=f"**{resource.label}**", color=0xD68910)
     embed.add_field(name="24 heures", value=f"Moyenne : **{avg}**\nBas : **{summary.low_price_24h or '—'}**\nHaut : **{summary.high_price_24h or '—'}**\nVolume : **{summary.volume_24h:,}**", inline=False)
+    variation = f"{summary.variation_percent:+.1f}%" if summary.variation_percent is not None else "—"
+    embed.add_field(name="Carnet", value=f"Meilleur vendeur : **{summary.best_sell_price or '—'}**\nMeilleur acheteur : **{summary.best_buy_price or '—'}**\nSpread : **{summary.spread if summary.spread is not None else '—'}**\nVariation 24h : **{variation}**", inline=False)
     sells = "\n".join(f"{o.remaining_quantity:,} @ {o.unit_price:,} CR" for o in summary.sell_orders) or "Aucun"
     buys = "\n".join(f"{o.remaining_quantity:,} @ {o.unit_price:,} CR" for o in summary.buy_orders) or "Aucun"
     embed.add_field(name="Ventes (meilleurs prix)", value=sells)
     embed.add_field(name="Achats (meilleurs prix)", value=buys)
+    recent = "\n".join(f"{q:,} @ {p:,} CR — <t:{created}:R>" for q, p, created in summary.recent_trades) or "Aucun"
+    embed.add_field(name="Derniers échanges", value=recent[:1024], inline=False)
     embed.set_footer(text="?market orders • ordres limités à 20 par joueur")
     await context.message.channel.send(embed=embed)

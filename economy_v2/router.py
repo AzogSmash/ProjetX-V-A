@@ -68,8 +68,10 @@ class EconomyRouter:
         parsed = parse_economy_message(message.content or "")
         if parsed is None:
             return False
+        if not parsed.command:
+            return False
 
-        command_name = parsed.command or "ecohelp"
+        command_name = parsed.command
         handler = self._commands.get(command_name)
         if handler is None:
             await message.channel.send(

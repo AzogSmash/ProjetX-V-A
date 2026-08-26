@@ -17,6 +17,19 @@ class IndustrialUser:
 
 
 @dataclass(frozen=True)
+class AdminCreditResult:
+    status: str
+    operation: str
+    admin_discord_user_id: int
+    target_discord_user_id: int
+    amount: int
+    balance_before: int
+    balance_after: int
+    request_id: str
+    duplicate_request: bool = False
+
+
+@dataclass(frozen=True)
 class IndustrialCompany:
     id: int
     owner_discord_user_id: int
@@ -93,6 +106,11 @@ class MarketSummary:
     volume_24h: int
     sell_orders: tuple[MarketOrder, ...]
     buy_orders: tuple[MarketOrder, ...]
+    best_sell_price: int | None = None
+    best_buy_price: int | None = None
+    spread: int | None = None
+    variation_percent: float | None = None
+    recent_trades: tuple[tuple[int, int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -269,3 +287,5 @@ class IndustrialContract:
     total_price: int
     status: str
     expires_at: str
+    target_company_id: int | None = None
+    target_actor_id: int | None = None
