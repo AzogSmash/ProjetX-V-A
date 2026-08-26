@@ -14,6 +14,7 @@ from economy_v2.delivery_config import get_delivery_cooldown_seconds, get_delive
 from economy_v2.forge_config import MAX_FORGE_UPGRADE_LEVEL, get_forge_count, get_forge_duration_seconds, get_forge_storage_capacity, get_forge_upgrade_cost
 from economy_v2.extended_repository import IndustrialInsightsMixin
 from economy_v2.systems_repository import IndustrialSystemsMixin
+from economy_v2.reporting_repository import IndustrialReportingMixin
 from economy_v2.merchant_config import MAX_MERCHANT_UPGRADE_LEVEL, get_merchant_upgrade_cost, get_trip_duration_seconds, get_truck_capacity
 from economy_v2.mining_config import MAX_MINE_UPGRADE_LEVEL, get_production_rate, get_storage_capacity, get_upgrade_cost
 from economy_v2.models import (AdminCreditResult, Banker, Blacksmith, DeliveryMission, DeliveryProfile, ForgeCollectionResult, ForgeJob, ForgeProcessResult, ForgeUpgradeResult, IndustrialActor, IndustrialCompany, IndustrialContract, IndustrialTransport, IndustrialUser, IngotShipment, InventoryEntry, MarketOrder, MarketOrderResult, MarketSummary, Merchant, MerchantTransportResult, MerchantUpgradeResult, Mine, MineCollectionResult, MineUpgradeResult, ShipmentResult, WorldSale)
@@ -24,7 +25,7 @@ def _now() -> int:
     return int(time.time())
 
 
-class SQLiteIndustrialEconomyRepository(IndustrialSystemsMixin, IndustrialInsightsMixin):
+class SQLiteIndustrialEconomyRepository(IndustrialReportingMixin, IndustrialSystemsMixin, IndustrialInsightsMixin):
     """Repository SQLite local ; les mutations critiques utilisent BEGIN IMMEDIATE."""
 
     def __init__(self, database_path: str | Path | None = None) -> None:

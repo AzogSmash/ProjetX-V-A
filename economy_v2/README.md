@@ -45,3 +45,11 @@ Les rôles d'équipe sont `owner`, `manager` et `employee`. Les permissions V1 s
 explicites et limitées : aucune ne permet de gérer un wallet personnel, transférer
 librement des actifs ou changer le propriétaire. Les commandes V1 gèrent l'équipe et
 ses consultations ; les actions métier déléguées restent volontairement désactivées.
+
+## Rapport d'équilibrage
+
+`?economyreport` (`?ereport`) est un rapport administrateur strictement en lecture
+seule ; l'option `text` produit une version copiable. Les alertes V1 sont centralisées
+dans `reporting_repository.py` : production IA > 40 %, métier < 10 %, croissance nette
+des CR > 25 % sur 7 jours, spread > 50 %, top 10 % > 70 % de la richesse, contrats
+expirés > 35 %, moins de 3 livraisons hebdomadaires et mines pleines > 60 %.

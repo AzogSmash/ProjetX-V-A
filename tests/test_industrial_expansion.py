@@ -143,7 +143,7 @@ class RegistryAndEmbedTests(unittest.IsolatedAsyncioTestCase):
                             if kw.arg=="name" and isinstance(kw.value,ast.Constant):name=kw.value.value
                             if kw.arg=="aliases" and isinstance(kw.value,(ast.List,ast.Tuple)):aliases=[x.value for x in kw.value.elts if isinstance(x,ast.Constant)]
                         legacy.add(name.casefold());legacy.update(x.casefold() for x in aliases)
-        names={"fiche","cv","rank","achievements","succes","objectives","objectifs","bilan","indstats","partners","orders","notifications","adminlog","economycheck","season","saison","titles","titres","title","events","evenements","equipe","crew"}
+        names={"fiche","cv","rank","achievements","succes","objectives","objectifs","bilan","indstats","partners","orders","notifications","adminlog","economycheck","economyreport","ereport","season","saison","titles","titres","title","events","evenements","equipe","crew"}
         self.assertFalse(names & legacy);self.assertIn("stats",legacy)
 
     def test_next_still_limits_six(self):
