@@ -1019,6 +1019,98 @@ async def _maybe_dev_ping_reaction(message):
         pass
 
 
+GRAMMAR_ROAST_COOLDOWN_MIN = 3  # par utilisateur, anti-spam — pas persisté (purement cosmétique)
+_grammar_roast_last: dict = {}  # {user_id: datetime} dernier roast reçu
+
+# Détection par regex des fautes de français les plus emblématiques/meme (pas une
+# vraie analyse grammaticale) : sava/ça va, je c'est/je sais, c'est/s'est, et/est,
+# son/sont, a/à... Chaque entrée : (regex, correction). La correction est soit une
+# chaîne fixe, soit une fonction du match (quand elle dépend du texte matché).
+GRAMMAR_MISTAKE_PATTERNS = [
+    (re.compile(r"\bsava\b", re.IGNORECASE), "ça va"),
+    (re.compile(r"\bsa\s+(va|marche|craint|d[ée]pend|part|arrive|passe|vaut|chie|saoule|gave)\b", re.IGNORECASE),
+     lambda m: f"ça {m.group(1)}"),
+    (re.compile(r"\bje\s+c['’]est\b", re.IGNORECASE), "je sais"),
+    (re.compile(r"\btu\s+c['’]est\b", re.IGNORECASE), "tu sais"),
+    (re.compile(r"\b(il|elle|on|ils|elles)\s+c['’]est\b", re.IGNORECASE), lambda m: f"{m.group(1)} s'est"),
+    (re.compile(r"\bc['’]et\b", re.IGNORECASE), "c'est"),
+    (re.compile(
+        r"\b(il|elle|on)\s+et\s+(?!(?:il|elle|on|nous|vous|ils|elles|moi|toi|lui|eux|je|tu)\b)",
+        re.IGNORECASE), lambda m: f"{m.group(1)} est"),
+    (re.compile(r"\b(ils|elles)\s+son\b", re.IGNORECASE), lambda m: f"{m.group(1)} sont"),
+    (re.compile(r"\bje\s+peu\b", re.IGNORECASE), "je peux"),
+    (re.compile(r"\bquand\s+a\s+(moi|toi|lui|elle|nous|vous|eux|elles)\b", re.IGNORECASE),
+     lambda m: f"quant à {m.group(1)}"),
+    (re.compile(r"\bsans\s+doutes\b", re.IGNORECASE), "sans doute"),
+    (re.compile(r"\bmalgr[eè]s\b", re.IGNORECASE), "malgré"),
+    # Infinitif au lieu du participe passé après avoir — "j'ai manger", "il a jouer"...
+    (re.compile(
+        r"\b(j['’]ai|tu\s+as|il\s+a|elle\s+a|on\s+a|nous\s+avons|vous\s+avez|ils\s+ont|elles\s+ont)\s+"
+        r"(mang|jou|regard|parl|mont|donn|pass|arriv|rest|aim|chant|march|travaill|oubli|racont|achet|"
+        r"utilis|essay|continu|commenc|termin|pr[ée]par|appel|demand|gagn|perd|ador|d[ée]test|invit|"
+        r"cuisin|dans|nag|voyag|post|envoy|cherch|trouv|chang|ferm|aid|pleur|tap|frapp|saut)er\b",
+        re.IGNORECASE), lambda m: f"{m.group(1)} {m.group(2)}é"),
+    # "Bien jouer !" en message de félicitation isolé au lieu de "Bien joué !"
+    (re.compile(r"^(?:<@!?\d+>\s*)*bien\s+jouer\b\s*[!.]*\s*$", re.IGNORECASE), "bien joué"),
+    # "o" phonétique à la place de "au" — vraiment ça pique les yeux
+    (re.compile(r"\bo\s+(revoir|secours|final|d[ée]but|bout|moins|pire|mieux|fond|milieu|sujet)\b", re.IGNORECASE),
+     lambda m: f"au {m.group(1)}"),
+    # Retranscriptions phonétiques du son "qu"/"k" et autres — écriture SMS abusive
+    (re.compile(r"\bkoi\b", re.IGNORECASE), "quoi"),
+    (re.compile(r"\bpkoi\b", re.IGNORECASE), "pourquoi"),
+    (re.compile(r"\bkan\b", re.IGNORECASE), "quand"),
+    (re.compile(r"\bkomen(?:t)?\b", re.IGNORECASE), "comment"),
+    (re.compile(r"\beske\b", re.IGNORECASE), "est-ce que"),
+    (re.compile(r"\bo\s*jourd['’]?h?ui\b", re.IGNORECASE), "aujourd'hui"),
+    (re.compile(r"\baujourd(?:hui|ui)\b", re.IGNORECASE), "aujourd'hui"),
+    (re.compile(r"\bdabor\b", re.IGNORECASE), "d'abord"),
+    (re.compile(r"\bbiensur\b", re.IGNORECASE), "bien sûr"),
+]
+
+GRAMMAR_ROAST_LINES = [
+    "💀 {mention} a écrit « {wrong} »... le niveau CE1 est en PLS.",
+    "🚨 Alerte orthographe : {mention} confond encore. C'est chaud, on dit **{correct}**, pas « {wrong} ».",
+    "📚 Quelqu'un peut ramener {mention} à l'école please, on a un souci là.",
+    "😭 « {wrong} » au lieu de **{correct}**... {mention} c'est une agression envers la langue française.",
+    "🔴 SIGNALEMENT : {mention} vient de commettre un crime contre le français avec « {wrong} ».",
+    "📉 Niveau français de {mention} : en chute libre. On dit **{correct}**, pas « {wrong} ».",
+    "🧠 Petit rappel gratuit pour {mention} : c'est **{correct}**, pas « {wrong} ».",
+    "😂 {mention} vient de traumatiser tous les correcteurs orthographiques du serveur.",
+    "🚔 La police de la grammaire débarque chez {mention} pour « {wrong} ».",
+    "👴 Même ta grand-mère écrit mieux que ça, {mention}...",
+    "🎓 {mention}, ton diplôme de français vient d'être révoqué. On dit **{correct}**.",
+    "🩹 Y'a une faute qui saigne encore là, {mention} : **{correct}**, pas « {wrong} ».",
+    "🫡 Respect aux enseignants de {mention}, ils ont fait ce qu'ils ont pu.",
+]
+
+
+async def _maybe_grammar_roast_reaction(message):
+    """Réaction troll (cooldown 3 min par utilisateur) quand un message contient une
+    faute de français emblématique. Répond au message avec une pique aléatoire."""
+    global _grammar_roast_last
+    content = message.content
+    if not content or content.startswith('?'):
+        return
+    now = datetime.now()
+    last = _grammar_roast_last.get(message.author.id)
+    if last and (now - last).total_seconds() < GRAMMAR_ROAST_COOLDOWN_MIN * 60:
+        return
+    for pattern, correction in GRAMMAR_MISTAKE_PATTERNS:
+        match = pattern.search(content)
+        if not match:
+            continue
+        wrong = match.group(0).strip()
+        correct = correction(match) if callable(correction) else correction
+        _grammar_roast_last[message.author.id] = now
+        try:
+            line = random.choice(GRAMMAR_ROAST_LINES).format(
+                mention=message.author.mention, wrong=wrong, correct=correct)
+            await message.reply(line, mention_author=False)
+        except Exception:
+            pass
+        return
+
+
 MAX_FACTORY_WORKERS = 10
 DEFAULT_FACTORY_COSTS = [500, 1000, 2000, 5000, 7500, 10000, 15000, 25000, 55000, 100000]
 FACTORY_HIRE_COOLDOWN_HOURS = 24
@@ -12600,6 +12692,7 @@ async def on_message(message):
     if not message.content.startswith("!"):
         await _maybe_azog_ping_reaction(message)
         await _maybe_dev_ping_reaction(message)
+        await _maybe_grammar_roast_reaction(message)
 
     if await economy_router.handle(message):
         return
