@@ -1082,6 +1082,17 @@ GRAMMAR_ROAST_LINES = [
     "🎓 {mention}, ton diplôme de français vient d'être révoqué. On dit **{correct}**.",
     "🩹 Y'a une faute qui saigne encore là, {mention} : **{correct}**, pas « {wrong} ».",
     "🫡 Respect aux enseignants de {mention}, ils ont fait ce qu'ils ont pu.",
+    "🛂 {mention}, tes papiers viennent de t'être retirés pour cette faute horrible. Direction le CP.",
+    "📛 Urgent : la nationalité française de {mention} est en cours de révocation suite à « {wrong} ».",
+    "🚨 {mention} vient d'être placé en garde à vue par la Brigade Anti-Cacographie pour « {wrong} ».",
+    "⚰️ Molière vient de se retourner trois fois dans sa tombe à cause de {mention}.",
+    "🪪 Carte d'identité de {mention} confisquée : motif « incapable d'écrire », pièce à conviction « {wrong} ».",
+    "🧾 {mention} écope d'une amende pour outrage à la langue française avec « {wrong} ».",
+    "🏫 Convocation immédiate de {mention} au tribunal de l'Académie française. On dit **{correct}**.",
+    "📞 On a appelé l'ambassade, {mention} est prié de rendre son passeport pour « {wrong} ».",
+    "🚁 Un hélicoptère de la police linguistique est en approche vers {mention}.",
+    "⚖️ {mention} risque l'expulsion du groupe WhatsApp familial pour « {wrong} ».",
+    "🩺 On a diagnostiqué {mention} : dyslexie sévère à « {wrong} », pronostic vital engagé.",
 ]
 
 
