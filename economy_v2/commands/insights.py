@@ -32,6 +32,8 @@ def build_fiche_command(service):
         embed.add_field(name="Inventaire",value=f"Minerai : **{inv.get('iron_ore',0):,}**\nLingots : **{inv.get('iron_ingot',0):,}**",inline=False)
         embed.add_field(name="Production et échanges",value=f"Minerai produit : **{data['ore_produced']:,}**\nLingots forgés : **{data['ingots_forged']:,}**\nVolume marché : **{data['market_volume']:,} CR**\nTransports : **{data['transports']:,}**\nLivraisons : **{data['deliveries']:,}**\nContrats : **{data['contracts_completed']:,}**",inline=False)
         embed.add_field(name="Titres",value="\n".join(data["achievement_titles"]) or "Aucun",inline=False)
+        embed.add_field(name="Titre principal",value=data.get("equipped_title") or "Aucun",inline=False)
+        teams=data.get("team_roles",[]);embed.add_field(name="Équipes",value=("\n".join(f"{t['name']} — {t['role']}" for t in teams) or "Aucune")[:1024],inline=False)
         embed.set_footer(text="Détails : ?bilan • progression : ?next")
         await ctx.message.channel.send(embed=embed)
     return command
@@ -110,7 +112,7 @@ def build_notifications_command(service):
         if not ctx.args:
             d=await service.get_notification_preferences(ctx.message.author.id);return await ctx.message.channel.send("Notifications : " + ("activées" if d["enabled"] else "désactivées") + ".")
         category="all" if len(ctx.args)==1 else ctx.args[0].casefold();state=ctx.args[-1].casefold()
-        if state not in {"on","off"} or category not in {"all","market","transport","forge","shipment","contract"}:return await ctx.message.channel.send("Syntaxe : `?notifications [market|transport|forge|shipment|contract] on|off`.")
+        if state not in {"on","off"} or category not in {"all","market","transport","forge","shipment","contract","season","event","team"}:return await ctx.message.channel.send("Syntaxe : `?notifications [market|transport|forge|shipment|contract|season|event|team] on|off`.")
         await service.set_notification_preference(ctx.message.author.id,category,state=="on");await ctx.message.channel.send("✅ Préférence enregistrée.")
     return command
 

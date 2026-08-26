@@ -13,6 +13,7 @@ from economy_v2.database import connect_database, immediate_transaction, initial
 from economy_v2.delivery_config import get_delivery_cooldown_seconds, get_delivery_level, get_delivery_reduction_seconds, get_delivery_xp, get_max_delivery_commission
 from economy_v2.forge_config import MAX_FORGE_UPGRADE_LEVEL, get_forge_count, get_forge_duration_seconds, get_forge_storage_capacity, get_forge_upgrade_cost
 from economy_v2.extended_repository import IndustrialInsightsMixin
+from economy_v2.systems_repository import IndustrialSystemsMixin
 from economy_v2.merchant_config import MAX_MERCHANT_UPGRADE_LEVEL, get_merchant_upgrade_cost, get_trip_duration_seconds, get_truck_capacity
 from economy_v2.mining_config import MAX_MINE_UPGRADE_LEVEL, get_production_rate, get_storage_capacity, get_upgrade_cost
 from economy_v2.models import (AdminCreditResult, Banker, Blacksmith, DeliveryMission, DeliveryProfile, ForgeCollectionResult, ForgeJob, ForgeProcessResult, ForgeUpgradeResult, IndustrialActor, IndustrialCompany, IndustrialContract, IndustrialTransport, IndustrialUser, IngotShipment, InventoryEntry, MarketOrder, MarketOrderResult, MarketSummary, Merchant, MerchantTransportResult, MerchantUpgradeResult, Mine, MineCollectionResult, MineUpgradeResult, ShipmentResult, WorldSale)
@@ -23,7 +24,7 @@ def _now() -> int:
     return int(time.time())
 
 
-class SQLiteIndustrialEconomyRepository(IndustrialInsightsMixin):
+class SQLiteIndustrialEconomyRepository(IndustrialSystemsMixin, IndustrialInsightsMixin):
     """Repository SQLite local ; les mutations critiques utilisent BEGIN IMMEDIATE."""
 
     def __init__(self, database_path: str | Path | None = None) -> None:
@@ -88,6 +89,7 @@ class SQLiteIndustrialEconomyRepository(IndustrialInsightsMixin):
             if user["primary_job"] not in (None, job_type): raise ValueError("primary job mismatch")
             c.execute("UPDATE industrial_users SET primary_job=?,updated_at=? WHERE discord_user_id=?", (job_type, _now(), user_id))
             cur = c.execute("INSERT INTO industrial_companies(owner_discord_user_id,name,job_type) VALUES(?,?,?)", (user_id, name, job_type))
+            c.execute("INSERT INTO industrial_team_members(company_id,discord_user_id,role) VALUES(?,?,'owner')",(cur.lastrowid,user_id))
             return "created", self._company(c.execute("SELECT * FROM industrial_companies WHERE id=?", (cur.lastrowid,)).fetchone())
 
     def _refresh_mine(self, c, user_id):
@@ -97,7 +99,7 @@ class SQLiteIndustrialEconomyRepository(IndustrialInsightsMixin):
         if not company: return "no_miner_company", job, None
         c.execute("INSERT OR IGNORE INTO industrial_mines(owner_discord_user_id,company_id) VALUES(?,?)", (user_id, company["id"]))
         r = c.execute("SELECT * FROM industrial_mines WHERE owner_discord_user_id=?", (user_id,)).fetchone(); now = _now()
-        previous_stock = int(r["stock"]); elapsed = max(0, now-int(r["last_production_at"])); progress = int(r["production_progress"])+elapsed*get_production_rate(int(r["production_level"])); capacity = get_storage_capacity(int(r["storage_level"])); stock = min(capacity, previous_stock+progress//3600); remainder = 0 if stock >= capacity else progress % 3600
+        previous_stock = int(r["stock"]); elapsed = max(0, now-int(r["last_production_at"])); bps=self._event_multiplier(c,"mining_rush",now,True);progress = int(r["production_progress"])+elapsed*get_production_rate(int(r["production_level"]))*bps//10000; capacity = get_storage_capacity(int(r["storage_level"])); stock = min(capacity, previous_stock+progress//3600); remainder = 0 if stock >= capacity else progress % 3600
         c.execute("UPDATE industrial_mines SET stock=?,production_progress=?,last_production_at=?,updated_at=? WHERE owner_discord_user_id=?", (stock, remainder, now, now, user_id))
         if stock > previous_stock:
             c.execute("INSERT INTO industrial_resource_events(actor_id,actor_type,event_type,resource_type,quantity) VALUES(?,'player','mine_production','iron_ore',?)", (self._actor_id(c,user_id), stock-previous_stock))
@@ -253,7 +255,7 @@ class SQLiteIndustrialEconomyRepository(IndustrialInsightsMixin):
         fee=get_max_delivery_commission(quantity);balance=int(c.execute("SELECT credits FROM industrial_users WHERE discord_user_id=?",(user_id,)).fetchone()[0])
         if balance<fee:return "insufficient_commission_funds",balance,None
         if deduct:c.execute("UPDATE industrial_inventory SET quantity=quantity-? WHERE owner_discord_user_id=? AND resource_type=?",(quantity,user_id,resource))
-        c.execute("UPDATE industrial_users SET credits=credits-? WHERE discord_user_id=?",(fee,user_id));now=_now();duration=get_trip_duration_seconds(int(m["truck_speed_level"]));cur=c.execute("INSERT INTO industrial_transports(sender_actor_id,receiver_actor_id,operator_actor_id,sender_company_id,receiver_company_id,merchant_discord_user_id,transport_type,resource_type,quantity,departure_at,arrival_at,original_duration_seconds,current_duration_seconds,truck_slot,request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(operator,receiver,operator,sender_company,receiver_company,user_id,kind,resource,quantity,now,now+duration,duration,duration,slot,request_id));c.execute("INSERT INTO industrial_delivery_missions(transport_id,merchant_actor_id,merchant_discord_user_id,resource_type,quantity,commission_max,escrow_remaining) VALUES(?,?,?,?,?,?,?)",(cur.lastrowid,operator,user_id,resource,quantity,fee,fee));row=c.execute("SELECT t.*,co.name receiver_company_name FROM industrial_transports t LEFT JOIN industrial_companies co ON co.id=t.receiver_company_id WHERE t.id=?",(cur.lastrowid,)).fetchone();return "ok",available-quantity if deduct else available,MerchantTransportResult(self._transport(row))
+        c.execute("UPDATE industrial_users SET credits=credits-? WHERE discord_user_id=?",(fee,user_id));now=_now();duration=get_trip_duration_seconds(int(m["truck_speed_level"]))*self._event_multiplier(c,"logistics_rush",now,True)//10000;cur=c.execute("INSERT INTO industrial_transports(sender_actor_id,receiver_actor_id,operator_actor_id,sender_company_id,receiver_company_id,merchant_discord_user_id,transport_type,resource_type,quantity,departure_at,arrival_at,original_duration_seconds,current_duration_seconds,truck_slot,request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(operator,receiver,operator,sender_company,receiver_company,user_id,kind,resource,quantity,now,now+duration,duration,duration,slot,request_id));c.execute("INSERT INTO industrial_delivery_missions(transport_id,merchant_actor_id,merchant_discord_user_id,resource_type,quantity,commission_max,escrow_remaining) VALUES(?,?,?,?,?,?,?)",(cur.lastrowid,operator,user_id,resource,quantity,fee,fee));row=c.execute("SELECT t.*,co.name receiver_company_name FROM industrial_transports t LEFT JOIN industrial_companies co ON co.id=t.receiver_company_id WHERE t.id=?",(cur.lastrowid,)).fetchone();return "ok",available-quantity if deduct else available,MerchantTransportResult(self._transport(row))
 
     def start_transport(self,user_id,receiver_user_id,resource_type,quantity,request_id):
         with immediate_transaction(self.database_path) as c:
@@ -295,7 +297,7 @@ class SQLiteIndustrialEconomyRepository(IndustrialInsightsMixin):
             available=self._inventory(c,user_id,resource_type)
             if available<quantity:return "insufficient_inventory",job,available,None
             if b.reserved_output+quantity>get_forge_storage_capacity(b.storage_level):return "storage_full",job,available,None
-            now=_now();c.execute("UPDATE industrial_inventory SET quantity=quantity-? WHERE owner_discord_user_id=? AND resource_type=?",(quantity,user_id,resource_type));cur=c.execute("INSERT INTO industrial_forge_jobs(owner_discord_user_id,company_id,forge_slot,resource_input,resource_output,input_quantity,output_quantity,speed_level_at_start,yield_level_at_start,started_at,finishes_at,request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(user_id,b.company_id,slot,resource_type,"iron_ingot",quantity,quantity,b.speed_level,b.yield_level,now,now+get_forge_duration_seconds(quantity,b.speed_level),request_id));row=c.execute("SELECT * FROM industrial_forge_jobs WHERE id=?",(cur.lastrowid,)).fetchone();return "ok",job,available-quantity,ForgeProcessResult(self._forge_job(row),available-quantity)
+            now=_now();c.execute("UPDATE industrial_inventory SET quantity=quantity-? WHERE owner_discord_user_id=? AND resource_type=?",(quantity,user_id,resource_type));duration=get_forge_duration_seconds(quantity,b.speed_level)*10000//self._event_multiplier(c,"industrial_boom",now,True);cur=c.execute("INSERT INTO industrial_forge_jobs(owner_discord_user_id,company_id,forge_slot,resource_input,resource_output,input_quantity,output_quantity,speed_level_at_start,yield_level_at_start,started_at,finishes_at,request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(user_id,b.company_id,slot,resource_type,"iron_ingot",quantity,quantity,b.speed_level,b.yield_level,now,now+duration,request_id));row=c.execute("SELECT * FROM industrial_forge_jobs WHERE id=?",(cur.lastrowid,)).fetchone();return "ok",job,available-quantity,ForgeProcessResult(self._forge_job(row),available-quantity)
 
     def collect_forge_jobs(self,user_id,request_id):
         with immediate_transaction(self.database_path) as c:
@@ -388,11 +390,11 @@ class SQLiteIndustrialEconomyRepository(IndustrialInsightsMixin):
                 return "duplicate",job,None,WorldSale(int(previous["id"]),int(previous["quantity"]),int(previous["unit_price"]),int(previous["total_credits"]),int(previous["balance_after"]),str(previous["created_at"]),True)
             available=self._inventory(c,user_id,"iron_ingot")
             if available<quantity:return "insufficient_inventory",job,available,None
-            volume=int(c.execute("SELECT coalesce(sum(quantity),0) FROM industrial_world_sales WHERE created_at>=?",(_now()-86400,)).fetchone()[0]);price=bounded_world_price(volume);total=price*quantity;c.execute("UPDATE industrial_inventory SET quantity=quantity-? WHERE owner_discord_user_id=? AND resource_type='iron_ingot'",(quantity,user_id));c.execute("UPDATE industrial_users SET credits=credits+? WHERE discord_user_id=?",(total,user_id));balance=int(c.execute("SELECT credits FROM industrial_users WHERE discord_user_id=?",(user_id,)).fetchone()[0]);cur=c.execute("INSERT INTO industrial_world_sales(banker_discord_user_id,banker_company_id,quantity,unit_price,total_credits,balance_after,request_id) VALUES(?,?,?,?,?,?,?)",(user_id,company["id"],quantity,price,total,balance,request_id));c.execute("INSERT INTO industrial_transactions(transaction_type,monetary_effect,actor_id,resource_type,quantity,credits,reference_type,reference_id) VALUES('world_sale','source',?,'iron_ingot',?,?,'world_sale',?)",(self._actor_id(c,user_id),quantity,total,cur.lastrowid));return "ok",job,available-quantity,WorldSale(cur.lastrowid,quantity,price,total,balance,str(_now()))
+            volume=int(c.execute("SELECT coalesce(sum(quantity),0) FROM industrial_world_sales WHERE created_at>=?",(_now()-86400,)).fetchone()[0]);price=bounded_world_price(volume)*self._event_multiplier(c,"world_demand",ensure_horizon=True)//10000;total=price*quantity;c.execute("UPDATE industrial_inventory SET quantity=quantity-? WHERE owner_discord_user_id=? AND resource_type='iron_ingot'",(quantity,user_id));c.execute("UPDATE industrial_users SET credits=credits+? WHERE discord_user_id=?",(total,user_id));balance=int(c.execute("SELECT credits FROM industrial_users WHERE discord_user_id=?",(user_id,)).fetchone()[0]);cur=c.execute("INSERT INTO industrial_world_sales(banker_discord_user_id,banker_company_id,quantity,unit_price,total_credits,balance_after,request_id) VALUES(?,?,?,?,?,?,?)",(user_id,company["id"],quantity,price,total,balance,request_id));c.execute("INSERT INTO industrial_transactions(transaction_type,monetary_effect,actor_id,resource_type,quantity,credits,reference_type,reference_id) VALUES('world_sale','source',?,'iron_ingot',?,?,'world_sale',?)",(self._actor_id(c,user_id),quantity,total,cur.lastrowid));return "ok",job,available-quantity,WorldSale(cur.lastrowid,quantity,price,total,balance,str(_now()))
 
     def get_world_market(self):
         with self._read() as c:
-            r=c.execute("SELECT coalesce(sum(quantity),0),min(unit_price),max(unit_price) FROM industrial_world_sales WHERE created_at>=?",(_now()-86400,)).fetchone();price=bounded_world_price(int(r[0]));return {"current_price":price,"volume_24h":int(r[0]),"low_24h":int(r[1] or price),"high_24h":int(r[2] or price),"change_percent":0.0}
+            r=c.execute("SELECT coalesce(sum(quantity),0),min(unit_price),max(unit_price) FROM industrial_world_sales WHERE created_at>=?",(_now()-86400,)).fetchone();price=bounded_world_price(int(r[0]))*self._event_multiplier(c,"world_demand")//10000;return {"current_price":price,"volume_24h":int(r[0]),"low_24h":int(r[1] or price),"high_24h":int(r[2] or price),"change_percent":0.0}
 
     def get_world_sales(self,user_id):
         with self._read() as c:return [WorldSale(int(r["id"]),int(r["quantity"]),int(r["unit_price"]),int(r["total_credits"]),int(r["balance_after"]),str(r["created_at"])) for r in c.execute("SELECT * FROM industrial_world_sales WHERE banker_discord_user_id=? ORDER BY id DESC LIMIT 20",(user_id,))]
@@ -417,7 +419,7 @@ class SQLiteIndustrialEconomyRepository(IndustrialInsightsMixin):
             if t["status"]!="in_transit" or int(t["arrival_at"])<=now:self._refresh_transports(c);return {"result_status":"arrived"}
             c.execute("INSERT OR IGNORE INTO industrial_delivery_profiles(discord_user_id) VALUES(?)",(user_id,));p=c.execute("SELECT * FROM industrial_delivery_profiles WHERE discord_user_id=?",(user_id,)).fetchone()
             if p["delivery_cooldown_until"] and int(p["delivery_cooldown_until"])>now:return {"result_status":"cooldown"}
-            maximum=get_delivery_reduction_seconds(int(p["delivery_level"]));saved=min(maximum,max(0,int(t["arrival_at"])-now));paid=min(int(m["commission_max"]),int(m["commission_max"])*saved//maximum);refund=int(m["commission_max"])-paid;xp=get_delivery_xp(saved);level=get_delivery_level(int(p["delivery_xp"])+xp);cooldown=now+get_delivery_cooldown_seconds(level)
+            maximum=get_delivery_reduction_seconds(int(p["delivery_level"]));saved=min(maximum,max(0,int(t["arrival_at"])-now));paid=min(int(m["commission_max"]),int(m["commission_max"])*saved//maximum);refund=int(m["commission_max"])-paid;xp=get_delivery_xp(saved)*self._event_multiplier(c,"delivery_bonus",now,True)//10000;level=get_delivery_level(int(p["delivery_xp"])+xp);cooldown=now+get_delivery_cooldown_seconds(level)
             c.execute("UPDATE industrial_transports SET arrival_at=max(?,arrival_at-?),current_duration_seconds=max(0,current_duration_seconds-?) WHERE id=?",(now,saved,saved,t["id"]));c.execute("UPDATE industrial_users SET credits=credits+? WHERE discord_user_id=?",(paid,user_id));merchant=c.execute("SELECT discord_user_id FROM industrial_actors WHERE id=?",(m["merchant_actor_id"],)).fetchone()
             if merchant and merchant[0] is not None:c.execute("UPDATE industrial_users SET credits=credits+? WHERE discord_user_id=?",(refund,merchant[0]))
             c.execute("UPDATE industrial_delivery_profiles SET delivery_xp=delivery_xp+?,delivery_level=?,completed_deliveries=completed_deliveries+1,delivery_cooldown_until=?,updated_at=? WHERE discord_user_id=?",(xp,level,cooldown,now,user_id));c.execute("UPDATE industrial_delivery_missions SET status='accepted',escrow_remaining=0,courier_discord_user_id=?,commission_paid=?,merchant_refund=?,saved_seconds=?,xp_awarded=?,accept_request_id=?,accepted_at=? WHERE id=?",(user_id,paid,refund,saved,xp,request_id,now,mission_id));return {"result_status":"ok","mission_id":mission_id,"saved_seconds":saved,"commission_paid":paid,"merchant_refund":refund,"xp_awarded":xp,"new_level":level,"cooldown_until":cooldown}
@@ -698,16 +700,16 @@ class SQLiteIndustrialEconomyRepository(IndustrialInsightsMixin):
                 (now - 86400,),
             ).fetchone()[0])
             world_history = c.execute("SELECT sum(total_credits)*1.0/nullif(sum(quantity),0) FROM industrial_world_sales WHERE created_at>=?", (now-86400,)).fetchone()[0]
+            mining_bps=self._event_multiplier(c,"mining_rush",now)
             partner_count = int(c.execute("SELECT count(*) FROM industrial_partnerships WHERE (low_user_id=? OR high_user_id=?) AND status='accepted'", (user_id,user_id)).fetchone()[0])
             objective = c.execute("SELECT label.progress,label.target FROM (SELECT progress,target,objective_key FROM industrial_objective_progress WHERE discord_user_id=? AND period_type='daily' AND period_start=? AND completed_at IS NULL ORDER BY target-progress LIMIT 1) label", (user_id, now-now%86400)).fetchone()
+            team_invites=int(c.execute("SELECT count(*) FROM industrial_team_invitations WHERE invitee_discord_user_id=? AND status='pending' AND expires_at>?",(user_id,now)).fetchone()[0])
 
         mine_state = None
         if mine:
             capacity = get_storage_capacity(int(mine["storage_level"]))
             elapsed = max(0, now - int(mine["last_production_at"]))
-            progress = int(mine["production_progress"]) + elapsed * get_production_rate(
-                int(mine["production_level"])
-            )
+            progress = int(mine["production_progress"]) + elapsed * get_production_rate(int(mine["production_level"])) * mining_bps // 10000
             stock = min(capacity, int(mine["stock"]) + progress // 3600)
             mine_state = {
                 "stock": stock,
@@ -715,7 +717,7 @@ class SQLiteIndustrialEconomyRepository(IndustrialInsightsMixin):
                 "storage_level": int(mine["storage_level"]),
                 "production_level": int(mine["production_level"]),
                 "quality_level": int(mine["quality_level"]),
-                "seconds_to_full": max(0, ((capacity-stock)*3600-progress%3600 + get_production_rate(int(mine["production_level"]))-1)//get_production_rate(int(mine["production_level"]))) if stock<capacity else 0,
+                "seconds_to_full": max(0, ((capacity-stock)*3600-progress%3600)*10000//max(1,get_production_rate(int(mine["production_level"]))*mining_bps)) if stock<capacity else 0,
             }
         return {
             "profile_exists": user is not None,
@@ -745,6 +747,7 @@ class SQLiteIndustrialEconomyRepository(IndustrialInsightsMixin):
             "world_average_24h": float(world_history) if world_history else None,
             "partner_count": partner_count,
             "nearest_objective": dict(objective) if objective else None,
+            "team_invitations": team_invites,
         }
 
     def get_economy_stats(self):

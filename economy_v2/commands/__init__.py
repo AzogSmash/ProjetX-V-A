@@ -15,6 +15,8 @@ from economy_v2.commands.insights import (build_adminlog_command, build_achievem
     build_bilan_command, build_economycheck_command, build_fiche_command,
     build_notifications_command, build_objectives_command, build_orders_command,
     build_partners_command, build_rank_command)
+from economy_v2.commands.systems import (build_events_command, build_season_command,
+    build_team_command, build_title_command, build_titles_command)
 from economy_v2.router import EconomyRouter
 from economy_v2.services import IndustrialEconomyService
 
@@ -50,5 +52,13 @@ def register_economy_commands(
         ("indstats", build_bilan_command(service)), ("orders", build_orders_command(service)),
         ("partners", build_partners_command(service)), ("notifications", build_notifications_command(service)),
         ("adminlog", build_adminlog_command(service)), ("economycheck", build_economycheck_command(service)),
+    ):
+        router.register_command(name, handler, track_activity=False)
+    for name, handler in (
+        ("season", build_season_command(service)), ("saison", build_season_command(service)),
+        ("titles", build_titles_command(service)), ("titres", build_titles_command(service)),
+        ("title", build_title_command(service)), ("events", build_events_command(service)),
+        ("evenements", build_events_command(service)), ("equipe", build_team_command(service)),
+        ("crew", build_team_command(service)),
     ):
         router.register_command(name, handler, track_activity=False)

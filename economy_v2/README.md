@@ -27,3 +27,21 @@ par `INDUSTRIAL_BACKUP_ENABLED`. Configuration : `INDUSTRIAL_BACKUP_DIR` (défau
 `INDUSTRIAL_BACKUP_RETENTION` (12, minimum 2). Un snapshot sur `/data` ne protège pas
 contre la suppression du volume Railway ; une destination externe pourra être ajoutée
 ultérieurement sans modifier le format SQLite.
+
+## Saisons, titres, événements et équipes
+
+Les saisons durent 30 jours UTC et ne remettent à zéro que leurs scores. Le score
+provient des productions, transports, ventes mondiales, livraisons et contrats réels ;
+aucun transfert de CR ne donne de points. La finalisation lazy fige les scores et remet
+uniquement des titres et une réputation limitée.
+
+Les événements sont persistés par cycle UTC de six heures. Leurs multiplicateurs sont
+stockés en points de base et contraints entre 0,80 et 1,25. Ils sont appliqués une seule
+fois aux formules existantes lors de la production ou de la création d'une opération.
+Le calendrier déterministe conserve un horizon glissant d'un an et se prolonge de façon
+lazy, transactionnelle et idempotente lorsqu'il reste moins de 30 jours disponibles.
+
+Les rôles d'équipe sont `owner`, `manager` et `employee`. Les permissions V1 sont
+explicites et limitées : aucune ne permet de gérer un wallet personnel, transférer
+librement des actifs ou changer le propriétaire. Les commandes V1 gèrent l'équipe et
+ses consultations ; les actions métier déléguées restent volontairement désactivées.

@@ -87,5 +87,6 @@ async def ecohelp_command(context: EconomyCommandContext) -> None:
         ),
         inline=False,
     )
+    embed.add_field(name="Saisons et entreprise",value="`?season` / `?saison` — Saison et classements\n`?titles` / `?title` — Titres cosmétiques\n`?events` — Événements temporaires\n`?equipe` / `?crew` — Équipe d’entreprise",inline=False)
     embed.set_footer(text="Préfixe réservé à l'économie industrielle : ?")
     await context.message.channel.send(embed=embed)

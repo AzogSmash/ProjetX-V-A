@@ -89,7 +89,7 @@ class MigrationAndBackupTests(unittest.TestCase):
                 version=int(migration.name[:3]);c.executescript("BEGIN IMMEDIATE;\n"+migration.read_text(encoding="utf-8")+f"\nINSERT INTO industrial_schema_version VALUES({version},unixepoch());\nCOMMIT;")
             c.execute("INSERT INTO industrial_users(discord_user_id,credits) VALUES(42,1234)");c.close();initialize_database_sync(path);initialize_database_sync(path)
             with closing(connect_database(path)) as c:
-                self.assertEqual(1234,c.execute("SELECT credits FROM industrial_users WHERE discord_user_id=42").fetchone()[0]);self.assertEqual([1,2,3,4,5],[r[0] for r in c.execute("SELECT version FROM industrial_schema_version ORDER BY version")]);self.assertEqual("ok",c.execute("PRAGMA integrity_check").fetchone()[0]);self.assertEqual([],c.execute("PRAGMA foreign_key_check").fetchall())
+                self.assertEqual(1234,c.execute("SELECT credits FROM industrial_users WHERE discord_user_id=42").fetchone()[0]);self.assertEqual([1,2,3,4,5,6],[r[0] for r in c.execute("SELECT version FROM industrial_schema_version ORDER BY version")]);self.assertEqual("ok",c.execute("PRAGMA integrity_check").fetchone()[0]);self.assertEqual([],c.execute("PRAGMA foreign_key_check").fetchall())
 
     def test_backup_rotation_and_readability(self):
         with tempfile.TemporaryDirectory() as td:
@@ -143,7 +143,7 @@ class RegistryAndEmbedTests(unittest.IsolatedAsyncioTestCase):
                             if kw.arg=="name" and isinstance(kw.value,ast.Constant):name=kw.value.value
                             if kw.arg=="aliases" and isinstance(kw.value,(ast.List,ast.Tuple)):aliases=[x.value for x in kw.value.elts if isinstance(x,ast.Constant)]
                         legacy.add(name.casefold());legacy.update(x.casefold() for x in aliases)
-        names={"fiche","cv","rank","achievements","succes","objectives","objectifs","bilan","indstats","partners","orders","notifications","adminlog","economycheck"}
+        names={"fiche","cv","rank","achievements","succes","objectives","objectifs","bilan","indstats","partners","orders","notifications","adminlog","economycheck","season","saison","titles","titres","title","events","evenements","equipe","crew"}
         self.assertFalse(names & legacy);self.assertIn("stats",legacy)
 
     def test_next_still_limits_six(self):

@@ -219,6 +219,8 @@ def build_recommendations(snapshot: dict) -> list[tuple[int, str, str, str]]:
         _add(recommendations, 48, "🎯 Objectif quotidien proche", f"Il te manque **{missing:,}** unité(s) pour le terminer.", "?objectives")
     if snapshot.get("partner_count"):
         _add(recommendations, 35, "🤝 Réseau industriel", f"**{snapshot['partner_count']}** partenaire(s) peuvent faciliter ta prochaine étape.", "?partners")
+    if snapshot.get("team_invitations"):
+        _add(recommendations, 118, "👥 Invitation d’entreprise", f"**{snapshot['team_invitations']}** invitation(s) t’attendent.", "?equipe")
 
     recommendations.sort(key=lambda item: (-item[0], item[1], item[3]))
     return recommendations[:MAX_RECOMMENDATIONS]
