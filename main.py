@@ -1713,6 +1713,47 @@ def save_data(force: bool = False):
     except Exception as e:
         print(f"Erreur lors de la sauvegarde des données: {e}")
 
+_LOG_MENTION_RE = re.compile(r"<@!?(\d+)>")
+
+
+async def _resolve_log_mentions(guild, text):
+    """Remplace chaque mention <@id> par 'Pseudo (<@id>)' dans un texte destiné à un
+    salon de logs/privé. Une mention seule ne se résout pas de façon fiable dans un
+    embed : chaque client Discord doit le faire depuis son propre cache local de
+    membres, jamais alimenté sur mobile et pas toujours sur desktop pour les gros
+    serveurs — donc on résout le pseudo nous-mêmes côté bot plutôt que de compter sur
+    le client du lecteur. Utilisé par send_log_message/_admin_log/_casino_log ; ne
+    touche pas aux mentions de rôle (<@&id>). Voir aussi _absence_member_label, même
+    logique dédiée aux logs d'absence."""
+    if not text or "<@" not in text or guild is None:
+        return text
+    ids = {int(uid) for uid in _LOG_MENTION_RE.findall(text)}
+    if not ids:
+        return text
+    labels = {}
+    for uid in ids:
+        member = guild.get_member(uid)
+        if member is None:
+            try:
+                member = await guild.fetch_member(uid)
+            except Exception:
+                member = None
+        if member:
+            labels[uid] = member.display_name
+        else:
+            try:
+                user = await bot.fetch_user(uid)
+                labels[uid] = f"{user.name} (parti)"
+            except Exception:
+                labels[uid] = "utilisateur inconnu"
+
+    def _sub(match):
+        label = labels.get(int(match.group(1)))
+        return f"{label} ({match.group(0)})" if label else match.group(0)
+
+    return _LOG_MENTION_RE.sub(_sub, text)
+
+
 # --- Fonction utilitaire pour envoyer des messages de log ---
 async def send_log_message(guild, channel_id, title, description, color, fields=None):
     if not channel_id:
@@ -1724,6 +1765,7 @@ async def send_log_message(guild, channel_id, title, description, color, fields=
         print(f"Le salon de logs avec l'ID {channel_id} est introuvable pour le log '{title}'.")
         return
 
+    description = await _resolve_log_mentions(guild, description)
     embed = discord.Embed(
         title=title,
         description=description,
@@ -1734,6 +1776,7 @@ async def send_log_message(guild, channel_id, title, description, color, fields=
         for name, value, inline in fields:
             if not isinstance(value, str):
                 value = str(value)
+            value = await _resolve_log_mentions(guild, value)
             embed.add_field(name=name, value=value, inline=inline)
 
     try:
@@ -11733,6 +11776,29 @@ def _is_absence_staff(member: discord.Member) -> bool:
 ABSENCE_TYPE_LABELS = {"partielle": "🟡 Partielle (temps de jeu réduit)", "totale": "🔴 Totale (aucune connexion)"}
 
 
+async def _absence_member_label(guild: discord.Guild, discord_id: str) -> str:
+    """Nom affichable pour un champ d'embed de log d'absence. Une mention <@id>
+    seule ne se résout pas de façon fiable dans un embed (chaque client Discord
+    doit la résoudre depuis son propre cache local de membres, jamais alimenté
+    sur mobile et pas toujours sur desktop pour les gros serveurs) — donc on
+    résout le pseudo nous-mêmes côté bot et on l'écrit en texte brut, qui
+    s'affiche toujours quel que soit le client du lecteur."""
+    uid = int(discord_id)
+    member = guild.get_member(uid)
+    if member is None:
+        try:
+            member = await guild.fetch_member(uid)
+        except discord.NotFound:
+            member = None
+    if member:
+        return f"{member.display_name} (<@{uid}>)"
+    try:
+        user = await bot.fetch_user(uid)
+        return f"{user.name} — a quitté le serveur (<@{uid}>)"
+    except discord.NotFound:
+        return f"Utilisateur inconnu (ID `{uid}`)"
+
+
 async def _create_absence_apply(
     discord_id: str, club: str, absence_type: str, start_raw: str, return_raw: str | None,
     reason: str, missed_event: str | None, declared_by: discord.Member | None = None,
@@ -11763,7 +11829,7 @@ async def _create_absence_apply(
     if guild:
         await _sync_absence_role(guild, discord_id)
         fields = [
-            ("Membre", f"<@{discord_id}>", True),
+            ("Membre", await _absence_member_label(guild, discord_id), True),
             ("Club", club, True),
             ("Type", ABSENCE_TYPE_LABELS.get(absence_type, absence_type), True),
             ("Début", start_date.strftime("%d/%m/%Y"), True),
@@ -11823,7 +11889,7 @@ async def _update_absence_apply(
         await _sync_absence_role(guild, absence["discord_id"])
         fields = [
             ("Absence", f"#{absence_id}", True),
-            ("Membre", f"<@{absence['discord_id']}>", True),
+            ("Membre", await _absence_member_label(guild, absence['discord_id']), True),
             ("Club", absence["club"], True),
             ("Type", ABSENCE_TYPE_LABELS.get(absence_type, absence_type), True),
             ("Modifiée par", actor.mention, True),
@@ -11850,7 +11916,7 @@ async def _delete_absence_apply(absence_id: int, actor: discord.Member):
         await _sync_absence_role(guild, absence["discord_id"])
         fields = [
             ("Absence", f"#{absence_id}", True),
-            ("Membre", f"<@{absence['discord_id']}>", True),
+            ("Membre", await _absence_member_label(guild, absence['discord_id']), True),
             ("Club", absence["club"], True),
             ("Supprimée par", actor.mention, True),
         ]
@@ -13152,6 +13218,7 @@ async def _admin_log(guild, title: str, description: str, color=0xe74c3c, author
     ch = guild.get_channel(ADMIN_LOG_CHANNEL_ID)
     if not ch:
         return
+    description = await _resolve_log_mentions(guild, description)
     embed = discord.Embed(title=f"🔐 {title}", description=description, color=color, timestamp=discord.utils.utcnow())
     if author:
         embed.set_footer(text=f"Par {author.display_name} ({author.id})", icon_url=author.display_avatar.url)
@@ -13170,6 +13237,7 @@ async def _casino_log(guild, title: str, description: str, color=0x2ecc71, autho
     ch = guild.get_channel(CASINO_LOG_CHANNEL_ID)
     if not ch:
         return
+    description = await _resolve_log_mentions(guild, description)
     embed = discord.Embed(title=f"🪙 {title}", description=description, color=color, timestamp=discord.utils.utcnow())
     if author:
         embed.set_footer(text=f"Par {author.display_name} ({author.id})", icon_url=author.display_avatar.url)
