@@ -14858,6 +14858,10 @@ async def _refresh_family_clubs_panel() -> tuple[bool, str]:
         else:
             msg = await channel.send(embed=embed)
             new_ids.append(msg.id)
+        # Pacing : Discord rate-limite l'édition/l'envoi de messages à ~5 requêtes/5s
+        # par salon — sans délai, éditer 1 header + un message par clan à la suite
+        # déclenche des 429 en rafale (observé en prod au démarrage du bot).
+        await asyncio.sleep(1.1)
 
     # Messages en trop (un clan retiré de la famille depuis le dernier
     # rafraîchissement) — supprimés pour ne pas laisser un roster périmé traîner.
@@ -14865,6 +14869,7 @@ async def _refresh_family_clubs_panel() -> tuple[bool, str]:
         try:
             leftover = await channel.fetch_message(old_id)
             await leftover.delete()
+            await asyncio.sleep(1.1)
         except (discord.NotFound, discord.Forbidden):
             pass
 
@@ -15375,64 +15380,77 @@ async def check_bs_season():
     semaines de suivi (incident du 20/07/2026 : cette valeur avait fini remise à "aujourd'hui"
     au lieu du vrai début de saison, sans doute suite à un redémarrage où bs_season_month
     était retombé à None). On calcule donc maintenant la date correcte de façon déterministe
-    (1er jeudi 10h) plutôt que d'utiliser `today` en dur, et on revalide/recale à chaque tick."""
-    await bot.wait_until_ready()
-    if not db_bs.list_family_clubs():
-        return
+    (1er jeudi 10h) plutôt que d'utiliser `today` en dur, et on revalide/recale à chaque tick.
 
-    now = datetime.now(BS_SEASON_TZ)
-    current_month = now.strftime('%Y-%m')
-    today = now.strftime('%Y-%m-%d')
+    Try/except sur tout le corps : même raisonnement que sync_family_ranked/
+    sync_discord_members/sync_trophy_history (@tasks.loop arrête la boucle
+    pour de bon à la première exception non rattrapée) — constaté le
+    07/09/2026, season_state resté bloqué sur "2026-08" alors que le reset
+    de septembre (3/09, 1er jeudi) était passé depuis 4 jours.
 
-    state = db_bs.get_season_state()
-    season_month = state['season_month']
-    season_start_date = state['season_start_date']
+    Deuxième bug corrigé le même jour : le rattrapage ne se déclenchait
+    qu'à partir du 8 du mois (`now.day > 7`) — donc même une fois la boucle
+    réparée, un retard détecté un 4, 5, 6 ou 7 du mois serait resté bloqué
+    jusqu'au 8. Remplacé par une comparaison directe "quelle est la vraie
+    saison en cours, là, maintenant" (_most_recent_season_start) contre
+    l'état stocké — se corrige immédiatement, peu importe le jour du mois."""
+    try:
+        await bot.wait_until_ready()
+        if not db_bs.list_family_clubs():
+            return
 
-    if season_month is None:
-        start = _most_recent_season_start(now)
-        new_month = start.strftime('%Y-%m')
-        db_bs.set_season_state(new_month, start.strftime('%Y-%m-%d'))
+        now = datetime.now(BS_SEASON_TZ)
+        state = db_bs.get_season_state()
+        season_month = state['season_month']
+        season_start_date = state['season_start_date']
+
+        if season_month is None:
+            start = _most_recent_season_start(now)
+            new_month = start.strftime('%Y-%m')
+            db_bs.set_season_state(new_month, start.strftime('%Y-%m-%d'))
+            latest = db_bs.get_latest_trophies()
+            db_bs.save_season_baseline(new_month, {p['tag']: p['trophies'] for p in latest})
+            return
+
+        correct_start = _most_recent_season_start(now)
+        correct_month = correct_start.strftime('%Y-%m')
+        correct_start_date = correct_start.strftime('%Y-%m-%d')
+
+        if correct_month == season_month:
+            # Toujours dans la même saison détectée — filet de sécurité : si
+            # le pointeur a dérivé de la vraie date de bascule (cf. docstring),
+            # on le recale silencieusement sans repasser par l'archivage.
+            if season_start_date != correct_start_date:
+                logging.warning(
+                    "check_bs_season: bs_season_start_date incohérent (%s), recalage sur %s",
+                    season_start_date, correct_start_date,
+                )
+                db_bs.set_season_state(season_month, correct_start_date)
+            return
+
+        # correct_month != season_month : une nouvelle saison a démarré depuis
+        # le dernier season_month connu, quel que soit le jour du mois actuel.
+        ended_month = season_month
+        start_date = season_start_date or now.strftime('%Y-%m-%d')
+        entries = db_bs.get_season_evolution(start_date, ended_month)
+        archive = [
+            {'tag': e['tag'], 'name': e['name'], 'club': e['club'], 'start': e['start'], 'end': e['end'], 'delta': e['delta']}
+            for e in entries
+        ]
+        if archive:
+            db_bs.archive_season(ended_month, archive)
+
+        db_bs.set_season_state(correct_month, correct_start_date)
+
+        # Capture immédiate de la valeur de départ de la nouvelle saison (voir
+        # save_season_baseline) — sans ça, "start" dépendrait du premier sync
+        # quotidien classique, potentiellement écrasé plusieurs fois avant que
+        # quiconque ne le consulte (incident du 07/08/2026).
         latest = db_bs.get_latest_trophies()
-        db_bs.save_season_baseline(new_month, {p['tag']: p['trophies'] for p in latest})
-        return
-
-    if season_month == current_month:
-        # Filet de sécurité : si le pointeur a dérivé de la vraie date de bascule
-        # (cf. docstring), on le recale silencieusement sans repasser par
-        # l'archivage puisqu'on reste dans le même mois de saison.
-        correct_start_date = _most_recent_season_start(now).strftime('%Y-%m-%d')
-        if season_start_date != correct_start_date:
-            logging.warning(
-                "check_bs_season: bs_season_start_date incohérent (%s), recalage sur %s",
-                season_start_date, correct_start_date,
-            )
-            db_bs.set_season_state(season_month, correct_start_date)
-        return
-
-    is_first_thursday = now.day <= 7 and now.weekday() == 3
-    if not ((is_first_thursday and now.hour >= 10) or now.day > 7):
-        return
-
-    ended_month = season_month
-    start_date = season_start_date or today
-    entries = db_bs.get_season_evolution(start_date, ended_month)
-    archive = [
-        {'tag': e['tag'], 'name': e['name'], 'club': e['club'], 'start': e['start'], 'end': e['end'], 'delta': e['delta']}
-        for e in entries
-    ]
-    if archive:
-        db_bs.archive_season(ended_month, archive)
-
-    new_start = _most_recent_season_start(now)
-    new_month = new_start.strftime('%Y-%m')
-    db_bs.set_season_state(new_month, new_start.strftime('%Y-%m-%d'))
-
-    # Capture immédiate de la valeur de départ de la nouvelle saison (voir
-    # save_season_baseline) — sans ça, "start" dépendrait du premier sync
-    # quotidien classique, potentiellement écrasé plusieurs fois avant que
-    # quiconque ne le consulte (incident du 07/08/2026).
-    latest = db_bs.get_latest_trophies()
-    db_bs.save_season_baseline(new_month, {p['tag']: p['trophies'] for p in latest})
+        db_bs.save_season_baseline(correct_month, {p['tag']: p['trophies'] for p in latest})
+        logging.info("[check_bs_season] nouvelle saison détectée : %s (début %s)", correct_month, correct_start_date)
+    except Exception:
+        logging.error("[check_bs_season] exception non rattrapée", exc_info=True)
 
 
 @tasks.loop(hours=4)
@@ -15930,41 +15948,48 @@ async def cmd_carte(ctx):
 @tasks.loop(hours=6)
 async def check_ranked_season():
     """Archive et remet à zéro le classement ranked 1v1 au changement de mois.
-    Se base sur le mois stocké (pas l'heure exacte) pour rattraper un redémarrage manqué."""
-    await bot.wait_until_ready()
-    global ranked_season_month
-    current_month = datetime.now().strftime('%Y-%m')
-    if ranked_season_month is None:
+    Se base sur le mois stocké (pas l'heure exacte) pour rattraper un redémarrage manqué.
+
+    Try/except sur tout le corps : même raisonnement que check_bs_season et
+    les autres tâches de fond (@tasks.loop arrête la boucle pour de bon à la
+    première exception non rattrapée), audit du 07/09/2026."""
+    try:
+        await bot.wait_until_ready()
+        global ranked_season_month
+        current_month = datetime.now().strftime('%Y-%m')
+        if ranked_season_month is None:
+            ranked_season_month = current_month
+            save_data()
+            return
+        if current_month == ranked_season_month:
+            return
+
+        ended_month = ranked_season_month
+        db_bs.archive_ranked_1v1_season(ended_month, {
+            uid: {'points': p.get('points', 0), 'wins': p.get('wins', 0), 'losses': p.get('losses', 0)}
+            for uid, p in ranked_1v1.items() if p.get('wins', 0) or p.get('losses', 0)
+        })
+        for p in ranked_1v1.values():
+            p['points'] = 0
+            p['wins']   = 0
+            p['losses'] = 0
         ranked_season_month = current_month
         save_data()
-        return
-    if current_month == ranked_season_month:
-        return
 
-    ended_month = ranked_season_month
-    db_bs.archive_ranked_1v1_season(ended_month, {
-        uid: {'points': p.get('points', 0), 'wins': p.get('wins', 0), 'losses': p.get('losses', 0)}
-        for uid, p in ranked_1v1.items() if p.get('wins', 0) or p.get('losses', 0)
-    })
-    for p in ranked_1v1.values():
-        p['points'] = 0
-        p['wins']   = 0
-        p['losses'] = 0
-    ranked_season_month = current_month
-    save_data()
-
-    announcement = (
-        f"🏆 **Nouvelle saison ranked 1v1 !**\n"
-        f"Le classement de **{_r1v1_month_label(ended_month)}** est archivé "
-        f"(consultable via `!classement_1v1`) — tout le monde repart de **0 point**."
-    )
-    for guild in bot.guilds:
-        log_ch = guild.get_channel(RANKED_LOG_CHANNEL_ID)
-        if log_ch:
-            try:
-                await log_ch.send(announcement)
-            except Exception:
-                pass
+        announcement = (
+            f"🏆 **Nouvelle saison ranked 1v1 !**\n"
+            f"Le classement de **{_r1v1_month_label(ended_month)}** est archivé "
+            f"(consultable via `!classement_1v1`) — tout le monde repart de **0 point**."
+        )
+        for guild in bot.guilds:
+            log_ch = guild.get_channel(RANKED_LOG_CHANNEL_ID)
+            if log_ch:
+                try:
+                    await log_ch.send(announcement)
+                except Exception:
+                    pass
+    except Exception:
+        logging.error("[check_ranked_season] exception non rattrapée", exc_info=True)
 
 
 async def _r1v1_set_role(guild, uid: int, active: bool):
@@ -16993,21 +17018,28 @@ async def check_casino_season():
     check_ranked_season (duels), indépendant des saisons Brawl Stars. Archive d'abord
     dans Supabase (voir db_bs.archive_casino_season) : avant le 29/07/2026, ce reset
     effaçait tout sans rien garder nulle part, contrairement au reset 1v1 qui, lui,
-    archivait déjà (incident repéré lors d'un audit des systèmes de saison)."""
-    await bot.wait_until_ready()
-    global casino_season_month
-    current_month = datetime.now().strftime('%Y-%m')
-    if casino_season_month is None:
+    archivait déjà (incident repéré lors d'un audit des systèmes de saison).
+
+    Try/except sur tout le corps : même raisonnement que les autres tâches de
+    fond (@tasks.loop arrête la boucle pour de bon à la première exception
+    non rattrapée), audit du 07/09/2026."""
+    try:
+        await bot.wait_until_ready()
+        global casino_season_month
+        current_month = datetime.now().strftime('%Y-%m')
+        if casino_season_month is None:
+            casino_season_month = current_month
+            save_data()
+            return
+        if current_month == casino_season_month:
+            return
+
+        db_bs.archive_casino_season(casino_season_month, {str(uid): amount for uid, amount in coins.items() if amount > 0})
+        _reset_casino_state()
         casino_season_month = current_month
         save_data()
-        return
-    if current_month == casino_season_month:
-        return
-
-    db_bs.archive_casino_season(casino_season_month, {str(uid): amount for uid, amount in coins.items() if amount > 0})
-    _reset_casino_state()
-    casino_season_month = current_month
-    save_data()
+    except Exception:
+        logging.error("[check_casino_season] exception non rattrapée", exc_info=True)
 
 
 @bot.command(name="reset_duels")
