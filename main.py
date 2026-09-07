@@ -13928,6 +13928,7 @@ async def _bs_fetch_ranked_pts(session: aiohttp.ClientSession, clean_tag: str):
     contient pas ces champs — seul l'appel /players par joueur les expose). _bs_fetch_player
     a déjà son payload et appelle _bs_extract_ranked directement, sans passer par ici."""
     if not BRAWLSTARS_API_KEY:
+        logging.warning("[_bs_fetch_ranked_pts] BRAWLSTARS_API_KEY absente")
         return None, None, None, None, None
     headers = {"Authorization": f"Bearer {BRAWLSTARS_API_KEY}", "Accept": "application/json"}
     try:
@@ -13935,9 +13936,16 @@ async def _bs_fetch_ranked_pts(session: aiohttp.ClientSession, clean_tag: str):
             f"{BS_API_BASE}/players/%23{clean_tag}", headers=headers, timeout=aiohttp.ClientTimeout(total=10)
         ) as resp:
             if resp.status != 200:
+                # Pas de log par défaut (bruyant : 300+ appels par passage de
+                # sync_family_ranked) — seulement si un statut revient de façon
+                # anormalement fréquente, à surveiller via les warnings groupés
+                # de sync_family_ranked (voir compteur `failed` là-bas).
+                if resp.status in (403, 429):
+                    logging.warning("[_bs_fetch_ranked_pts] HTTP %d pour #%s", resp.status, clean_tag)
                 return None, None, None, None, None
             player = await resp.json(content_type=None)
-    except Exception:
+    except Exception as e:
+        logging.warning("[_bs_fetch_ranked_pts] erreur réseau pour #%s: %s: %s", clean_tag, type(e).__name__, e)
         return None, None, None, None, None  # Rang classé indisponible — pas bloquant pour l'appelant
     return _bs_extract_ranked(player)
 
@@ -15433,32 +15441,48 @@ async def sync_family_ranked():
     Fait exprès de ne PAS tourner à chaque commande : avec ~150 membres, ça reste un appel
     /players officiel par personne (la liste de membres d'un clan ne contient pas le rang
     classé), donc interroger tout le monde à la demande serait lent et solliciterait
-    inutilement l'API à chaque fois qu'un membre tape la commande."""
-    clubs = db_bs.list_family_clubs()
-    if not clubs:
-        return
+    inutilement l'API à chaque fois qu'un membre tape la commande.
 
-    new_cache = []
-    async with aiohttp.ClientSession() as session:
-        for club in clubs:
-            data, err = await _bs_fetch_club(club['tag'])
-            if err:
-                continue
-            for m in data['members']:
-                if not m['tag']:
+    Tout le corps est dans un try/except : @tasks.loop de discord.py arrête
+    la boucle DÉFINITIVEMENT (silencieusement, jusqu'au prochain redémarrage
+    du bot) à la première exception non rattrapée — constaté le 24/08/2026,
+    bs_ranked_cache vide alors que le bot avait redémarré plusieurs fois
+    récemment, donc pas juste "pas encore eu le temps de tourner"."""
+    try:
+        clubs = db_bs.list_family_clubs()
+        if not clubs:
+            return
+
+        new_cache = []
+        failed = 0
+        async with aiohttp.ClientSession() as session:
+            for club in clubs:
+                data, err = await _bs_fetch_club(club['tag'])
+                if err:
                     continue
-                ranked_pts, ranked_tier, highest_ranked_pts, highest_ranked_tier, highest_ranked_rank = await _bs_fetch_ranked_pts(session, m['tag'])
-                if ranked_pts is not None:
-                    new_cache.append({
-                        'tag': m['tag'], 'name': m['name'], 'club': data['name'],
-                        'ranked_pts': ranked_pts, 'ranked_tier': ranked_tier,
-                        'highest_ranked_pts': highest_ranked_pts, 'highest_ranked_tier': highest_ranked_tier,
-                        'highest_ranked_rank': highest_ranked_rank,
-                    })
-                await asyncio.sleep(0.6)
+                for m in data['members']:
+                    if not m['tag']:
+                        continue
+                    ranked_pts, ranked_tier, highest_ranked_pts, highest_ranked_tier, highest_ranked_rank = await _bs_fetch_ranked_pts(session, m['tag'])
+                    if ranked_pts is not None:
+                        new_cache.append({
+                            'tag': m['tag'], 'name': m['name'], 'club': data['name'],
+                            'ranked_pts': ranked_pts, 'ranked_tier': ranked_tier,
+                            'highest_ranked_pts': highest_ranked_pts, 'highest_ranked_tier': highest_ranked_tier,
+                            'highest_ranked_rank': highest_ranked_rank,
+                        })
+                    else:
+                        failed += 1
+                    await asyncio.sleep(0.6)
 
-    if new_cache:
-        db_bs.replace_ranked_cache(new_cache)
+        if failed:
+            logging.warning("[sync_family_ranked] %d appel(s) /players sans résultat sur ce passage", failed)
+        if new_cache:
+            db_bs.replace_ranked_cache(new_cache)
+        else:
+            logging.warning("[sync_family_ranked] cache vide sur ce passage (%d échecs) — bs_ranked_cache non touché", failed)
+    except Exception:
+        logging.error("[sync_family_ranked] exception non rattrapée", exc_info=True)
 
 
 @tasks.loop(hours=1)
@@ -15467,45 +15491,58 @@ async def sync_trophy_history():
     de clans (par tag Brawl Stars, pas besoin de !bslink) pour alimenter !evolution_trophees.
     Une seule entrée par jour est conservée (upsert idempotent côté Supabase, pas de doublon) —
     tourner plus souvent rend juste la valeur de fin de saison archivée par check_bs_season plus
-    précise. Réutilise _bs_fetch_club (déjà appelé par sync_family_ranked)."""
-    clubs = db_bs.list_family_clubs()
-    if not clubs:
-        return
+    précise. Réutilise _bs_fetch_club (déjà appelé par sync_family_ranked).
 
-    # Paris, comme check_bs_season/BS_SEASON_TZ — datetime.now() nu suivait
-    # le fuseau du serveur (UTC sur Railway), décalant la bascule du jour de
-    # ~2h par rapport à l'heure de Paris utilisée partout ailleurs (trouvé le
-    # 07/08/2026 : la nouvelle ligne quotidienne, donc le premier delta
-    # pusheur visible d'une saison, apparaissait avec ce retard).
-    today = datetime.now(BS_SEASON_TZ).strftime('%Y-%m-%d')
-    synced_club_tags = []
-    all_current_tags = []
-    for club in clubs:
-        data, err = await _bs_fetch_club(club['tag'])
-        if err:
-            continue
+    Try/except sur tout le corps : même raisonnement que sync_family_ranked/
+    sync_discord_members (@tasks.loop arrête la boucle pour de bon à la
+    première exception non rattrapée) — constaté le 24/08/2026, ~40% des
+    joueurs (128/323) sans club_tag en base. Bonne nouvelle : cette tâche est
+    auto-réparatrice — upsert_members_snapshot réassocie le bon club_tag à
+    chaque membre présent à chaque passage réussi, donc un simple retour à
+    un fonctionnement fiable de la boucle suffit à corriger les faux
+    "n'est plus dans un club" au prochain passage, sans script de réparation."""
+    try:
+        clubs = db_bs.list_family_clubs()
+        if not clubs:
+            return
 
-        bs_family_club_details[club['tag']] = {
-            'name': data['name'],
-            'description': data.get('description', ''),
-            'type': data.get('type', 'open'),
-            'requiredTrophies': data.get('requiredTrophies', 0),
-            'trophies': data['trophies'],
-            'members': [
-                {'tag': m['tag'], 'name': m['name'], 'trophies': m['trophies'], 'role': m.get('role', 'member')}
-                for m in data['members'] if m['tag']
-            ],
-        }
+        # Paris, comme check_bs_season/BS_SEASON_TZ — datetime.now() nu suivait
+        # le fuseau du serveur (UTC sur Railway), décalant la bascule du jour de
+        # ~2h par rapport à l'heure de Paris utilisée partout ailleurs (trouvé le
+        # 07/08/2026 : la nouvelle ligne quotidienne, donc le premier delta
+        # pusheur visible d'une saison, apparaissait avec ce retard).
+        today = datetime.now(BS_SEASON_TZ).strftime('%Y-%m-%d')
+        synced_club_tags = []
+        all_current_tags = []
+        for club in clubs:
+            data, err = await _bs_fetch_club(club['tag'])
+            if err:
+                logging.warning("[sync_trophy_history] clan #%s injoignable ce passage : %s", club['tag'], err)
+                continue
 
-        db_bs.upsert_members_snapshot(today, club['tag'], data['name'], data['members'])
-        synced_club_tags.append(club['tag'])
-        all_current_tags.extend(m['tag'] for m in data['members'] if m['tag'])
-        await asyncio.sleep(0.3)
+            bs_family_club_details[club['tag']] = {
+                'name': data['name'],
+                'description': data.get('description', ''),
+                'type': data.get('type', 'open'),
+                'requiredTrophies': data.get('requiredTrophies', 0),
+                'trophies': data['trophies'],
+                'members': [
+                    {'tag': m['tag'], 'name': m['name'], 'trophies': m['trophies'], 'role': m.get('role', 'member')}
+                    for m in data['members'] if m['tag']
+                ],
+            }
 
-    # Nettoie les joueurs partis d'un clan de la famille sans en rejoindre un
-    # autre suivi — seulement pour les clans synchronisés avec succès cette
-    # passe, pour ne jamais effacer à tort les membres d'un clan en échec.
-    db_bs.clear_stale_club_members(synced_club_tags, all_current_tags)
+            db_bs.upsert_members_snapshot(today, club['tag'], data['name'], data['members'])
+            synced_club_tags.append(club['tag'])
+            all_current_tags.extend(m['tag'] for m in data['members'] if m['tag'])
+            await asyncio.sleep(0.3)
+
+        # Nettoie les joueurs partis d'un clan de la famille sans en rejoindre un
+        # autre suivi — seulement pour les clans synchronisés avec succès cette
+        # passe, pour ne jamais effacer à tort les membres d'un clan en échec.
+        db_bs.clear_stale_club_members(synced_club_tags, all_current_tags)
+    except Exception:
+        logging.error("[sync_trophy_history] exception non rattrapée", exc_info=True)
 
 
 @tasks.loop(minutes=15)
@@ -15513,22 +15550,33 @@ async def sync_discord_members():
     """Miroir dans Supabase de l'état réel du serveur Discord (ID + rôles + permission
     admin de chaque membre) — alimente la résolution du niveau d'accès côté site (invité /
     membre de clan / staff / admin). Le site ne connaît jamais les rôles Discord autrement
-    que via cette table : pas de scope OAuth supplémentaire, pas de token qui expire."""
-    await bot.wait_until_ready()
-    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
-    if guild is None:
-        return
-    members = [
-        {
-            'discord_id': str(m.id),
-            'username': m.name,
-            'role_ids': [str(r.id) for r in m.roles if r.id != guild.id],
-            'is_admin': m.guild_permissions.administrator,
-        }
-        for m in guild.members if not m.bot
-    ]
-    if members:
-        db_members.sync_members(members)
+    que via cette table : pas de scope OAuth supplémentaire, pas de token qui expire.
+
+    Try/except sur tout le corps : même raisonnement que sync_family_ranked
+    (@tasks.loop arrête la boucle pour de bon à la première exception non
+    rattrapée) — constaté le 24/08/2026, discord_members à 0 ligne malgré
+    plusieurs redémarrages récents du bot."""
+    try:
+        await bot.wait_until_ready()
+        guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+        if guild is None:
+            logging.warning("[sync_discord_members] guild introuvable (BS_FAMILY_GUILD_ID=%s)", BS_FAMILY_GUILD_ID)
+            return
+        members = [
+            {
+                'discord_id': str(m.id),
+                'username': m.name,
+                'role_ids': [str(r.id) for r in m.roles if r.id != guild.id],
+                'is_admin': m.guild_permissions.administrator,
+            }
+            for m in guild.members if not m.bot
+        ]
+        if members:
+            db_members.sync_members(members)
+        else:
+            logging.warning("[sync_discord_members] guild.members vide (%d membres en cache) — rien à synchroniser", len(guild.members))
+    except Exception:
+        logging.error("[sync_discord_members] exception non rattrapée", exc_info=True)
 
 
 @bot.hybrid_command(name="classement_ranked_famille", aliases=["crf", "top_ranked_famille"])
