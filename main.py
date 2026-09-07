@@ -1789,55 +1789,63 @@ async def send_log_message(guild, channel_id, title, description, color, fields=
 # --- Tâche en arrière-plan pour vérifier les mutes expirés ---
 @tasks.loop(minutes=1)
 async def check_mutes():
-    await bot.wait_until_ready()
-    current_time = datetime.now()
+    """Toute la boucle est protégée par un try/except global : sans ça, une
+    exception non rattrapée (ex: Supabase/save_data en carafe) arrêterait
+    @tasks.loop DÉFINITIVEMENT — plus aucun démute automatique jusqu'au
+    prochain redémarrage du bot, potentiellement des heures/jours de mute
+    en trop pour des membres. Voir même raisonnement que sync_family_ranked."""
+    try:
+        await bot.wait_until_ready()
+        current_time = datetime.now()
 
-    guild_ids_to_unmute = []
+        guild_ids_to_unmute = []
 
-    # Faire une copie du dictionnaire pour permettre des modifications pendant l'itération
-    for guild_id, guild_mutes in list(mutes.items()):
-        guild = bot.get_guild(guild_id)
+        # Faire une copie du dictionnaire pour permettre des modifications pendant l'itération
+        for guild_id, guild_mutes in list(mutes.items()):
+            guild = bot.get_guild(guild_id)
 
-        if not guild:
-            guild_ids_to_unmute.append(guild_id)
-            continue
+            if not guild:
+                guild_ids_to_unmute.append(guild_id)
+                continue
 
-        mute_role = discord.utils.get(guild.roles, name="Muted")
-        if not mute_role:
-            print(f"Rôle 'Muted' non trouvé pour la guilde {guild.name}. Skipping mute check.")
-            continue
+            mute_role = discord.utils.get(guild.roles, name="Muted")
+            if not mute_role:
+                print(f"Rôle 'Muted' non trouvé pour la guilde {guild.name}. Skipping mute check.")
+                continue
 
-        for user_id, mute_info in list(guild_mutes.items()):
-            end_time = mute_info.get("end_time")
-            if end_time and current_time >= end_time:
-                member = guild.get_member(user_id)
-                if member and mute_role in member.roles:
-                    try:
-                        await member.remove_roles(mute_role, reason="Fin du mute temporaire (vérification automatique)")
-                        fields_unmute_auto_log = [
-                            ("Utilisateur unmute", member.mention, True),
-                            ("Raison", "Fin du mute automatique", False),
-                            ("Durée initiale", str(end_time - current_time), True)
-                        ]
-                        await send_log_message(guild, LOG_MODERATION_CHANNEL_ID, "🔊 Auto-Unmute (Fin de durée)", f"{member.mention} a été unmute automatiquement.", discord.Color.green(), fields_unmute_auto_log)
+            for user_id, mute_info in list(guild_mutes.items()):
+                end_time = mute_info.get("end_time")
+                if end_time and current_time >= end_time:
+                    member = guild.get_member(user_id)
+                    if member and mute_role in member.roles:
+                        try:
+                            await member.remove_roles(mute_role, reason="Fin du mute temporaire (vérification automatique)")
+                            fields_unmute_auto_log = [
+                                ("Utilisateur unmute", member.mention, True),
+                                ("Raison", "Fin du mute automatique", False),
+                                ("Durée initiale", str(end_time - current_time), True)
+                            ]
+                            await send_log_message(guild, LOG_MODERATION_CHANNEL_ID, "🔊 Auto-Unmute (Fin de durée)", f"{member.mention} a été unmute automatiquement.", discord.Color.green(), fields_unmute_auto_log)
 
-                    except Exception as e:
-                        print(f"Erreur lors de l'unmute de {member.display_name} (ID: {user_id}): {e}")
+                        except Exception as e:
+                            print(f"Erreur lors de l'unmute de {member.display_name} (ID: {user_id}): {e}")
 
-                # Supprimer l'utilisateur du dictionnaire de mutes, qu'il ait été unmute ou non
-                # (si le membre a quitté le serveur, ou si le rôle a été enlevé manuellement)
-                if user_id in mutes[guild_id]:
-                    del mutes[guild_id][user_id]
+                    # Supprimer l'utilisateur du dictionnaire de mutes, qu'il ait été unmute ou non
+                    # (si le membre a quitté le serveur, ou si le rôle a été enlevé manuellement)
+                    if user_id in mutes[guild_id]:
+                        del mutes[guild_id][user_id]
 
-        if not mutes[guild_id]:
-            guild_ids_to_unmute.append(guild_id)
+            if not mutes[guild_id]:
+                guild_ids_to_unmute.append(guild_id)
 
-    # Nettoyer les guildes vides
-    for guild_id in guild_ids_to_unmute:
-        if guild_id in mutes:
-            del mutes[guild_id]
+        # Nettoyer les guildes vides
+        for guild_id in guild_ids_to_unmute:
+            if guild_id in mutes:
+                del mutes[guild_id]
 
-    save_data()
+        save_data()
+    except Exception:
+        logging.error("[check_mutes] exception non rattrapée", exc_info=True)
 
 
 # --- Fin de la tâche de vérification des mutes ---
@@ -2778,7 +2786,13 @@ async def remind_bs_tag_missing():
         if elapsed < timedelta(days=6):
             return
 
-    await _run_bs_tag_reminder_batch()
+    # try/except autour de l'envoi lui-même : sans ça, une exception en
+    # plein milieu du batch (Discord, DB...) arrêterait @tasks.loop pour de
+    # bon — plus aucune relance hebdomadaire jusqu'au prochain redémarrage.
+    try:
+        await _run_bs_tag_reminder_batch()
+    except Exception:
+        logging.error("[remind_bs_tag_missing] exception non rattrapée", exc_info=True)
 
 
 @bot.command(name="relancer_tag_bs", aliases=["bs_tag_relance"])
@@ -7106,7 +7120,18 @@ def _crypto_news_embed(symbol, direction, old_price, new_price):
 @tasks.loop(seconds=90)
 async def update_crypto_prices():
     """Modèle de marché simulé : momentum (tendances), retour à la moyenne,
-    volatilité propre à chaque crypto et 'news' occasionnelles (pumps/dumps)."""
+    volatilité propre à chaque crypto et 'news' occasionnelles (pumps/dumps).
+
+    Try/except global : sans ça, une exception arrêterait @tasks.loop pour
+    de bon — marché crypto figé (plus aucune mise à jour de prix) jusqu'au
+    prochain redémarrage du bot."""
+    try:
+        await _update_crypto_prices_body()
+    except Exception:
+        logging.error("[update_crypto_prices] exception non rattrapée", exc_info=True)
+
+
+async def _update_crypto_prices_body():
     news = []  # (symbol, direction, old_price)
     for s in CRYPTO_SYMBOLS:
         price = crypto_prices[s]
@@ -12323,34 +12348,41 @@ async def sync_absence_roles():
     suppression) ne peut pas couvrir tout seul : une absence déclarée à
     l'avance dont le début vient d'arriver (le rôle doit apparaître), ou une
     absence dont le retour est passé sans que personne ne supprime la
-    déclaration (le rôle doit disparaître)."""
-    await bot.wait_until_ready()
-    guild = bot.get_guild(BS_FAMILY_GUILD_ID)
-    if not guild:
-        return
-    role = guild.get_role(ABSENCE_ROLE_ID)
-    if not role:
-        return
+    déclaration (le rôle doit disparaître).
 
-    today = datetime.now(BS_SEASON_TZ).date()
-    active_ids = {
-        row["discord_id"] for row in db_bs.list_absences() if _absence_is_active(row, today)
-    }
+    Try/except global : sans ça, une exception (ex: db_bs.list_absences
+    indisponible) arrêterait @tasks.loop pour de bon, plus aucun rattrapage
+    jusqu'au prochain redémarrage."""
+    try:
+        await bot.wait_until_ready()
+        guild = bot.get_guild(BS_FAMILY_GUILD_ID)
+        if not guild:
+            return
+        role = guild.get_role(ABSENCE_ROLE_ID)
+        if not role:
+            return
 
-    for discord_id in active_ids:
-        member = guild.get_member(int(discord_id))
-        if member and role not in member.roles:
-            try:
-                await member.add_roles(role, reason="Absence en cours (sync automatique)")
-            except discord.HTTPException:
-                pass
+        today = datetime.now(BS_SEASON_TZ).date()
+        active_ids = {
+            row["discord_id"] for row in db_bs.list_absences() if _absence_is_active(row, today)
+        }
 
-    for member in role.members:
-        if str(member.id) not in active_ids:
-            try:
-                await member.remove_roles(role, reason="Absence terminée (sync automatique)")
-            except discord.HTTPException:
-                pass
+        for discord_id in active_ids:
+            member = guild.get_member(int(discord_id))
+            if member and role not in member.roles:
+                try:
+                    await member.add_roles(role, reason="Absence en cours (sync automatique)")
+                except discord.HTTPException:
+                    pass
+
+        for member in role.members:
+            if str(member.id) not in active_ids:
+                try:
+                    await member.remove_roles(role, reason="Absence terminée (sync automatique)")
+                except discord.HTTPException:
+                    pass
+    except Exception:
+        logging.error("[sync_absence_roles] exception non rattrapée", exc_info=True)
 
 
 # ── !jugement : vote collectif du staff sur la sanction d'un membre ────────
@@ -12880,29 +12912,35 @@ async def cmd_anniversaire(ctx, date: str = None):
 
 @tasks.loop(hours=1)
 async def check_birthdays():
-    now = datetime.now()
-    if now.hour != 9:
-        return
-    today_day, today_month = now.day, now.month
-    for uid, bd in birthdays.items():
-        if bd.get('day') == today_day and bd.get('month') == today_month:
-            guild = bot.get_guild(bd.get('guild_id', 0))
-            if not guild:
-                continue
-            member = guild.get_member(int(uid))
-            if not member:
-                continue
-            coins[int(uid)] += 1000
-            save_data()
-            sys_ch = guild.system_channel
-            if sys_ch:
-                try:
-                    await sys_ch.send(
-                        f"🎂🎉 Joyeux anniversaire {member.mention} ! "
-                        f"Le serveur t'offre **1 000 coins** pour ton jour spécial ! 🎁"
-                    )
-                except Exception:
-                    pass
+    """Try/except global : sans ça, une exception (ex: entrée birthdays
+    corrompue) arrêterait @tasks.loop pour de bon — plus aucun
+    anniversaire fêté, pour personne, jusqu'au prochain redémarrage."""
+    try:
+        now = datetime.now()
+        if now.hour != 9:
+            return
+        today_day, today_month = now.day, now.month
+        for uid, bd in birthdays.items():
+            if bd.get('day') == today_day and bd.get('month') == today_month:
+                guild = bot.get_guild(bd.get('guild_id', 0))
+                if not guild:
+                    continue
+                member = guild.get_member(int(uid))
+                if not member:
+                    continue
+                coins[int(uid)] += 1000
+                save_data()
+                sys_ch = guild.system_channel
+                if sys_ch:
+                    try:
+                        await sys_ch.send(
+                            f"🎂🎉 Joyeux anniversaire {member.mention} ! "
+                            f"Le serveur t'offre **1 000 coins** pour ton jour spécial ! 🎁"
+                        )
+                    except Exception:
+                        pass
+    except Exception:
+        logging.error("[check_birthdays] exception non rattrapée", exc_info=True)
 
 
 # ── Alertes prix crypto ───────────────────────────────────────────────────
@@ -14491,29 +14529,36 @@ async def cmd_bs_roles_panel(ctx):
 
 @tasks.loop(hours=1)
 async def sync_bs_roles():
-    for uid_str, acc in list(bs_accounts.items()):
-        data, err = await _bs_fetch_player(acc.get('tag', ''))
-        if data:
-            if data['ranked_tier'] is None:
-                data['ranked_pts']  = acc.get('ranked_pts')
-                data['ranked_tier'] = acc.get('ranked_tier')
-            # _bs_announce_promotion poste sur un salon fixe (BS_CONGRATS_CHANNEL_ID),
-            # pas un par serveur — l'appeler une fois par guild partagée avec le membre
-            # envoyait le même message plusieurs fois de suite au même endroit si le
-            # bot est sur plusieurs serveurs (incident du 21/08/2026, Yann mentionné
-            # 3 fois pour le même palier). _bs_sync_member_roles, elle, reste bien
-            # appelée pour chaque guild : les rôles sont propres à chaque serveur.
-            announced = False
-            for guild in bot.guilds:
-                member = guild.get_member(int(uid_str))
-                if member:
-                    if not announced:
-                        await _bs_announce_promotion(member, acc, data)
-                        announced = True
-                    await _bs_sync_member_roles(member, data['trophies'], data['ranked_pts'])
-            bs_accounts[uid_str] = data
-        await asyncio.sleep(1)
-    save_data()
+    """Try/except global : même raisonnement que sync_family_ranked — sans
+    ça, une exception sur un seul compte (API BS, Discord...) arrêterait
+    @tasks.loop pour de bon, plus aucune synchro de rôle ni annonce de
+    promotion jusqu'au prochain redémarrage."""
+    try:
+        for uid_str, acc in list(bs_accounts.items()):
+            data, err = await _bs_fetch_player(acc.get('tag', ''))
+            if data:
+                if data['ranked_tier'] is None:
+                    data['ranked_pts']  = acc.get('ranked_pts')
+                    data['ranked_tier'] = acc.get('ranked_tier')
+                # _bs_announce_promotion poste sur un salon fixe (BS_CONGRATS_CHANNEL_ID),
+                # pas un par serveur — l'appeler une fois par guild partagée avec le membre
+                # envoyait le même message plusieurs fois de suite au même endroit si le
+                # bot est sur plusieurs serveurs (incident du 21/08/2026, Yann mentionné
+                # 3 fois pour le même palier). _bs_sync_member_roles, elle, reste bien
+                # appelée pour chaque guild : les rôles sont propres à chaque serveur.
+                announced = False
+                for guild in bot.guilds:
+                    member = guild.get_member(int(uid_str))
+                    if member:
+                        if not announced:
+                            await _bs_announce_promotion(member, acc, data)
+                            announced = True
+                        await _bs_sync_member_roles(member, data['trophies'], data['ranked_pts'])
+                bs_accounts[uid_str] = data
+            await asyncio.sleep(1)
+        save_data()
+    except Exception:
+        logging.error("[sync_bs_roles] exception non rattrapée", exc_info=True)
 
 
 @bot.command(name="bs_famille", aliases=["bsfamille"])
@@ -14882,12 +14927,19 @@ async def _refresh_family_clubs_panel() -> tuple[bool, str]:
 
 @tasks.loop(hours=24)
 async def refresh_family_clubs_panel_task():
-    await bot.wait_until_ready()
-    if not FAMILY_CLUBS_PANEL_CHANNEL_ID:
-        return
-    ok, msg = await _refresh_family_clubs_panel()
-    if not ok:
-        print(f"[clubs_panel] Échec du rafraîchissement automatique : {msg}")
+    """Try/except global : sans ça, une exception non rattrapée par
+    _refresh_family_clubs_panel (ex: discord.HTTPException imprévue)
+    arrêterait @tasks.loop pour de bon — plus aucun rafraîchissement
+    automatique du panel jusqu'au prochain redémarrage."""
+    try:
+        await bot.wait_until_ready()
+        if not FAMILY_CLUBS_PANEL_CHANNEL_ID:
+            return
+        ok, msg = await _refresh_family_clubs_panel()
+        if not ok:
+            print(f"[clubs_panel] Échec du rafraîchissement automatique : {msg}")
+    except Exception:
+        logging.error("[refresh_family_clubs_panel_task] exception non rattrapée", exc_info=True)
 
 
 @bot.command(name="clubs_panel", aliases=["maj_clubs", "clubs_panel_ici"])
