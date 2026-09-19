@@ -9,12 +9,15 @@ import random
 import json
 import io
 import re
+import tempfile
+import time
 import unicodedata
 from collections import defaultdict, deque
 from dotenv import load_dotenv
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont
+from race_renderer import render_race_video
 from keep_alive import keep_alive
 import db_bs
 import db_members
@@ -398,6 +401,13 @@ shield_break_streak = {}   # str(uid) -> {'count','last_break'} — escalade ant
 race_bets        = {}   # str(uid) -> {'driver': int, 'amount': int}
 race_drivers_live = [dict(d) for d in RACE_DRIVERS_BASE]
 race_accepting    = False
+# L'état casino historique reste global : une seule session pour le bot, comme
+# avant. Le verrou rend les transitions ouvrir/lancer atomiques entre commandes
+# et boutons Discord concurrents.
+race_state_lock = asyncio.Lock()
+race_is_running = False
+race_last_finished_at = 0.0
+RACE_POST_COOLDOWN_SECONDS = 30
 tournaments      = {}   # str(guild_id) → tournament dict
 teams            = {}   # str(team_id) -> {name, leader, members:[uid,...], treasury:int, created:ISO}
 user_team        = {}   # str(uid) -> str(team_id)
@@ -1977,7 +1987,7 @@ ALWAYS_ALLOWED_CMDS = {'gestion', 'cooldown', 'cd', 'aide'}
 # sauf rôle explicitement autorisé via !perm (décision du 09/08/2026 —
 # remplace l'ancien "tout admin Discord passe") ──
 ADMIN_LOCKED_CMDS = {
-    'giveaway', 'cancelgiveaway', 'listgiveaways', 'gdt', 'prix_casino', 'ouvrir_course', 'lancer_course',
+    'giveaway', 'cancelgiveaway', 'listgiveaways', 'gdt', 'prix_casino',
     'freeze_crypto', 'addcoins', 'removecoins', 'tournois', 'prix_tournoi',
     'ouverture_tournoi', 'annuler_tournoi', 'tournoi_retirer', 'tournoi_ajouter', 'tournoi_deplacer',
     'punition', 'annuler_punition', 'set_admin_log', 'set_logs',
@@ -1994,9 +2004,10 @@ CASINO_CMDS = {
     'daily', 'travail', 'work', 'mendier', 'beg', 'risque', 'roulette_russe', 'give',
     'roulette', 'slots', 'machine', 'bj', 'blackjack', 'coinflip', 'cf', 'duel', 'pvp',
     'poker', 'pk', 'mines', 'higherlower', 'hl', 'voler', 'steal', 'rob',
-    'gratter', 'scratch', 'course', 'parier', 'hacker', 'hack', 'miner',
+    'gratter', 'scratch', 'course', 'parier', 'ouvrir_course', 'lancer_course', 'hacker', 'hack', 'miner',
 }
 CASINO_COOLDOWN_SECONDS = 3
+PUBLIC_RACE_COMMANDS = {'ouvrir_course', 'lancer_course'}
 # uid (int) -> datetime du dernier coup casino — anti-macro uniquement,
 # pas besoin de survivre à un redémarrage (contrairement à daily_cooldowns
 # et cie, qui représentent une vraie limite à conserver).
@@ -2048,6 +2059,11 @@ async def _global_command_gate(ctx):
                 pass
             return False
         _casino_last_use[ctx.author.id] = now
+    # Les transitions de course sont volontairement ouvertes aux membres. Elles
+    # gardent néanmoins les contrôles casino ci-dessus (pause, ban, anti-macro)
+    # et le verrou applicatif de la session.
+    if cmd_name in PUBLIC_RACE_COMMANDS:
+        return True
     # Les admins du serveur passent toujours, SAUF pour les commandes admin
     # sensibles (ADMIN_LOCKED_CMDS) : celles-ci sont réservées au propriétaire
     # du serveur par défaut — ctx.guild.owner_id, calculé dynamiquement,
@@ -2225,6 +2241,8 @@ def _build_help_categories(ctx):
                  "`!poker start <ante>` (`!pk`) — Poker (boutons)\n"
                  "`!course` (`!race`) — Course de voitures\n"
                  "`!parier <pilote> <mise>` (`!bet`) — Parier sur une course\n"
+                 "`!ouvrir_course` (`!oc`) — Ouvrir les paris\n"
+                 "`!lancer_course` (`!lc`) — Fermer les paris et lancer la course\n"
                  "`!gratter` (`!scratch`) — Gratter un ticket (5 cases 🍀)\n"
                  "`!higherlower <mise>` (`!hl`) — Plus haut/bas/égal, multiplicateur croissant\n"))
     cats.append(("crypto", "📈 Crypto-monnaies",
@@ -2368,7 +2386,6 @@ def _build_help_categories(ctx):
                      "`!permission` (`!perm`) — Restreindre/déléguer des commandes par rôle\n"
                      "`!cd_set` (`!cooldown_set`) — Modifier les cooldowns\n"
                      "`!freeze_crypto` — Geler/dégeler le marché crypto\n"
-                     "`!ouvrir_course` (`!oc`) / `!lancer_course` (`!lc`) — Courses\n"
                      "`!ouverture_tournoi` (`!bracket`) — Lancer le tournoi\n"
                      "`!annuler_tournoi` — Annuler le tournoi en cours\n"
                      "`!prix_tournoi <montant>` — Définir la récompense du tournoi\n"
@@ -10014,7 +10031,12 @@ async def cmd_collecter(ctx):
 # ── Course de voitures ────────────────────────────────────────────────────
 
 def _course_embed():
-    status = "✅ **Paris ouverts !**" if race_accepting else "⏸️ Paris fermés — attendez l'ouverture par un admin"
+    if race_is_running:
+        status = "🏁 **Course en cours** — les paris sont fermés"
+    elif race_accepting:
+        status = "✅ **Paris ouverts !**"
+    else:
+        status = "⏸️ Paris fermés — un membre peut ouvrir la prochaine course"
     embed = discord.Embed(title="🏎️ Courses de Voitures", color=0xe74c3c,
         description=f"{status}\n\nCliquez sur **🎯 Parier** ci-dessous pour miser sur un pilote.\n")
     total_bets = {}
@@ -10081,25 +10103,26 @@ class CourseView(discord.ui.View):
     async def refresh_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(embed=_course_embed(), view=self)
 
-    @discord.ui.button(label="Ouvrir les paris (Admin)", style=discord.ButtonStyle.primary, emoji="🔓", row=1)
+    @discord.ui.button(label="Ouvrir les paris", style=discord.ButtonStyle.primary, emoji="🔓", row=1)
     async def open_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message("❌ Réservé aux admins.", ephemeral=True)
-        global race_accepting, race_bets
-        race_accepting = True
-        race_bets = {}
-        save_data()
+        access_error = _race_member_access_error(interaction.user, 'ouvrir_course')
+        if access_error:
+            return await interaction.response.send_message(access_error, ephemeral=True)
+        ok, message = await _open_race_betting()
+        if not ok:
+            return await interaction.response.send_message(message, ephemeral=True)
         await interaction.response.edit_message(embed=_course_embed(), view=self)
-        await interaction.followup.send("✅ Les paris sont désormais ouverts !")
+        await interaction.followup.send("✅ Les paris sont désormais ouverts ! Tout membre peut lancer la course avec `!lancer_course`.")
 
-    @discord.ui.button(label="Lancer la course (Admin)", style=discord.ButtonStyle.danger, emoji="🏁", row=1)
+    @discord.ui.button(label="Lancer la course", style=discord.ButtonStyle.danger, emoji="🏁", row=1)
     async def launch_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message("❌ Réservé aux admins.", ephemeral=True)
-        if not race_accepting:
-            return await interaction.response.send_message("❌ Aucune course ouverte.", ephemeral=True)
+        access_error = _race_member_access_error(interaction.user, 'lancer_course')
+        if access_error:
+            return await interaction.response.send_message(access_error, ephemeral=True)
         await interaction.response.defer()
-        await _run_race(interaction.channel, interaction.guild)
+        ok, message = await _run_race(interaction.channel, interaction.guild)
+        if not ok:
+            await interaction.followup.send(message, ephemeral=True)
 
 
 def _race_bet_wins(driver_idx: int, official_winner_idx: int, weights) -> bool:
@@ -10113,59 +10136,137 @@ def _race_bet_wins(driver_idx: int, official_winner_idx: int, weights) -> bool:
     )
 
 
-async def _run_race(channel, guild):
-    """Lance la course (extraction de l'ancien lancer_course)."""
+async def _open_race_betting():
+    """Ouvre une seule session de paris ; la transition est atomique."""
     global race_accepting, race_bets
-    race_accepting = False
+    async with race_state_lock:
+        if race_is_running:
+            return False, "❌ Une course est déjà en cours."
+        if race_accepting:
+            return False, "❌ Les paris sont déjà ouverts pour la course en attente."
+        remaining = RACE_POST_COOLDOWN_SECONDS - (time.monotonic() - race_last_finished_at)
+        if remaining > 0:
+            return False, f"⏳ Attendez encore {math.ceil(remaining)} seconde(s) avant d'ouvrir une nouvelle course."
+        race_accepting = True
+        race_bets = {}
+        save_data()
+        return True, "✅ Les paris sont ouverts."
 
-    total_bets = {}
-    for b in race_bets.values():
-        d = b['driver']
-        total_bets[d] = total_bets.get(d, 0) + b['amount']
-    grand_total = sum(total_bets.values()) or 1
 
-    weights = []
-    for i, d in enumerate(race_drivers_live):
-        wr = d['wins'] / max(d['races'], 1)
-        pop_factor = 1 - 0.2 * (total_bets.get(i, 0) / grand_total)
-        weights.append(max(0.01, wr * pop_factor))
+def _race_member_access_error(member, command_name: str):
+    """Même protection casino côté serveur pour les interactions Discord."""
+    if command_name in disabled_cmds:
+        return f"🚫 La commande `!{command_name}` est actuellement désactivée."
+    if casino_paused:
+        return "⏸️ Le casino est temporairement en pause."
+    if member.id in casino_banned_users:
+        return "🚫 Tu n'as plus accès aux commandes casino."
+    return None
 
-    winner_idx = random.choices(range(len(race_drivers_live)), weights=weights, k=1)[0]
-    winner = race_drivers_live[winner_idx]
-    for d in race_drivers_live:
-        d['races'] += 1
-    race_drivers_live[winner_idx]['wins'] += 1
 
-    laps = [
-        "🏎️ Les moteurs rugissent... C'est parti !",
-        "⚡ Premier virage — bagarre en tête !",
-        "🔥 Mi-course — les pilotes se battent !",
-        f"🏁 **ARRIVÉE — {winner['name']} remporte la course !**"
-    ]
-    msg = await channel.send(laps[0])
-    for txt in laps[1:]:
-        await asyncio.sleep(2)
-        await msg.edit(content=txt)
+async def _reserve_race_start():
+    """Ferme atomiquement les paris et réserve le départ à un seul appelant."""
+    global race_accepting, race_is_running
+    async with race_state_lock:
+        if race_is_running:
+            return None, "❌ Une course est déjà en cours."
+        if not race_accepting:
+            return None, "❌ Ouvrez d'abord les paris avec `!ouvrir_course`."
+        race_accepting = False
+        race_is_running = True
+        # Aucun await entre ces changements : un second appel ne peut ni
+        # réouvrir ni relancer la même session.
+        return dict(race_bets), None
 
-    winners_lines = []
-    for uid, binfo in race_bets.items():
-        uid_int = int(uid)
-        if _race_bet_wins(binfo['driver'], winner_idx, weights):
-            odds = _race_odds(winner_idx)
-            payout = int(binfo['amount'] * odds)
-            coins[uid_int] += payout
-            m = guild.get_member(uid_int)
-            name = m.display_name if m else f"<@{uid}>"
-            winners_lines.append(f"🏆 **{name}** : +**{payout - binfo['amount']:,}** coins (×{odds})")
 
-    embed = discord.Embed(title=f"🏁 {winner['name']} remporte la course !", color=0xf1c40f)
-    if winners_lines:
-        embed.add_field(name="🏆 Gagnants", value='\n'.join(winners_lines[:10]), inline=False)
-    else:
-        embed.add_field(name="Dommage !", value="Personne n'avait misé sur le bon pilote.", inline=False)
-    race_bets = {}
-    save_data()
-    await channel.send(embed=embed)
+async def _release_race_after_finish():
+    global race_is_running, race_last_finished_at
+    async with race_state_lock:
+        race_is_running = False
+        race_last_finished_at = time.monotonic()
+
+
+def _race_final_order(winner_idx: int) -> list[int]:
+    """Le moteur historique ne produit pas de classement complet.
+
+    Cette liste sert exclusivement au rendu : le vainqueur officiel est premier,
+    puis les autres voitures conservent leur ordre stable de grille.
+    """
+    return [winner_idx] + [i for i in range(len(race_drivers_live)) if i != winner_idx]
+
+
+async def _run_race(channel, guild):
+    """Règle la course historique, puis rend une vidéo sans toucher aux gains."""
+    global race_bets
+    bets_snapshot, error = await _reserve_race_start()
+    if error:
+        return False, error
+    try:
+        # Bloc économique conservé à l'identique : poids, tirage, stats,
+        # cote du gagnant et bonus Idle Death Gamble restent la source de vérité.
+        total_bets = {}
+        for b in bets_snapshot.values():
+            d = b['driver']
+            total_bets[d] = total_bets.get(d, 0) + b['amount']
+        grand_total = sum(total_bets.values()) or 1
+        weights = []
+        for i, d in enumerate(race_drivers_live):
+            wr = d['wins'] / max(d['races'], 1)
+            pop_factor = 1 - 0.2 * (total_bets.get(i, 0) / grand_total)
+            weights.append(max(0.01, wr * pop_factor))
+        winner_idx = random.choices(range(len(race_drivers_live)), weights=weights, k=1)[0]
+        winner = race_drivers_live[winner_idx]
+        for d in race_drivers_live:
+            d['races'] += 1
+        race_drivers_live[winner_idx]['wins'] += 1
+
+        winners_lines = []
+        for uid, binfo in bets_snapshot.items():
+            uid_int = int(uid)
+            if _race_bet_wins(binfo['driver'], winner_idx, weights):
+                odds = _race_odds(winner_idx)
+                payout = int(binfo['amount'] * odds)
+                coins[uid_int] += payout
+                m = guild.get_member(uid_int)
+                name = m.display_name if m else f"<@{uid}>"
+                winners_lines.append(f"🏆 **{name}** : +**{payout - binfo['amount']:,}** coins (×{odds})")
+
+        # Les paiements et la persistance arrivent avant le rendu. Une erreur
+        # FFmpeg/Pillow ne peut donc jamais annuler un résultat officiel.
+        race_bets = {}
+        save_data()
+        await channel.send("🏁 **La course commence…** Résultat officiel verrouillé ; génération de l'animation.")
+
+        final_order = _race_final_order(winner_idx)
+        render_error = None
+        try:
+            with tempfile.TemporaryDirectory(prefix="discord-race-") as temp_dir:
+                video_path = os.path.join(temp_dir, "course.mp4")
+                await asyncio.to_thread(
+                    render_race_video, video_path,
+                    [dict(d) for d in race_drivers_live], final_order, int(time.time()),
+                )
+                await channel.send(file=discord.File(video_path, filename="course.mp4"))
+        except Exception as exc:
+            render_error = type(exc).__name__
+            logging.exception("[RACE VIDEO] Rendu indisponible, résultat casino conservé")
+
+        embed = discord.Embed(title=f"🏁 {winner['name']} remporte la course !", color=0xf1c40f)
+        embed.add_field(
+            name="Classement final officiel",
+            value='\n'.join(f"**{rank}.** {race_drivers_live[index]['name']}" for rank, index in enumerate(final_order, 1)),
+            inline=False,
+        )
+        if winners_lines:
+            embed.add_field(name="🏆 Gagnants", value='\n'.join(winners_lines[:10]), inline=False)
+        else:
+            embed.add_field(name="Dommage !", value="Personne n'avait misé sur le bon pilote.", inline=False)
+        if render_error:
+            embed.set_footer(text="Animation indisponible : le résultat et les gains ont bien été enregistrés.")
+        await channel.send(embed=embed)
+        return True, None
+    finally:
+        await _release_race_after_finish()
 
 
 @bot.hybrid_command(name="course", aliases=["race", "courses"])
@@ -10176,7 +10277,7 @@ async def cmd_course(ctx):
 @bot.hybrid_command(name="parier", aliases=["bet"])
 async def cmd_parier(ctx, pilote: int, mise: str):
     if not race_accepting:
-        return await ctx.send("❌ Les paris ne sont pas ouverts. Un admin doit utiliser `!ouvrir_course`.")
+        return await ctx.send("❌ Les paris ne sont pas ouverts. Utilisez `!ouvrir_course` pour les ouvrir.")
     if pilote < 1 or pilote > len(race_drivers_live):
         return await ctx.send(f"❌ Pilote invalide (1–{len(race_drivers_live)}).")
     mise, err = _resolve_mise(mise, ctx.author.id, 'course')
@@ -10193,68 +10294,18 @@ async def cmd_parier(ctx, pilote: int, mise: str):
 
 @bot.command(name="ouvrir_course", aliases=["oc", "open_race"])
 async def cmd_ouvrir_course(ctx):
-    global race_accepting, race_bets
-    race_accepting = True
-    race_bets      = {}
-    save_data()
+    ok, message = await _open_race_betting()
+    if not ok:
+        return await ctx.send(message)
     embed = discord.Embed(title="🏎️ Paris ouverts !", color=0x2ecc71,
-        description="Les paris sont maintenant ouverts !\n`!course` — Voir les pilotes\n`!parier <n°> <mise>` — Miser\n\nL'admin lancera la course avec `!lancer_course`.")
+        description="Les paris sont maintenant ouverts !\n`!course` — Voir les pilotes\n`!parier <n°> <mise>` — Miser\n\nN'importe quel membre peut fermer les paris et lancer la course avec `!lancer_course`.")
     await ctx.send(embed=embed)
 
 @bot.command(name="lancer_course", aliases=["lc", "start_race"])
 async def cmd_lancer_course(ctx):
-    global race_accepting, race_bets
-    if not race_accepting:
-        return await ctx.send("❌ Ouvrez d'abord les paris avec `!ouvrir_course`.")
-    race_accepting = False
-
-    total_bets = {}
-    for b in race_bets.values():
-        d = b['driver']
-        total_bets[d] = total_bets.get(d, 0) + b['amount']
-    grand_total = sum(total_bets.values()) or 1
-
-    weights = []
-    for i, d in enumerate(race_drivers_live):
-        wr         = d['wins'] / max(d['races'], 1)
-        pop_factor = 1 - 0.2 * (total_bets.get(i, 0) / grand_total)
-        weights.append(max(0.01, wr * pop_factor))
-
-    winner_idx = random.choices(range(len(race_drivers_live)), weights=weights, k=1)[0]
-    winner     = race_drivers_live[winner_idx]
-    for d in race_drivers_live: d['races'] += 1
-    race_drivers_live[winner_idx]['wins'] += 1
-
-    laps = [
-        "🏎️ Les moteurs rugissent... C'est parti !",
-        "⚡ Premier virage — bagarre en tête !",
-        "🔥 Mi-course — les pilotes se battent !",
-        f"🏁 **ARRIVÉE — {winner['name']} remporte la course !**"
-    ]
-    msg = await ctx.send(laps[0])
-    for txt in laps[1:]:
-        await asyncio.sleep(2)
-        await msg.edit(content=txt)
-
-    winners_lines = []
-    for uid, binfo in race_bets.items():
-        uid_int = int(uid)
-        if _race_bet_wins(binfo['driver'], winner_idx, weights):
-            odds   = _race_odds(winner_idx)
-            payout = int(binfo['amount'] * odds)
-            coins[uid_int] += payout
-            m    = ctx.guild.get_member(uid_int)
-            name = m.display_name if m else f"<@{uid}>"
-            winners_lines.append(f"🏆 **{name}** : +**{payout - binfo['amount']:,}** coins (×{odds})")
-
-    embed = discord.Embed(title=f"🏁 {winner['name']} remporte la course !", color=0xf1c40f)
-    if winners_lines:
-        embed.add_field(name="🏆 Gagnants", value='\n'.join(winners_lines[:10]), inline=False)
-    else:
-        embed.add_field(name="Dommage !", value="Personne n'avait misé sur le bon pilote.", inline=False)
-    race_bets = {}
-    save_data()
-    await ctx.send(embed=embed)
+    ok, message = await _run_race(ctx.channel, ctx.guild)
+    if not ok:
+        await ctx.send(message)
 
 
 # ── Admin — diagnostics bot ────────────────────────────────────────────────
