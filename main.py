@@ -14398,6 +14398,7 @@ async def cmd_bsprofil(ctx, member: discord.Member = None):
 @bot.command(name="trophygraph", aliases=["tg", "tropheesgraph"])
 async def cmd_trophygraph(ctx, target_or_days: str = None, days: str = None):
     """Courbe des snapshots déjà persistés; aucun appel à l'API Brawl Stars."""
+    logging.info("[TROPHYGRAPH] command invoked discord_user=%s", getattr(ctx.author, 'id', None))
     member_id, period, error = parse_trophygraph_args(target_or_days, days)
     if error:
         return await ctx.send(f"❌ {error}")
@@ -14412,13 +14413,19 @@ async def cmd_trophygraph(ctx, target_or_days: str = None, days: str = None):
         who = "Tu n'as" if member == ctx.author else f"{member.display_name} n'a"
         return await ctx.send(f"❌ {who} pas encore lié de compte Brawl Stars. Utilise `!bslink <tag>`.")
 
+    player_tag = account.get('tag', '')
+    logging.info(
+        "[TROPHYGRAPH] player_tag=%s requested_days=%s target_member=%s",
+        player_tag, period, member.id,
+    )
     since = (datetime.now(timezone.utc).date() - timedelta(days=period - 1)).isoformat()
     try:
-        points = db_bs.get_player_history(account['tag'].lstrip('#').upper(), since=since)
+        points = db_bs.get_player_history(player_tag.lstrip('#').upper(), since=since)
     except Exception:
-        logging.error("[trophygraph] lecture historique impossible", exc_info=True)
+        logging.exception("[TROPHYGRAPH] lecture historique impossible")
         return await ctx.send("❌ L'historique des trophées est temporairement indisponible. Réessaie plus tard.")
 
+    logging.info("[TROPHYGRAPH] snapshots_loaded=%d snapshots_after_filter=%d", len(points), len(points))
     if len(points) < 2:
         return await ctx.send("📈 Le suivi vient de commencer. Pas encore assez de données pour générer une courbe.")
 
@@ -14432,8 +14439,14 @@ async def cmd_trophygraph(ctx, target_or_days: str = None, days: str = None):
         f"Début : **{summary['start']:,}** · Actuel : **{summary['current']:,}** · Variation : **{delta}** · "
         f"Record période : **{summary['maximum']:,}**"
     ).replace(',', ' ')
-    image = render_trophy_graph(account.get('name') or member.display_name, points, period)
-    await ctx.send(caption, file=discord.File(image, filename="trophygraph.png"))
+    try:
+        logging.info("[TROPHYGRAPH] rendering")
+        image = render_trophy_graph(account.get('name') or member.display_name, points, period)
+        logging.info("[TROPHYGRAPH] sending")
+        await ctx.send(caption, file=discord.File(image, filename="trophygraph.png"))
+    except Exception:
+        logging.exception("[TROPHYGRAPH] command failed")
+        await ctx.send("âŒ Impossible de gÃ©nÃ©rer la courbe pour le moment. Le problÃ¨me a Ã©tÃ© enregistrÃ©.")
 
 
 @bot.command(name="bs_roles", aliases=["bsroles"])
