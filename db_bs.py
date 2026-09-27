@@ -12,7 +12,7 @@ la classe de bug où deux instances du process divergent silencieusement.
 """
 
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from functools import lru_cache
 
 from supabase import create_client, Client
@@ -107,10 +107,15 @@ def get_player_history(player_tag: str, since: str | None = None) -> list[dict]:
     )
     if since:
         q = q.gte("snapshot_date", since)
+    today = date.today().isoformat()
+    q = q.lte("snapshot_date", today)
     # PostgREST reçoit déjà un ``order`` explicite, mais ce tri local garde
     # le contrat chronologique si une implémentation/proxy renvoie les lignes
     # dans un ordre inattendu.
-    return sorted(q.execute().data, key=lambda row: row["snapshot_date"])
+    return sorted(
+        (row for row in q.execute().data if row["snapshot_date"] <= today),
+        key=lambda row: row["snapshot_date"],
+    )
 
 
 def upsert_player_snapshot(snapshot_date: str, player_tag: str, name: str, trophies: int) -> None:

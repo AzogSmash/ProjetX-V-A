@@ -74,11 +74,13 @@ class TrophyGraphTests(unittest.TestCase):
             def eq(self, *_): return self
             def order(self, *_): return self
             def gte(self, *_): return self
+            def lte(self, *_): return self
             def execute(self):
                 return types.SimpleNamespace(data=[
                     {"snapshot_date": "2026-09-22", "trophies": 120},
                     {"snapshot_date": "2026-09-20", "trophies": 100},
                     {"snapshot_date": "2026-09-21", "trophies": 110},
+                    {"snapshot_date": "2099-01-01", "trophies": 999_999},
                 ])
 
         class Client:
