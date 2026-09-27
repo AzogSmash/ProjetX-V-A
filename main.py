@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont
 from race_renderer import render_race_video
+from bs_trophy_graph import parse_trophygraph_args, render_trophy_graph, trophy_summary
 from keep_alive import keep_alive
 import db_bs
 import db_members
@@ -2119,6 +2120,7 @@ COMMAND_USAGE = {
     'lierbs':        '`!bslink <tag>` (alias `!lierbs`)\nEx : `!lierbs #2ABC123`',
     'bsprofil':      '`!bsprofil [@membre]`\nEx : `!bsprofil` · `!bs @Joueur`',
     'bs':            '`!bsprofil [@membre]` (alias `!bs`)\nEx : `!bs @Joueur`',
+    'trophygraph':   '`!trophygraph [@membre] [7|14|30|60|90]`\nEx : `!trophygraph` · `!tg @Joueur 30`',
     'bs_roles':      '`!bs_roles trophees <min> @role` · `!bs_roles ranked <min_points> @role` · `!bs_roles liste` · `!bs_roles_panel` (version panel) *(Admin)*',
     'bs_famille':    '`!bs_famille ajouter <tag_clan>` · `!bs_famille retirer <tag_clan>` · `!bs_famille liste` *(Admin)*',
     'classement_trophees_famille': '`!classement_trophees_famille` (alias `!ctf`, `!top_famille`)',
@@ -2322,6 +2324,7 @@ def _build_help_categories(ctx):
                  "Lie ton compte en jeu pour un rôle auto selon tes trophées/rang classé",
                  "`!bslink <tag>` (`!lierbs`) — Lier ton compte Brawl Stars\n"
                  "`!bsprofil [@membre]` (`!bs`) — Voir/rafraîchir trophées et rang classé\n"
+                 "`!trophygraph [@membre] [jours]` (`!tg`) — Courbe des trophées réellement suivis (30 jours par défaut)\n"
                  "*(Admin)* `!bs_roles trophees <min> @role` — Palier de trophées → rôle\n"
                  "*(Admin)* `!bs_roles ranked <min_points> @role` — Palier de points classé → rôle\n"
                  "*(Admin)* `!bs_roles liste` — Voir la configuration\n"
@@ -14261,6 +14264,22 @@ def _bs_embed(member: discord.Member, acc: dict) -> discord.Embed:
     return embed
 
 
+def _record_linked_bs_snapshot(data: dict) -> None:
+    """Ajoute le point quotidien d'un compte lié sans perturber son refresh.
+
+    Le tracking famille et les comptes liés partagent ``bs_trophy_snapshots``.
+    Une indisponibilité ponctuelle de Supabase ne doit toutefois jamais faire
+    échouer une liaison, un profil ou une synchronisation de rôles.
+    """
+    try:
+        db_bs.upsert_player_snapshot(
+            datetime.now(BS_SEASON_TZ).strftime('%Y-%m-%d'),
+            data.get('tag', ''), data.get('name', '?'), data.get('trophies', 0),
+        )
+    except Exception:
+        logging.warning("[bs] snapshot de compte lié non enregistré", exc_info=True)
+
+
 async def _bslink_apply(discord_id: str, tag: str, member: discord.Member = None):
     """Cœur de !bslink, réutilisé par la commande Discord ET par /api/bslink
     (liaison depuis le site — voir keep_alive.py). Retourne (data, err)."""
@@ -14269,6 +14288,7 @@ async def _bslink_apply(discord_id: str, tag: str, member: discord.Member = None
         return None, err
 
     bs_accounts[discord_id] = data
+    _record_linked_bs_snapshot(data)
     save_data()
 
     if member is None:
@@ -14308,6 +14328,7 @@ async def cmd_bsprofil(ctx, member: discord.Member = None):
         if ctx.guild:
             await _bs_announce_promotion(member, acc, data)
         bs_accounts[uid] = data
+        _record_linked_bs_snapshot(data)
         save_data()
         acc = data
         if ctx.guild:
@@ -14315,6 +14336,47 @@ async def cmd_bsprofil(ctx, member: discord.Member = None):
     # en cas d'échec du rafraîchissement, on affiche simplement les dernières données connues
 
     await ctx.send(embed=_bs_embed(member, acc))
+
+
+@bot.command(name="trophygraph", aliases=["tg", "tropheesgraph"])
+async def cmd_trophygraph(ctx, target_or_days: str = None, days: str = None):
+    """Courbe des snapshots déjà persistés; aucun appel à l'API Brawl Stars."""
+    member_id, period, error = parse_trophygraph_args(target_or_days, days)
+    if error:
+        return await ctx.send(f"❌ {error}")
+    if member_id and not ctx.guild:
+        return await ctx.send("❌ La consultation d'un autre membre doit être utilisée dans un serveur.")
+
+    member = ctx.author if member_id is None else ctx.guild.get_member(int(member_id))
+    if member is None:
+        return await ctx.send("❌ Membre introuvable sur ce serveur.")
+    account = bs_accounts.get(str(member.id))
+    if not account:
+        who = "Tu n'as" if member == ctx.author else f"{member.display_name} n'a"
+        return await ctx.send(f"❌ {who} pas encore lié de compte Brawl Stars. Utilise `!bslink <tag>`.")
+
+    since = (datetime.now(timezone.utc).date() - timedelta(days=period - 1)).isoformat()
+    try:
+        points = db_bs.get_player_history(account['tag'].lstrip('#').upper(), since=since)
+    except Exception:
+        logging.error("[trophygraph] lecture historique impossible", exc_info=True)
+        return await ctx.send("❌ L'historique des trophées est temporairement indisponible. Réessaie plus tard.")
+
+    if len(points) < 2:
+        return await ctx.send("📈 Le suivi vient de commencer. Pas encore assez de données pour générer une courbe.")
+
+    summary = trophy_summary(points)
+    history_note = f"Historique disponible : {len(points)} jours"
+    if len(points) < period:
+        history_note += f" sur les {period} demandés"
+    delta = f"{summary['delta']:+,}".replace(',', ' ')
+    caption = (
+        f"🏆 **{account.get('name') or member.display_name}** — {history_note}\n"
+        f"Début : **{summary['start']:,}** · Actuel : **{summary['current']:,}** · Variation : **{delta}** · "
+        f"Record période : **{summary['maximum']:,}**"
+    ).replace(',', ' ')
+    image = render_trophy_graph(account.get('name') or member.display_name, points, period)
+    await ctx.send(caption, file=discord.File(image, filename="trophygraph.png"))
 
 
 @bot.command(name="bs_roles", aliases=["bsroles"])
@@ -14606,6 +14668,7 @@ async def sync_bs_roles():
                             announced = True
                         await _bs_sync_member_roles(member, data['trophies'], data['ranked_pts'])
                 bs_accounts[uid_str] = data
+                _record_linked_bs_snapshot(data)
             await asyncio.sleep(1)
         save_data()
     except Exception:

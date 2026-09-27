@@ -107,7 +107,28 @@ def get_player_history(player_tag: str, since: str | None = None) -> list[dict]:
     )
     if since:
         q = q.gte("snapshot_date", since)
-    return q.execute().data
+    # PostgREST reçoit déjà un ``order`` explicite, mais ce tri local garde
+    # le contrat chronologique si une implémentation/proxy renvoie les lignes
+    # dans un ordre inattendu.
+    return sorted(q.execute().data, key=lambda row: row["snapshot_date"])
+
+
+def upsert_player_snapshot(snapshot_date: str, player_tag: str, name: str, trophies: int) -> None:
+    """Enregistre le point quotidien d'un compte Discord lié.
+
+    Cette variante du sync de clan réutilise les mêmes tables. Elle n'écrit
+    volontairement pas ``club_tag`` : un lien Discord ne doit jamais effacer
+    l'appartenance à un clan déjà connue par le tracking de famille.
+    """
+    clean_tag = player_tag.strip().lstrip("#").upper()
+    if not clean_tag:
+        return
+    client = get_client()
+    client.table("bs_players").upsert({"tag": clean_tag, "name": name or "?"}).execute()
+    client.table("bs_trophy_snapshots").upsert(
+        {"player_tag": clean_tag, "snapshot_date": snapshot_date, "trophies": int(trophies)},
+        on_conflict="player_tag,snapshot_date",
+    ).execute()
 
 
 _PAGE_SIZE = 1000
