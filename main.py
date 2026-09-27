@@ -6228,34 +6228,91 @@ async def cmd_duel(ctx, member: discord.Member, mise: str):
     await ctx.send(embed=embed)
 
 
+def _lb_number(value, default=0):
+    """Convertit une valeur legacy JSON en nombre utilisable par !lb."""
+    try:
+        number = float(value)
+        if not math.isfinite(number):
+            return default
+        return int(number) if number.is_integer() else number
+    except (TypeError, ValueError):
+        return default
+
+
+def _lb_crypto_value(holdings):
+    if not isinstance(holdings, dict):
+        return 0
+    total = 0
+    for symbol, quantity in holdings.items():
+        qty = _lb_number(quantity)
+        price = _lb_number(crypto_prices.get(symbol, 0))
+        if qty > 0.000001 and price > 0:
+            total += qty * price
+    return total
+
+
+def _lb_cold_value(wallet):
+    if not isinstance(wallet, dict):
+        return 0
+    total = 0
+    for symbol, batches in wallet.items():
+        if isinstance(batches, dict):
+            batches = [batches]
+        if not isinstance(batches, list):
+            continue
+        price = _lb_number(crypto_prices.get(symbol, 0))
+        for batch in batches:
+            if not isinstance(batch, dict):
+                continue
+            qty = _lb_number(batch.get('qty', 0))
+            if qty > 0.000001 and price > 0:
+                total += qty * price
+    return total
+
+
 @bot.hybrid_command(name="classement", aliases=["top", "leaderboard", "lb"])
 async def cmd_classement(ctx):
-    guild_members = {m.id for m in ctx.guild.members if not m.bot}
-    totals = []
-    for uid in guild_members:
-        uid_str = str(uid)
-        cash    = coins.get(uid, 0)
-        coffre  = safes.get(uid_str, 0)
-        crypto  = sum(q * crypto_prices.get(s, 0) for s, q in crypto_holdings.get(uid_str, {}).items() if q > 0.000001)
-        cold    = sum(b['qty'] * crypto_prices.get(s, 0) for s, bl in cold_wallets.get(uid_str, {}).items() for b in bl if b.get('qty', 0) > 0.000001)
-        totals.append((uid, cash + coffre + int(crypto + cold), cash, coffre, int(crypto), int(cold)))
-    top = sorted(totals, key=lambda x: x[1], reverse=True)[:10]
-    if not top:
-        await ctx.send("Aucun joueur avec des coins sur ce serveur."); return
-    medals = ['🥇','🥈','🥉'] + ['🔹'] * 7
-    lines  = []
-    for i, (uid, total, cash, coffre, crypto_v, cold_v) in enumerate(top):
-        m    = ctx.guild.get_member(uid)
-        name = m.display_name if m else f"<@{uid}>"
-        parts = [f"💵 {cash:,}", f"🔒 {coffre:,}"]
-        if crypto_v > 0:
-            parts.append(f"📈 {crypto_v:,}")
-        if cold_v > 0:
-            parts.append(f"🔐 {cold_v:,}")
-        lines.append(f"{medals[i]} **{name}** — {total:,} coins *({' + '.join(parts)})*")
-    embed = discord.Embed(title="🏆 Classement des Coins", description='\n'.join(lines), color=0xf1c40f)
-    embed.set_footer(text="💵 Cash · 🔒 Coffre · 📈 Crypto chaud · 🔐 Cold Wallet")
-    await ctx.send(embed=embed)
+    logging.info("[LB] command invoked")
+    try:
+        if ctx.guild is None:
+            logging.warning("[LB] no guild in command context")
+            return await ctx.send("❌ Cette commande doit être utilisée dans un serveur.")
+
+        guild_members = {m.id for m in ctx.guild.members if not m.bot}
+        logging.info("[LB] guild=%s members=%d", ctx.guild.id, len(guild_members))
+        totals = []
+        for uid in guild_members:
+            uid_str = str(uid)
+            cash = _lb_number(coins.get(uid, 0))
+            coffre = _lb_number(safes.get(uid_str, 0))
+            crypto = _lb_crypto_value(crypto_holdings.get(uid_str, {}))
+            cold = _lb_cold_value(cold_wallets.get(uid_str, {}))
+            totals.append((uid, cash + coffre + int(crypto + cold), cash, coffre, int(crypto), int(cold)))
+        logging.info("[LB] eligible_players=%d economic_records=%d", len(guild_members), len(totals))
+
+        top = sorted(totals, key=lambda x: x[1], reverse=True)[:10]
+        if not top:
+            logging.info("[LB] ranking_generated=0")
+            return await ctx.send("Aucun joueur avec des coins sur ce serveur.")
+
+        medals = ['🥇','🥈','🥉'] + ['🔹'] * 7
+        lines = []
+        for i, (uid, total, cash, coffre, crypto_v, cold_v) in enumerate(top):
+            m = ctx.guild.get_member(uid)
+            name = m.display_name if m else f"<@{uid}>"
+            parts = [f"💵 {cash:,}", f"🔒 {coffre:,}"]
+            if crypto_v > 0:
+                parts.append(f"📈 {crypto_v:,}")
+            if cold_v > 0:
+                parts.append(f"🔐 {cold_v:,}")
+            lines.append(f"{medals[i]} **{name}** — {total:,} coins *({' + '.join(parts)})*")
+        embed = discord.Embed(title="🏆 Classement des Coins", description='\n'.join(lines), color=0xf1c40f)
+        embed.set_footer(text="💵 Cash · 🔒 Coffre · 📈 Crypto chaud · 🔐 Cold Wallet")
+        logging.info("[LB] ranking_generated=%d sending_response", len(top))
+        await ctx.send(embed=embed)
+    except Exception:
+        logging.exception("[LB] command failed")
+        await ctx.send("❌ Impossible de générer le classement pour le moment. Le problème a été enregistré.")
 
 
 async def _poker_end_if_one_left(channel, guild, game, gid):
